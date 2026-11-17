@@ -5,6 +5,8 @@
   <key>CFBundleName</key><string>VocalCord</string>
   <key>CFBundleExecutable</key><string>VocalCord</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>LSUIElement</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>VocalCord records voice takes and breaths for your voiceovers.</string>
+  <key>CFBundleShortVersionString</key><string>0.4</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>NSMicrophoneUsageDescription</key><string>VocalCord records your voice to clone it.</string>
 </dict></plist>

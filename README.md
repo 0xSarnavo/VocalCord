@@ -1,52 +1,30 @@
 # VocalCord
 
-A macOS menu bar app for making voiceovers in your own voice. It renders on your
-Mac with the Breeze TTS 2 MLX model. A full rewrite is planned in
-[docs/PLAN.md](docs/PLAN.md).
+A Mac app for making voiceovers in your own cloned voices. It renders on your
+Mac with the Breeze TTS 2 MLX model. The full plan is in
+[docs/PLAN.md](docs/PLAN.md); Clone is built, Generate comes next.
 
 ## Build and run
 
-Requires macOS 26 or later, Xcode command line tools, ffmpeg, and Breeze TTS 2
-installed under `~/voice` (Python in `~/voice/venv`, models in `~/voice/models`).
-Run `./build.sh`, then open `VocalCord.app`. Launch with `--video-window` or
-`--library-window` to open a window straight away.
+Requires macOS 26 or later and Xcode 26. Run `./build.sh`, then open
+`VocalCord.app`. `swift test` runs the tests.
 
 The local Breeze weights and their outputs are licensed for **research and
 noncommercial use only**; use VocalCord for personal, nonmonetized videos. See
 the [model license](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE).
 
-## Video voiceover
+## Clone
 
-Open **VocalCord → Video voiceover…** from the menu bar. Paste your script and
-choose **Directed voiceover** to follow the direction tags, or **Compare styles**
-to render the same words in neutral, confident, sad, and happy voices. Compare
-mode keeps pauses and recorded breaths but replaces the direction tags. Each
-result gets its own **Play** and **Show** buttons.
+**New voice** offers a Fast clone (one 10–20 second clip) or a Full clone (a
+guided session you can pause and resume). Each voice page lists its takes by
+tone, with play, transcript, length, score and the main take per tone, plus a
+Pronunciations list. Until the engine is connected, transcripts, renders and
+scores are placeholders.
 
-The 8-bit model is the default; choose 4-bit for a faster render. The sliders set
-direction strength, final loudness, and the length added by the **Pause** button.
-Results go to `~/Movies/VocalCord` with matching `.json` timing files. The model
-loads only while rendering and is never downloaded again.
-
-You can pick a saved voice. A section tagged `[sad]`, for example, uses that
-voice's sad take when it has one; other sections use the current reference.
-Style labels only choose reference recordings; Breeze still uses one reference
-and its exact transcript per section.
-
-## Voice library
-
-Open **VocalCord → Voice library…** to listen to your reference voice, create a
-voice from your own recording, or add takes to an existing voice. Record or
-import 3–60 seconds of audio and enter the exact words spoken; **Edit words**
-fixes them later. Takes and transcripts live in
-`~/Library/Application Support/VocalCord/Voices`. Voices from the app's old data
-folder are copied there on first launch.
-
-Label each take as neutral, confident, happy, sad, angry, soft, slow, or
-hesitant. **Clean selected take** makes a denoised, normalized copy and keeps the
-original. To compare takes, select one, enter a test line, and choose **Generate
-comparison**: Current and New take render with one model load. Test files go to
-`~/Movies/VocalCord/Voice tests`. **Use** makes a take the current reference.
+Voices live in `~/Library/Application Support/VocalCord/Voices`: `voices.json`
+plus one folder per voice holding its take WAVs, with every other recording
+kept in `raw/`. Voices from the old `library.json` are copied over on first
+launch; the old files are left as they are.
 
 ## Script tags
 
@@ -67,11 +45,9 @@ Put tags before each part, on separate lines or within one line:
 - `[breath]` inserts a recorded inhale. Record one in the app or choose a short
   WAV (0.05–2 seconds).
 
-The script editor has buttons for these tags.
-
 ## directed_voice.py
 
-The renderer behind both windows also runs from the command line:
+The renderer also runs from the command line:
 
 ```sh
 ~/voice/venv/bin/python directed_voice.py \
