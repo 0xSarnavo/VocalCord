@@ -7,3 +7,5 @@ docs/mockups/direction-*.png
 engine/.venv/
 .pytest_cache/
 .build/
+assets/logo/concepts/
+assets/logo/AppIcon.iconset/
