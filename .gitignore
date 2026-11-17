@@ -1,5 +1,3 @@
-.venv-video/
-vendor/
 samples/
 .build-cache/
 VoiceDesk.app/

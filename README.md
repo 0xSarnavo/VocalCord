@@ -31,39 +31,10 @@ app never falls back to cloud speech recognition. The app uses the macOS system
 voice for low-latency spoken replies on an 8 GB Mac. Web answers also appear in
 a window.
 
-## Clone your voice for videos
-
-`video_voice.py` is a separate, on-demand offline renderer using
-[LuxTTS](https://github.com/ysharma3501/LuxTTS). The model loads only while
-rendering; it does not stay in memory with the assistant. Use a clean WAV or MP3
-recording of yourself speaking for at least three seconds. It also needs ffmpeg
-to set the output volume.
-
-The included private reference `samples/reference.wav` is a 10.6
-second clip of your own voice.
-The `samples/` folder is ignored by Git. The comparison files in that folder
-contain an original excerpt from later in the same video and a clone speaking
-its transcript. Listen to both before using the clone in a video.
-
-Run `./setup_video_voice.sh` once to create an isolated Python environment and
-download LuxTTS and its Whisper transcriber. They stay in the Hugging Face disk
-cache on this Mac. Later renders load them into memory on demand and run with
-network access disabled. Then run:
-
-```sh
-.venv-video/bin/python video_voice.py --reference samples/reference.wav \
-  --text "Welcome to my video." --output narration.wav
-```
-
-The renderer uses up to 12 seconds of the reference by default and normalizes
-output to -16 LUFS. Use `--reference-seconds` to adjust the reference length,
-or `--lufs` to adjust the output volume.
-The assistant works without the video model.
-
 ## Direct each part of a video
 
-`directed_voice.py` uses the already installed Breeze TTS 2 MLX model and the
-same private voice reference. It loads the model only while rendering. The
+`directed_voice.py` uses the already installed Breeze TTS 2 MLX model and your
+private voice reference. It loads the model only while rendering. The
 locally installed Breeze weights and their outputs are licensed for **research
 and noncommercial use only**; use this renderer for personal, nonmonetized
 videos. See the [model license](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE).
