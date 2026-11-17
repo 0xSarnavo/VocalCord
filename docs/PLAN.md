@@ -156,8 +156,9 @@ The exact models are chosen during the engine milestone and must fit in 8 GB.
   Exports: `~/Movies/VocalCord`.
 - First run checks the Mac and free disk space (about 7 GB), installs Python
   packages with uv, and downloads Breeze, Whisper, and the scoring models, with
-  progress shown. Breeze comes in Best quality (8-bit, 4.3 GB, default) or Fast
-  (4-bit, 2.8 GB); Settings can switch later.
+  progress shown. Breeze comes in Fast (4-bit, 2.8 GB, default) or Best quality
+  (8-bit, 4.3 GB); Settings can switch later. Fast renders a line 3–5 times
+  quicker on an 8 GB Mac and scores almost the same on Like you.
 
 ## Distribution
 

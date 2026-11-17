@@ -80,7 +80,7 @@ protocol Engine: Sendable {
 enum EngineSettings {
     static let modelKey = "model"
     /// Breeze 8-bit until the user decides otherwise.
-    static let defaultModel = "8bit"
+    static let defaultModel = "4bit"
     static var model: String { UserDefaults.standard.string(forKey: modelKey) ?? defaultModel }
 }
 
