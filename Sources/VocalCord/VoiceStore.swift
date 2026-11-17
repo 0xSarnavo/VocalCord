@@ -18,6 +18,8 @@ struct Take: Codable, Identifiable, Hashable, Sendable {
     var score: Double?
     var issues: [AudioIssue]
     var createdAt: Date
+    /// The take's own Human score, the bar its renders are compared with in Generate.
+    var human: Double?
 }
 
 struct Pronunciation: Codable, Identifiable, Hashable, Sendable {
@@ -48,6 +50,13 @@ struct Voice: Codable, Identifiable, Hashable, Sendable {
         let group = takes(tone)
         return group.first { $0.id == mains[tone] } ?? group.first
     }
+
+    /// The reference for a render in `tone`: that tone's main take, else the Neutral one (or any) with a written direction.
+    func reference(_ tone: String) -> Take? { mainTake(tone) ?? mainTake("Neutral") ?? takes.first }
+
+    var pronunciationMap: [String: String] {
+        Dictionary(pronunciations.map { ($0.word, $0.respelling) }) { first, _ in first }
+    }
 }
 
 /// Voices live in `Voices/voices.json`, with each take at `Voices/<voice>/<take>.wav`.
@@ -67,7 +76,7 @@ final class VoiceStore {
     private var indexURL: URL { root.appending(path: "voices.json") }
     private let files = FileManager.default
 
-    init(root: URL = VoiceStore.defaultRoot, engine: any Engine = FakeEngine()) {
+    init(root: URL = VoiceStore.defaultRoot, engine: any Engine) {
         self.root = root
         self.engine = engine
         do {
@@ -246,6 +255,12 @@ final class VoiceStore {
 
     func setMain(_ take: Take, voiceID: String) { update(voiceID) { $0.mains[take.tone] = take.id } }
 
+    func setHuman(_ human: Double, takeID: String, voiceID: String) {
+        update(voiceID) { voice in
+            if let index = voice.takes.firstIndex(where: { $0.id == takeID }) { voice.takes[index].human = human }
+        }
+    }
+
     // MARK: Pronunciations
 
     func addPronunciation(word: String, respelling: String, voiceID: String) {
@@ -271,19 +286,19 @@ final class VoiceStore {
                 .prefix(5)
         }
         let total = Double(candidates.count)
-        let pronunciations = Dictionary(voice.pronunciations.map { ($0.word, $0.respelling) }) { first, _ in first }
         let temp = files.temporaryDirectory.appending(path: "VocalCord-\(UUID().uuidString)", directoryHint: .isDirectory)
         try files.createDirectory(at: temp, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: temp) }
         for (index, take) in candidates.enumerated() {
-            try await engine.renderAuditionLine(Self.auditionLine, tone: take.tone, reference: audioURL(take, voiceID: voiceID),
-                                                referenceText: take.transcript, pronunciations: pronunciations,
-                                                to: temp.appending(path: "\(take.id).wav")) { progress((Double(index) + $0) / total * 0.8) }
+            let line = RenderLine(text: Self.auditionLine, tone: take.tone, reference: audioURL(take, voiceID: voiceID),
+                                  referenceText: take.transcript, pronunciations: voice.pronunciationMap)
+            _ = try await engine.render(line, to: temp.appending(path: "\(take.id).wav")) { progress((Double(index) + $0) / total * 0.8) }
         }
         var scores: [String: Double] = [:]
         for (index, take) in candidates.enumerated() {
-            scores[take.id] = try await engine.score(temp.appending(path: "\(take.id).wav"),
-                                                     reference: audioURL(take, voiceID: voiceID), text: Self.auditionLine)
+            let result = try await engine.score(temp.appending(path: "\(take.id).wav"), reference: audioURL(take, voiceID: voiceID),
+                                                text: Self.auditionLine, hints: voice.pronunciations.map(\.word))
+            scores[take.id] = Double(result.likeYou) / 100
             progress(0.8 + Double(index + 1) / total * 0.2)
         }
         update(voiceID) { voice in

@@ -2,7 +2,8 @@ import SwiftUI
 
 @main
 struct VocalCordApp: App {
-    @State private var store = VoiceStore()
+    @State private var store = VoiceStore(engine: EngineClient())
+    @State private var projects = ProjectStore()
     @State private var player = Player()
     @State private var waveforms = Waveforms()
 
@@ -10,6 +11,7 @@ struct VocalCordApp: App {
         Window("VocalCord", id: "main") {
             RootView()
                 .environment(store)
+                .environment(projects)
                 .environment(player)
                 .environment(waveforms)
         }
@@ -21,18 +23,19 @@ struct VocalCordApp: App {
     }
 }
 
-enum Mode: Hashable { case clone, generate }
+enum Mode: String { case clone, generate }
 
 struct RootView: View {
     @Environment(VoiceStore.self) private var store
+    @Environment(ProjectStore.self) private var projects
     @Environment(\.openSettings) private var openSettings
-    @State private var mode = Mode.clone
+    @AppStorage("mode") private var mode = Mode.clone
 
     var body: some View {
         Group {
             switch mode {
             case .clone: CloneView()
-            case .generate: Theme.content.ignoresSafeArea()
+            case .generate: GenerateView()
             }
         }
         .toolbar {
@@ -58,11 +61,14 @@ struct RootView: View {
         .alert(store.error ?? "", isPresented: Binding(present: Bindable(store).error)) {
             Button("OK") {}
         }
+        .alert(projects.error ?? "", isPresented: Binding(present: Bindable(projects).error)) {
+            Button("OK") {}
+        }
     }
 }
 
 struct SettingsView: View {
-    @AppStorage("model") private var model = "8bit"
+    @AppStorage(EngineSettings.modelKey) private var model = EngineSettings.defaultModel
 
     var body: some View {
         Form {

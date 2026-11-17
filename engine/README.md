@@ -51,7 +51,7 @@ naturalness; NISQA has non-commercial weights; UTMOSv2 needs PyTorch.
 - `words` = (1 − WER) × 100, floored at 0, after lowercasing, dropping
   punctuation, `[tags]` and `(cues)`, and spelling out numbers. It compares the
   script as written, so a respelled brand name Whisper writes differently
-  ("Kuber" heard as "Cougar") costs a word.
+  ("Kuber" heard as "Cougar") costs a word, unless the app passes it in `hints`.
 
 Clone vs other speaker, same three lines, rendered by the engine (8-bit unless noted):
 

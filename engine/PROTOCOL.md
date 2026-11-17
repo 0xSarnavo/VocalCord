@@ -161,7 +161,8 @@ between chunks and clips.
 
 ```json
 {"id": 8, "cmd": "score", "audio": "/Users/me/Movies/VocalCord/intro.wav", "start": 0.0, "end": 2.96,
- "reference": "/Users/me/voices/me/neutral.wav", "text": "Kuber keeps every savings circle honest."}
+ "reference": "/Users/me/voices/me/neutral.wav", "text": "Kuber keeps every savings circle honest.",
+ "hints": ["Kuber"]}
 {"id": 8, "event": "result", "like_you": 74, "human": 3.01, "words": 67,
  "heard": "Kubler keeps every saving circle honest.", "similarity": 0.6927}
 ```
@@ -169,6 +170,9 @@ between chunks and clips.
 - `start`/`end` (optional) score one line of a longer render, from the render's timing.
 - `reference` is the line's voice take; `text` is the script line as written
   (not respelled). Tags in `[]` and cues in `()` are ignored.
+- `hints` (optional): words Whisper should expect, added to its initial prompt.
+  Pass the voice's pronunciation words (as written, such as `Kuber`) so a
+  respelled render is heard with the script's spelling.
 - `like_you` 0–100: speaker similarity. `similarity` is the raw cosine;
   `like_you = clamp((similarity − 0.25) / (0.85 − 0.25)) × 100` (see README).
 - `human` 1.0–5.0: predicted naturalness (UTMOS).

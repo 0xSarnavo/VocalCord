@@ -2,12 +2,17 @@
 
 A Mac app for making voiceovers in your own cloned voices. It renders on your
 Mac with the Breeze TTS 2 MLX model. The full plan is in
-[docs/PLAN.md](docs/PLAN.md); Clone is built, Generate comes next.
+[docs/PLAN.md](docs/PLAN.md); Clone and Generate's script and rendering are
+built; preview, outputs and export come next.
 
 ## Build and run
 
-Requires macOS 26 or later and Xcode 26. Run `./build.sh`, then open
-`VocalCord.app`. `swift test` runs the tests.
+Requires macOS 26 or later and Xcode 26. Set up the engine first (see
+[engine/README.md](engine/README.md)), run `./build.sh`, then open
+`VocalCord.app`. The app starts the engine from `engine/` next to
+`VocalCord.app`, or from `VOCALCORD_ENGINE_DIR`. `swift test` runs the tests;
+`VOCALCORD_E2E=1 swift test --filter realEngine` renders two lines with the real
+engine.
 
 The local Breeze weights and their outputs are licensed for **research and
 noncommercial use only**; use VocalCord for personal, nonmonetized videos. See
@@ -18,13 +23,22 @@ the [model license](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LIC
 **New voice** offers a Fast clone (one 10–20 second clip) or a Full clone (a
 guided session you can pause and resume). Each voice page lists its takes by
 tone, with play, transcript, length, score and the main take per tone, plus a
-Pronunciations list. Until the engine is connected, transcripts, renders and
-scores are placeholders.
+Pronunciations list.
 
 Voices live in `~/Library/Application Support/VocalCord/Voices`: `voices.json`
 plus one folder per voice holding its take WAVs, with every other recording
 kept in `raw/`. Voices from the old `library.json` are copied over on first
 launch; the old files are left as they are.
+
+## Generate
+
+Each project is a script of lines, each with its text, voice, tone and pause.
+Paste or import `.txt` or `.md` to split it into lines. **Render** renders every
+line whose text, voice or tone has no version yet, then scores them; the button at
+the end of a row adds a new version of that line. **Compare styles** renders
+lines in other tones as extra versions. Projects live in
+`~/Library/Application Support/VocalCord/Projects/<id>/`: `project.json` plus
+the renders in `renders/`.
 
 ## Script tags
 

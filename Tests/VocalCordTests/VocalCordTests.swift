@@ -4,14 +4,14 @@ import Synchronization
 import Testing
 @testable import VocalCord
 
-private func tempFolder() throws -> URL {
+func tempFolder() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(path: "VocalCordTests-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
 
 /// Half-second bursts of a tone at `amplitude`, separated by noise at `floor`.
-private func speechLike(seconds: Double, amplitude: Float, floor: Float, rate: Double = 24000) -> [Float] {
+func speechLike(seconds: Double, amplitude: Float, floor: Float, rate: Double = 24000) -> [Float] {
     (0..<Int(seconds * rate)).map { index in
         let time = Double(index) / rate
         let talking = Int(time * 2) % 2 == 0

@@ -18,12 +18,18 @@ SEARCH_S = 6.0
 PROMPT = "Hello, and welcome. Let's begin."
 
 
+def hint_prompt(hints: list[str]) -> str:
+    """PROMPT plus words Whisper should expect, such as names the script respells for Breeze."""
+    words = [hint.strip() for hint in hints if hint.strip()]
+    return f"{PROMPT} {', '.join(words)}." if words else PROMPT
+
+
 def load():
     from mlx_audio.stt import load as load_stt
     return load_stt(MODEL)
 
 
-def transcribe_array(model, samples: np.ndarray, words: bool = True, offset: float = 0.0) -> dict:
+def transcribe_array(model, samples: np.ndarray, words: bool = True, offset: float = 0.0, prompt: str = PROMPT) -> dict:
     """Transcribe 16 kHz mono float32 samples. Word times are shifted by `offset`."""
     if len(samples) < RATE // 10:
         return {"text": "", "words": []}
@@ -32,7 +38,7 @@ def transcribe_array(model, samples: np.ndarray, words: bool = True, offset: flo
         language="en",
         word_timestamps=words,
         condition_on_previous_text=False,
-        initial_prompt=PROMPT,
+        initial_prompt=prompt,
         hallucination_silence_threshold=2.0 if words else None,
         verbose=None,
     )

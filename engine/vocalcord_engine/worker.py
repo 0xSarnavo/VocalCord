@@ -183,13 +183,16 @@ class Engine:
         text = request.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text (the script line) is required")
+        hints = request.get("hints") or []
+        if not isinstance(hints, list) or not all(isinstance(hint, str) for hint in hints):
+            raise ValueError("hints must be a list of words")
         start, end = request.get("start"), request.get("end")
         render = audio.read_mono(_path(request, "audio"), scoring.RATE, start, end)
         reference = audio.read_mono(_path(request, "reference"), scoring.RATE)
         if len(render) < scoring.RATE // 2:
             raise ValueError("The audio to score is shorter than half a second")
         model = self._stt(job.progress)
-        heard = stt.transcribe_array(model, render, words=False)["text"]
+        heard = stt.transcribe_array(model, render, words=False, prompt=stt.hint_prompt(hints))["text"]
         similarity = self.scorer.similarity(render, reference)
         return {
             "like_you": scoring.like_you(similarity),
