@@ -4,3 +4,6 @@ VocalCord.app/
 __pycache__/
 .DS_Store
 docs/mockups/direction-*.png
+engine/.venv/
+.pytest_cache/
+.build/
