@@ -12,7 +12,7 @@ For: personal, non-commercial videos on an Apple Silicon Mac with macOS 26.
 **Voice list:** every voice with its tones and best score. **New voice** sits at
 the top. Click a voice to open its page.
 
-**New voice** offers two paths:
+**New voice** offers three paths:
 
 - **Fast clone:** one 10–20 second clip, recorded or uploaded. Whisper writes
   the transcript; you fix any wrong word.
@@ -29,6 +29,12 @@ the top. Click a voice to open its page.
   Natural voice takes about 8 minutes; each tone adds about 2. Any step also
   accepts uploaded audio or video of any length; Whisper cuts it into clips at
   natural pauses, and the clips join the audition.
+
+- **From a file:** drop in existing audio or video of any length, such as a
+  podcast or an old video. Whisper cuts it into clips with transcripts and
+  quality checks. If more than one person speaks, the clips are grouped by
+  speaker and you pick who to clone. You can untick bad clips, fix words, or
+  set a clip's tone; the audition then picks the main takes.
 
 **Voice page** holds everything for one voice:
 
@@ -96,6 +102,17 @@ The agent can call only these tools, served by VocalCord:
 
 Proposed changes appear in the script; you accept or reject each changed line.
 An agent can render, read the scores, fix a line, and check again.
+
+The Terminal button is in Clone too. There the agent works on the selected
+voice with three more tools:
+
+| Tool | Purpose |
+|---|---|
+| `get_takes` | The voice's takes: tone, transcript, length, score, warnings |
+| `propose_take_changes` | Suggest transcript fixes, tone labels, main takes, pronunciations |
+| `audition` | Run an audition and suggest the best take per tone |
+
+Its suggestions appear in the takes table for you to accept or reject.
 
 - **Claude Code:** built-in tools off and only VocalCord tools allowed. The
   user's settings, CLAUDE.md, and MCP servers are not loaded.
