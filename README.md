@@ -40,6 +40,18 @@ lines in other tones as extra versions. Projects live in
 `~/Library/Application Support/VocalCord/Projects/<id>/`: `project.json` plus
 the renders in `renders/`.
 
+## Terminal
+
+**Terminal** opens a panel under the script with a tab for each agent CLI found on
+your login shell's PATH: Claude Code, Codex and OpenCode. Each runs with your own
+sign-in but can use only VocalCord's tools (`get_voices`, `get_script`,
+`update_script`, `render_line`, `get_scores`, `check_script`), which reach the app
+through `vocalcord-mcp` and a socket in `~/Library/Application Support/VocalCord`.
+Changes an agent makes are proposals: accept or reject each line in the script.
+Claude Code skips your settings and CLAUDE.md. Codex runs read-only, with your MCP
+servers, plugins and hooks switched off, though it still reads `~/.codex/AGENTS.md`.
+OpenCode runs a VocalCord agent with its built-in tools off.
+
 ## Script tags
 
 Put tags before each part, on separate lines or within one line:

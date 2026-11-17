@@ -2,16 +2,24 @@ import SwiftUI
 
 @main
 struct VocalCordApp: App {
-    @State private var store = VoiceStore(engine: EngineClient())
-    @State private var projects = ProjectStore()
+    @State private var store: VoiceStore
+    @State private var projects: ProjectStore
     @State private var player: Player
     @State private var preview: Preview
     @State private var waveforms = Waveforms()
+    @State private var terminals: Terminals
 
     init() {
+        let store = VoiceStore(engine: EngineClient())
+        let projects = ProjectStore()
         let player = Player()
+        _store = State(initialValue: store)
+        _projects = State(initialValue: projects)
         _player = State(initialValue: player)
         _preview = State(initialValue: Preview(player: player))
+        // The agents' tools act on the project open in Generate.
+        let tools = ToolBridge(projects: projects, voices: store) { UserDefaults.standard.string(forKey: "project") }
+        _terminals = State(initialValue: Terminals(tools: tools))
     }
 
     var body: some Scene {
@@ -22,6 +30,7 @@ struct VocalCordApp: App {
                 .environment(player)
                 .environment(preview)
                 .environment(waveforms)
+                .environment(terminals)
         }
         .defaultSize(width: 1280, height: 800)
 

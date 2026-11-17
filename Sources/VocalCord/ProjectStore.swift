@@ -47,6 +47,8 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     var pauseAfter = 0.5
     var versions: [Version] = []
     var chosen: String?
+    /// A change a terminal agent proposed, waiting for the user to accept or reject it.
+    var proposal: Proposal?
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
 
@@ -55,6 +57,17 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !versions.contains { $0.text == text && $0.voiceID == voiceID && $0.tone == tone }
     }
+}
+
+/// A line's text, tone and pause as an agent proposes them.
+struct Proposal: Codable, Hashable, Sendable {
+    var text: String
+    var tone: String
+    var pauseAfter: Double
+}
+
+extension Proposal {
+    init(_ line: Line) { self.init(text: line.text, tone: line.tone, pauseAfter: line.pauseAfter) }
 }
 
 /// A video to watch the voiceover over. Only its path is kept; the file stays where it is.
@@ -117,7 +130,7 @@ final class ProjectStore {
 
     let root: URL
     let exportsRoot: URL
-    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var task: Task<Void, Error>?
     private let files = FileManager.default
 
     init(root: URL = ProjectStore.defaultRoot, exportsRoot: URL = ProjectStore.defaultExports) {
@@ -240,6 +253,44 @@ final class ProjectStore {
 
     func setVideo(_ video: Video?, in projectID: String) { update(projectID) { $0.video = video } }
 
+    // MARK: Proposals
+
+    /// Sets a line's pending change; one that matches the line as it is clears it. Returns whether a change is pending.
+    @discardableResult
+    func propose(_ proposal: Proposal, line lineID: String, in projectID: String) -> Bool {
+        var pending = false
+        updateLine(projectID, lineID) { line in
+            pending = proposal != Proposal(line)
+            line.proposal = pending ? proposal : nil
+        }
+        return pending
+    }
+
+    /// Applies the lines' pending changes. A version already rendered for a line's new text and tone becomes its chosen one;
+    /// otherwise the line needs a render.
+    func accept(_ lineIDs: [String], in projectID: String) {
+        update(projectID) { project in
+            for index in project.lines.indices where lineIDs.contains(project.lines[index].id) {
+                guard let proposal = project.lines[index].proposal else { continue }
+                var line = project.lines[index]
+                line.text = proposal.text
+                line.tone = proposal.tone
+                line.pauseAfter = proposal.pauseAfter
+                line.proposal = nil
+                if let match = line.versions.last(where: { $0.text == line.text && $0.voiceID == line.voiceID && $0.tone == line.tone }) {
+                    line.chosen = match.id
+                }
+                project.lines[index] = line
+            }
+        }
+    }
+
+    func reject(_ lineIDs: [String], in projectID: String) {
+        update(projectID) { project in
+            for index in project.lines.indices where lineIDs.contains(project.lines[index].id) { project.lines[index].proposal = nil }
+        }
+    }
+
     // MARK: Outputs
 
     /// Every render and export, newest first.
@@ -307,6 +358,8 @@ final class ProjectStore {
         var tone: String
         /// Make the new version the line's chosen one.
         var choose: Bool
+        /// Text other than the line's own, such as a pending change.
+        var text: String?
     }
 
     /// Every line with text that has no version for its current text, voice and tone.
@@ -326,19 +379,35 @@ final class ProjectStore {
         start(lineIDs.flatMap { id in tones.map { Job(lineID: id, tone: $0, choose: false) } }, in: projectID, voices: voices)
     }
 
+    /// A new version of one line, scored. A line with a pending change renders that change, and the version waits
+    /// unchosen until the change is accepted. Nil while another render runs.
+    func renderLine(_ lineID: String, in projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
+        guard let line = project(projectID)?.lines.first(where: { $0.id == lineID }) else { return nil }
+        let job = line.proposal.map { Job(lineID: line.id, tone: $0.tone, choose: false, text: $0.text) }
+            ?? Job(lineID: line.id, tone: line.tone, choose: true)
+        return start([job], in: projectID, voices: voices)
+    }
+
     func cancel() { task?.cancel() }
 
-    private func start(_ jobs: [Job], in projectID: String, voices: VoiceStore) {
-        guard task == nil, !jobs.isEmpty else { return }
+    /// The returned task fails with the render's error, which also shows in the app.
+    @discardableResult
+    private func start(_ jobs: [Job], in projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
+        guard task == nil, !jobs.isEmpty else { return nil }
         progress = 0
-        task = Task {
-            do { try await run(jobs, in: projectID, voices: voices) } catch is CancellationError {} catch {
-                self.error = "Render failed. \(error.localizedDescription)"
+        let task = Task {
+            defer {
+                progress = nil
+                renderingLine = nil
+                self.task = nil
             }
-            progress = nil
-            renderingLine = nil
-            task = nil
+            do { try await run(jobs, in: projectID, voices: voices) } catch is CancellationError { throw CancellationError() } catch {
+                self.error = "Render failed. \(error.localizedDescription)"
+                throw error
+            }
         }
+        self.task = task
+        return task
     }
 
     /// Renders every job first, then scores them all, so the engine swaps Breeze for Whisper once.
@@ -353,14 +422,15 @@ final class ProjectStore {
             try Task.checkCancellation()
             guard let lines = project(projectID)?.lines, let number = lines.firstIndex(where: { $0.id == job.lineID }) else { continue }
             let line = lines[number]
+            let text = job.text ?? line.text
             guard let voice = voices.voice(line.voiceID) else { throw AppError("Choose a voice for line \(number + 1).") }
             guard let take = voice.reference(job.tone) else { throw AppError("\u{201C}\(voice.name)\u{201D} has no takes. Add one in Clone.") }
-            var version = Version(id: UUID().uuidString, text: line.text, voiceID: voice.id, tone: job.tone,
+            var version = Version(id: UUID().uuidString, text: text, voiceID: voice.id, tone: job.tone,
                                   direction: take.tone != job.tone, seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
             renderingLine = line.id
             let start = done
             version.duration = try await engine.render(
-                RenderLine(text: line.text, tone: job.tone, reference: voices.audioURL(take, voiceID: voice.id),
+                RenderLine(text: text, tone: job.tone, reference: voices.audioURL(take, voiceID: voice.id),
                            referenceText: take.transcript, pronunciations: voice.pronunciationMap, seed: version.seed),
                 to: audioURL(version, projectID: projectID)
             ) { value in Task { @MainActor in if self.progress != nil { self.progress = (start + value * 10) / steps } } }

@@ -10,6 +10,8 @@ struct GenerateView: View {
     @State private var name = ""
     @State private var deleting: String?
     @State private var exporting = false
+    @AppStorage("terminalOpen") private var terminalOpen = false
+    @AppStorage("terminalHeight") private var terminalHeight = 300.0
 
     /// The New project and Rename alerts share one text field.
     private enum NameRequest: Identifiable {
@@ -29,7 +31,17 @@ struct GenerateView: View {
                 if let project = projects.project(selection) {
                     let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
                     HStack(spacing: 0) {
-                        ScriptPane(project: project).id(project.id)
+                        GeometryReader { proxy in
+                            VStack(spacing: 0) {
+                                ScriptPane(project: project).id(project.id)
+                                if terminalOpen {
+                                    // The script keeps room for its header and a few lines.
+                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 230)
+                                        .padding(.leading, 8)
+                                        .padding(.bottom, 8)
+                                }
+                            }
+                        }
                         VStack(spacing: 8) {
                             PreviewPane(project: project)
                             OutputsPane(project: project).id(project.id)
@@ -71,9 +83,11 @@ struct GenerateView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        // shortcut: placeholder until the Terminal panel lands in milestone 7.
         ToolbarItem(placement: .primaryAction) {
-            Button("Terminal") {}.buttonStyle(.outline(height: 32))
+            Button("Terminal") { terminalOpen.toggle() }
+                .buttonStyle(.outline(height: 32))
+                .background(terminalOpen ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
+                .accessibilityAddTraits(terminalOpen ? .isSelected : [])
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .primaryAction) {
@@ -166,9 +180,14 @@ struct ScriptPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("Script").font(.system(size: 22, weight: .bold))
                 Spacer()
+                let pending = project.lines.filter { $0.proposal != nil }.map(\.id)
+                if pending.count > 1 {
+                    Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline(height: 28))
+                    Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline(height: 28))
+                }
                 Button("Compare styles…") { comparing = renderable.map(\.id) }
                     .buttonStyle(.outline(height: 28))
                     .disabled(renderable.isEmpty || projects.progress != nil)
@@ -261,12 +280,20 @@ struct LineRow: View {
     var body: some View {
         let version = line.chosenVersion
         let scores = version?.scores
+        // A pending change takes room from the version cell for its Accept and Reject buttons.
+        let decision: CGFloat = line.proposal == nil ? 0 : 22
         HStack(spacing: 0) {
             Text("\(number)").frame(width: Column.number)
-            TextField("Text", text: Binding(get: { line.text }, set: { projects.setText($0, line: line.id, in: projectID) }), axis: .vertical)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if let proposal = line.proposal {
+                    ProposalText(line: line, proposal: proposal)
+                } else {
+                    TextField("Text", text: Binding(get: { line.text }, set: { projects.setText($0, line: line.id, in: projectID) }), axis: .vertical)
+                        .textFieldStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             voiceMenu.frame(width: Column.voice)
             toneMenu.frame(width: Column.tone)
             pauseField.frame(width: Column.pause)
@@ -275,8 +302,18 @@ struct LineRow: View {
             ScoreCell(value: scores.map { String(format: "%.1f", $0.human) }, flag: version?.humanFlag).frame(width: Column.human)
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
-            versionControl.frame(width: Column.version)
-            rerenderButton.frame(width: Column.gutter)
+            versionControl.frame(width: Column.version - decision)
+            Group {
+                if line.proposal != nil {
+                    HStack(spacing: 2) {
+                        decisionButton("checkmark", help: "Accept", label: "Accept change to line \(number)") { projects.accept([line.id], in: projectID) }
+                        decisionButton("xmark", help: "Reject", label: "Reject change to line \(number)") { projects.reject([line.id], in: projectID) }
+                    }
+                } else {
+                    rerenderButton
+                }
+            }
+            .frame(width: Column.gutter + decision)
         }
         .font(.system(size: 14).monospacedDigit())
         .padding(.horizontal, 6)
@@ -339,18 +376,20 @@ struct LineRow: View {
     }
 
     /// The label plays the chosen version; the chevron picks another, which then plays.
+    /// A pending change narrows the cell, so it gets smaller type.
     @ViewBuilder private var versionControl: some View {
+        let compact = line.proposal != nil
         if let version = line.chosenVersion, let index = line.versions.firstIndex(of: version) {
             let url = projects.audioURL(version, projectID: projectID)
             HStack(spacing: 0) {
                 Button { player.toggle(url) } label: {
                     HStack(spacing: 4) {
-                        Text("v\(index + 1) of \(line.versions.count)").lineLimit(1)
+                        Text("v\(index + 1) of \(line.versions.count)").lineLimit(1).minimumScaleFactor(0.8)
                         if version.direction {
                             Image(systemName: "text.bubble").font(.system(size: 10)).foregroundStyle(Theme.secondary)
                         }
                     }
-                    .padding(.leading, 8)
+                    .padding(.leading, compact ? 6 : 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     .contentShape(.rect)
                 }
@@ -369,7 +408,7 @@ struct LineRow: View {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Theme.secondary)
-                        .frame(width: 22, height: 28)
+                        .frame(width: compact ? 14 : 22, height: 28)
                         .contentShape(.rect)
                 }
                 .menuStyle(.button)
@@ -377,11 +416,11 @@ struct LineRow: View {
                 .menuIndicator(.hidden)
                 .accessibilityLabel("Versions")
             }
-            .font(.system(size: 13).monospacedDigit())
+            .font(.system(size: compact ? 11 : 13).monospacedDigit())
             .frame(height: 28)
             .background(player.playing == url ? Theme.selection : .clear, in: .rect(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-            .padding(.horizontal, 4)
+            .padding(.horizontal, compact ? 2 : 4)
         } else {
             Text("–").foregroundStyle(Theme.secondary).padding(.horizontal, 12).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -389,6 +428,19 @@ struct LineRow: View {
 
     private func versionTitle(_ version: Version, _ index: Int) -> String {
         (["v\(index + 1)", version.tone] + (version.direction ? ["direction"] : [])).joined(separator: " · ")
+    }
+
+    private func decisionButton(_ icon: String, help: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 24, height: 28)
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(label)
     }
 
     @ViewBuilder private var rerenderButton: some View {
@@ -408,6 +460,32 @@ struct LineRow: View {
             .accessibilityLabel("Render line \(number) again")
         }
     }
+}
+
+/// A line's pending change: the old text struck through above the new, and any tone or pause change.
+private struct ProposalText: View {
+    let line: Line
+    let proposal: Proposal
+
+    var body: some View {
+        let changes = [
+            proposal.tone == line.tone ? nil : "\(line.tone) → \(proposal.tone)",
+            proposal.pauseAfter == line.pauseAfter ? nil : "\(seconds(line.pauseAfter)) → \(seconds(proposal.pauseAfter))",
+        ].compactMap(\.self)
+        VStack(alignment: .leading, spacing: 3) {
+            if proposal.text != line.text {
+                Text(line.text).strikethrough().foregroundStyle(Theme.secondary)
+            }
+            Text(proposal.text)
+            if !changes.isEmpty {
+                Text(changes.joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel((["Proposed: \(proposal.text)"] + (proposal.text == line.text ? [] : ["was: \(line.text)"]) + changes).joined(separator: ", "))
+    }
+
+    private func seconds(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...2))) + "s" }
 }
 
 /// A menu's label: title and chevron in a thin outline.
