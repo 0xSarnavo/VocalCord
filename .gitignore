@@ -1,0 +1,7 @@
+.venv-video/
+vendor/
+samples/
+.build-cache/
+VoiceDesk.app/
+__pycache__/
+.DS_Store
