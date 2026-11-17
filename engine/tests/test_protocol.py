@@ -46,6 +46,14 @@ class FakeEngine:
     def unload(self, request, job):
         return {"unloaded": True}
 
+    def prepare(self, request, job):
+        done = 0
+        while True:
+            job.check()                      # cancellation point between chunks
+            done += 1
+            job.progress(stage="download", done=done, total=10)
+            time.sleep(0.01)
+
 
 class Session:
     def __init__(self, engine):
@@ -127,3 +135,17 @@ def test_stdin_closing_stops_the_worker():
     s.requests.close()
     s.thread.join(2)
     assert not s.thread.is_alive()
+
+
+def test_prepare_runs_beside_the_queue_and_cancels():
+    engine = FakeEngine()
+    s = Session(engine)
+    s.send(id="r", cmd="render", output="out.wav", lines=[{}])
+    s.until("r", "progress")
+    s.send(id="p", cmd="prepare", model="4bit")
+    assert s.until("p", "progress")["stage"] == "download"   # not queued behind the render
+    s.send(id=1, cmd="cancel", target="p")
+    assert s.until(1, "result")["cancelled"] is True
+    assert s.until("p", "error")["code"] == "cancelled"
+    engine.release.set()
+    assert s.until("r", "result")["path"] == "out.wav"

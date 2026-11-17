@@ -1,99 +1,60 @@
-# VocalCord
+<p align="center"><img src="assets/logo/vocalcord-logo-black.png" alt="" width="160"></p>
 
-A Mac app for making voiceovers in your own cloned voices. It renders on your
-Mac with the Breeze TTS 2 MLX model. The full plan is in
-[docs/PLAN.md](docs/PLAN.md); Clone and Generate's script and rendering are
-built; preview, outputs and export come next.
+<h1 align="center">VocalCord</h1>
 
-## Build and run
+VocalCord clones your voice and turns scripts into voiceovers, rendering everything on your Mac.
 
-Requires macOS 26 or later and Xcode 26. Set up the engine first (see
-[engine/README.md](engine/README.md)), run `./build.sh`, then open
-`VocalCord.app`. The app starts the engine from `engine/` next to
-`VocalCord.app`, or from `VOCALCORD_ENGINE_DIR`. `swift test` runs the tests;
-`VOCALCORD_E2E=1 swift test --filter realEngine` renders two lines with the real
-engine.
+![The Generate tab: a script with a voice, tone and scores for each line, and Claude Code in the terminal panel](docs/screenshots/generate.png)
 
-The local Breeze weights and their outputs are licensed for **research and
-noncommercial use only**; use VocalCord for personal, nonmonetized videos. See
-the [model license](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE).
+## Features
 
-## Clone
+- **Clone a voice** from one 10–20 second clip, a guided session of about 8 minutes, or any audio or video file. Long files are cut into clips, grouped by speaker.
+- **Write a script** line by line, each with its own voice, tone and pause. Tags such as `[confident]`, `[pause 0.3]` and `(sigh)` steer a line.
+- **Score every line:** how much it sounds like you, how human it sounds, and whether the words came out right.
+- **Preview against your video**, then export WAV or M4A, with captions and per-line or per-voice files.
+- **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script and proposes edits that you accept or reject.
+- **Jev plugin** (optional): checks that each line reads as speech and fits its tone.
 
-**New voice** offers a Fast clone (one 10–20 second clip) or a Full clone (a
-guided session you can pause and resume). Each voice page lists its takes by
-tone, with play, transcript, length, score and the main take per tone, plus a
-Pronunciations list.
+![The Clone tab: takes by tone, pronunciations, and an agent proposing changes](docs/screenshots/clone.png)
 
-Voices live in `~/Library/Application Support/VocalCord/Voices`: `voices.json`
-plus one folder per voice holding its take WAVs, with every other recording
-kept in `raw/`. Voices from the old `library.json` are copied over on first
-launch; the old files are left as they are.
+![Full clone: a guided recording session](docs/screenshots/full-clone.png)
 
-## Generate
+## Requirements
 
-Each project is a script of lines, each with its text, voice, tone and pause.
-Paste or import `.txt` or `.md` to split it into lines. **Render** renders every
-line whose text, voice or tone has no version yet, then scores them; the button at
-the end of a row adds a new version of that line. **Compare styles** renders
-lines in other tones as extra versions. Projects live in
-`~/Library/Application Support/VocalCord/Projects/<id>/`: `project.json` plus
-the renders in `renders/`.
+- A Mac with Apple silicon (M1 or later)
+- macOS 26 or later
+- About 8 GB of free disk space
+- An internet connection for the first run
 
-## Terminal
+## Install
 
-**Terminal** opens a panel under the script with a tab for each agent CLI found on
-your login shell's PATH: Claude Code, Codex and OpenCode. Each runs with your own
-sign-in but can use only VocalCord's tools (`get_voices`, `get_script`,
-`update_script`, `render_line`, `get_scores`, `check_script`), which reach the app
-through `vocalcord-mcp` and a socket in `~/Library/Application Support/VocalCord`.
-Changes an agent makes are proposals: accept or reject each line in the script.
-Claude Code skips your settings and CLAUDE.md. Codex runs read-only, with your MCP
-servers, plugins and hooks switched off, though it still reads `~/.codex/AGENTS.md`.
-OpenCode runs a VocalCord agent with its built-in tools off.
+1. Download `VocalCord-1.0.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
+2. VocalCord is not signed by Apple, so macOS blocks the first launch. Right-click VocalCord in Applications and choose **Open**. Or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+3. On first launch, VocalCord installs its voice engine and downloads the models, about 4.6 GB. This happens once.
 
-## Script tags
+## Privacy
 
-Put tags before each part, on separate lines or within one line:
+Recording, cloning, rendering and scoring all run on your Mac. Voices and projects stay in `~/Library/Application Support/VocalCord`. Setup downloads Python and its packages from GitHub and PyPI, and the models from Hugging Face; it uploads nothing.
 
-```text
-[confident] We built a faster way to find what matters.
-[pause 0.30]
-[sad] But the first attempt failed.
-[pause 0.35]
-[happy] Then we found a better answer.
-```
+Two optional features use outside services:
 
-- `[neutral]`, `[confident]`, `[sad]`, `[happy]` are built in. Any other text in
-  brackets is a custom direction, such as `[Speak quietly, as if sharing a secret]`.
-- `[pause 0.30]` inserts exactly 0.30 seconds of silence.
-- `(sigh)` asks Breeze for a sigh inside a spoken part.
-- `[breath]` inserts a recorded inhale. Record one in the app or choose a short
-  WAV (0.05–2 seconds).
+- The terminal agents run with your own Claude Code, Codex or OpenCode sign-in, so what they read and write goes to that provider.
+- The Jev plugin sends only script text to TypeSafe.
 
-## directed_voice.py
+## Build from source
 
-The renderer also runs from the command line:
+Needs Xcode 26. In a clone of this repo:
 
 ```sh
-~/voice/venv/bin/python directed_voice.py \
-  --script samples/directed-demo.txt \
-  --reference samples/reference.wav \
-  --reference-text-file samples/reference.txt \
-  --model ~/voice/models/Breeze-TTS-2-mlx-8bit \
-  --output samples/directed-demo.wav
+./build.sh                # VocalCord.app, in this folder
+scripts/make-dmg.sh       # dist/VocalCord-1.0.0.dmg
+swift test
 ```
 
-- `--breath-audio path/to/inhale.wav` is needed when the script uses `[breath]`.
-- `--all-styles` renders four WAVs from one model load, ending in `-neutral`,
-  `-confident`, `-sad`, and `-happy`.
-- Use `~/voice/models/Breeze-TTS-2-mlx-4bit` for the lighter model.
-
-The output WAV is normalized for listening. A JSON file with the same name holds
-each section's start and end time for editing or video sync.
+With an `engine/.venv` next to it (see [engine/README.md](engine/README.md)), the built app uses that engine and skips first-run setup.
 
 ## License
 
-The code is licensed under [PolyForm Noncommercial 1.0.0](LICENSE.md). It is
-free for personal use, not for commercial use. Breeze has its own license (see
-above); each user downloads it separately.
+The code is under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): free for personal use, not for commercial use. It is not open source by the OSI definition.
+
+The Breeze TTS 2 model and everything you make with it are under the [BreezeBlue Research and Non-Commercial License](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE): no commercial use, and no cloning a real person's voice without their consent. Other components and their licences are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

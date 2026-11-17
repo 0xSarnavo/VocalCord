@@ -50,7 +50,7 @@ private func fakeEngineFolder() throws -> URL {
 }
 
 @Test func engineClientMatchesRepliesCancelsAndRestarts() async throws {
-    let client = EngineClient(directory: try fakeEngineFolder())
+    let client = EngineClient(location: .dev(try fakeEngineFolder()))
 
     // Replies arrive in the opposite order; each caller still gets its own.
     async let a = client.transcribe(URL(filePath: "/a"))
@@ -78,7 +78,7 @@ private func fakeEngineFolder() throws -> URL {
 }
 
 @Test func missingEngineThrows() async {
-    let client = EngineClient(directory: URL(filePath: "/nonexistent"))
+    let client = EngineClient(location: .dev(URL(filePath: "/nonexistent")))
     await #expect(throws: EngineError.self) { try await client.transcribe(URL(filePath: "/a")) }
 }
 
@@ -242,7 +242,7 @@ func realExportOfScratch() async throws {
     let repo = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let voicesCopy = try tempFolder().appending(path: "Voices")
     try FileManager.default.copyItem(at: VoiceStore.defaultRoot, to: voicesCopy)
-    let voices = VoiceStore(root: voicesCopy, engine: EngineClient(directory: repo.appending(path: "engine")))
+    let voices = VoiceStore(root: voicesCopy, engine: EngineClient(location: .dev(repo.appending(path: "engine"))))
     let projects = ProjectStore()
     let scratch = try #require(projects.projects.first { $0.name == "Scratch" })
     let result = try await projects.export(scratch.id, options: ExportOptions(format: "m4a", lufs: -16, srt: true), voices: voices)
@@ -264,7 +264,7 @@ func realEngineRendersAndScoresTwoLines() async throws {
     let repo = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let voicesCopy = try tempFolder().appending(path: "Voices")
     try FileManager.default.copyItem(at: VoiceStore.defaultRoot, to: voicesCopy)
-    let voices = VoiceStore(root: voicesCopy, engine: EngineClient(directory: repo.appending(path: "engine")))
+    let voices = VoiceStore(root: voicesCopy, engine: EngineClient(location: .dev(repo.appending(path: "engine"))))
     let voice = try #require(voices.voices.first { $0.name == "My voice" })
     let projects = ProjectStore(root: try environment["VOCALCORD_E2E_PROJECTS"].map { URL(filePath: $0) } ?? tempFolder())
     let id = projects.create(name: "Scratch")

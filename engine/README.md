@@ -6,7 +6,9 @@ talks JSON lines over stdin/stdout; every command is in [PROTOCOL.md](PROTOCOL.m
 
 ## Setup
 
-Needs Python 3.13 and ffmpeg (Homebrew).
+VocalCord.app installs the engine on first run: its bundled uv makes a Python
+3.13 venv in `~/Library/Application Support/VocalCord/Engine` from
+`requirements.txt`, and `prepare` downloads the models. For development:
 
 ```sh
 cd engine
@@ -16,10 +18,13 @@ python3.13 -m venv .venv
 .venv/bin/python -m pytest                  # all tests; -m "not slow" skips the model test
 ```
 
-Whisper and the scoring models download to the Hugging Face cache on first use
-(about 1.3 GB). Breeze is read from `~/voice/models/Breeze-TTS-2-mlx-{8bit,4bit}`,
-or the `mlx-community` repo in the cache. The slow test also needs the private
-`samples/reference.*` files and skips without them. No PyTorch.
+ffmpeg comes from PATH or Homebrew when there is one, else from the
+imageio-ffmpeg wheel. Models live in the Hugging Face cache (`HF_HOME`); without
+`prepare`, Whisper and the scoring models download on first use. Breeze is read
+from `~/voice/models/Breeze-TTS-2-mlx-{8bit,4bit}` when present, else from the
+`mlx-community` repo. The slow test needs a private recording at
+`samples/reference.wav` with its transcript in `samples/reference.txt`, and skips
+without them. No PyTorch.
 
 ## Models
 

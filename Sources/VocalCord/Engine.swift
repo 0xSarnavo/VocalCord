@@ -79,9 +79,10 @@ protocol Engine: Sendable {
 
 enum EngineSettings {
     static let modelKey = "model"
-    /// Breeze 8-bit until the user decides otherwise.
+    /// Breeze 4-bit until the user decides otherwise.
     static let defaultModel = "4bit"
     static var model: String { UserDefaults.standard.string(forKey: modelKey) ?? defaultModel }
+    static let titles = ["8bit": "Best quality (8-bit)", "4bit": "Fast (4-bit)"]
 }
 
 struct EngineError: LocalizedError {
@@ -89,11 +90,32 @@ struct EngineError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// The Python worker in `engine/`, launched on first use and kept running: JSON lines over stdin/stdout.
+/// Where the engine runs from: its Python, the folder holding `vocalcord_engine`, and extra environment.
+struct EngineLocation: Sendable {
+    var python: URL
+    var source: URL
+    var environment: [String: String] = [:]
+
+    /// A checkout's `engine/` folder with its own `.venv`.
+    static func dev(_ folder: URL) -> EngineLocation {
+        EngineLocation(python: folder.appending(path: ".venv/bin/python"), source: folder)
+    }
+
+    /// `VOCALCORD_ENGINE_DIR`, else `engine/` next to VocalCord.app if it has a `.venv`. Nil means the installed engine.
+    static var dev: EngineLocation? {
+        if let override = ProcessInfo.processInfo.environment["VOCALCORD_ENGINE_DIR"], !override.isEmpty {
+            return .dev(URL(filePath: override, directoryHint: .isDirectory))
+        }
+        let checkout = EngineLocation.dev(Bundle.main.bundleURL.deletingLastPathComponent().appending(path: "engine", directoryHint: .isDirectory))
+        return FileManager.default.isExecutableFile(atPath: checkout.python.path) ? checkout : nil
+    }
+}
+
+/// The Python worker, launched on first use and kept running: JSON lines over stdin/stdout.
 /// Replies are matched to requests by id; a cancelled task cancels its job; a worker that dies fails every
 /// waiting request and is started again on the next one.
 actor EngineClient: Engine {
-    nonisolated let directory: URL
+    nonisolated let location: EngineLocation
     private var process: Process?
     private var input: FileHandle?
     private var pending: [String: Pending] = [:]
@@ -116,17 +138,16 @@ actor EngineClient: Engine {
         var total: Double?
     }
 
-    init(directory: URL = EngineClient.defaultDirectory) {
-        self.directory = directory
+    init(location: EngineLocation) {
+        self.location = location
     }
 
-    /// `VOCALCORD_ENGINE_DIR`, else `engine/` next to VocalCord.app.
-    /// shortcut: needs the repo checkout; milestone 9 bundles the engine.
-    static var defaultDirectory: URL {
-        if let override = ProcessInfo.processInfo.environment["VOCALCORD_ENGINE_DIR"], !override.isEmpty {
-            return URL(filePath: override, directoryHint: .isDirectory)
+    /// `prepare`: downloads what `model` needs. Progress is bytes done of the bytes missing at the start.
+    func prepare(model: String, progress: @escaping @Sendable (_ done: Double, _ total: Double) -> Void) async throws {
+        struct Result: Decodable { var downloaded: Double }
+        _ = try await call("prepare", ["model": model], as: Result.self) { reply in
+            if let done = reply.done, let total = reply.total, total > 0 { progress(done, total) }
         }
-        return Bundle.main.bundleURL.deletingLastPathComponent().appending(path: "engine", directoryHint: .isDirectory)
     }
 
     // MARK: Engine
@@ -236,14 +257,14 @@ actor EngineClient: Engine {
 
     private func running() throws -> FileHandle {
         if let process, process.isRunning, let input { return input }
-        let python = directory.appending(path: ".venv/bin/python")
-        guard FileManager.default.isExecutableFile(atPath: python.path) else {
-            throw EngineError(message: "Engine not found at \(directory.path).")
+        guard FileManager.default.isExecutableFile(atPath: location.python.path) else {
+            throw EngineError(message: "Engine not found at \(location.python.path).")
         }
         let process = Process()
-        process.executableURL = python
+        process.executableURL = location.python
         process.arguments = ["-m", "vocalcord_engine"]
-        process.currentDirectoryURL = directory
+        process.currentDirectoryURL = location.source
+        process.environment = ProcessInfo.processInfo.environment.merging(location.environment) { $1 }
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = stdin
         process.standardOutput = stdout
@@ -265,7 +286,7 @@ actor EngineClient: Engine {
     }
 
     /// Lines from a pipe until it closes. FileHandle.bytes would block the actor's thread in read().
-    private static func lines(_ handle: FileHandle) -> AsyncStream<String> {
+    static func lines(_ handle: FileHandle) -> AsyncStream<String> {
         AsyncStream { continuation in
             let buffer = Mutex(Data())
             handle.readabilityHandler = { handle in

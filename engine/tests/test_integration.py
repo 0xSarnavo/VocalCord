@@ -10,6 +10,7 @@ import pytest
 from vocalcord_engine import tts, worker
 
 SAMPLES = Path(__file__).resolve().parents[2] / "samples"
+# A private recording and its exact transcript; not in the repo.
 REFERENCE = SAMPLES / "reference.wav"
 TRANSCRIPT = SAMPLES / "reference.txt"
 LINE = "Kuber helps friends save money together."

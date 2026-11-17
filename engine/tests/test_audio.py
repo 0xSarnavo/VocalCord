@@ -60,3 +60,9 @@ def test_unreadable_file_is_a_clear_error(tmp_path):
         audio.check_audio(bad)
     with pytest.raises(ValueError, match="File not found"):
         audio.check_audio(tmp_path / "missing.wav")
+
+
+def test_ffmpeg_falls_back_to_the_wheel(monkeypatch):
+    monkeypatch.setattr(audio.shutil, "which", lambda name: None)
+    monkeypatch.setattr(audio.os, "access", lambda path, mode: False)
+    assert "imageio_ffmpeg" in audio.find_ffmpeg()

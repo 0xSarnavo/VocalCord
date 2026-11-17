@@ -1,12 +1,25 @@
 """Decoding with ffmpeg, level checks, and small signal helpers."""
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
 
 import numpy as np
 
-FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+
+def find_ffmpeg() -> str:
+    """ffmpeg on PATH or from Homebrew (an app's PATH has no /opt/homebrew), else the imageio-ffmpeg wheel's."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    if os.access("/opt/homebrew/bin/ffmpeg", os.X_OK):
+        return "/opt/homebrew/bin/ffmpeg"
+    import imageio_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+FFMPEG = find_ffmpeg()
 CHECK_RATE = 48000
 
 # Thresholds behind the check_audio warnings (see PROTOCOL.md).

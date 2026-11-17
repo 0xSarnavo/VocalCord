@@ -1,4 +1,4 @@
-# Exact pins for engine/.venv (Python 3.13). Install: python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# Exact pins for the engine (Python 3.13). The app installs them with uv; by hand: see README.md.
 annotated-doc==0.0.6
 annotated-types==0.8.0
 anyio==4.16.0
@@ -13,6 +13,7 @@ httpcore2==2.16.2
 httpx2==2.16.2
 huggingface_hub==2.4.0
 idna==3.20
+imageio-ffmpeg==0.8.1
 iniconfig==2.3.1
 Jinja2==3.1.6
 kaldi_native_fbank==1.23.1

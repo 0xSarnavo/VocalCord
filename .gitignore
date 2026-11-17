@@ -9,3 +9,4 @@ engine/.venv/
 .build/
 assets/logo/concepts/
 assets/logo/AppIcon.iconset/
+dist/

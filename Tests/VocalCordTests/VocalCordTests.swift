@@ -40,15 +40,15 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     let library = root.appending(path: "library.json")
     try Data("""
     [{"createdAt": 816537425.48, "currentTakeID": "\(takeID)", "id": "\(voiceID)", "name": "My voice",
-      "takes": [{"createdAt": 816537425.48, "id": "\(takeID)", "name": "Reference take",
-                 "style": "Neutral", "transcript": "Every voice tells a story."}]}]
+      "takes": [{"createdAt": 816537425.48, "id": "\(takeID)", "name": "Introduction",
+                 "style": "Neutral", "transcript": "Thanks for having me."}]}]
     """.utf8).write(to: library)
     let before = try Data(contentsOf: library)
 
     let store = VoiceStore(root: root, engine: FakeEngine(delay: .zero))
     let voice = try #require(store.voices.first)
     #expect(store.voices.count == 1 && voice.name == "My voice")
-    #expect(voice.takes.map(\.transcript) == ["Every voice tells a story."])
+    #expect(voice.takes.map(\.transcript) == ["Thanks for having me."])
     #expect(abs(voice.takes[0].duration - 2) < 0.01)
     #expect(voice.mainTake("Neutral")?.id == takeID)
     #expect(FileManager.default.fileExists(atPath: store.audioURL(voice.takes[0], voiceID: voiceID).path))

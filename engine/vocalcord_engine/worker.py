@@ -1,7 +1,7 @@
 """JSON-lines worker on stdin/stdout. See PROTOCOL.md.
 
 The reader thread answers ping, status, cancel and shutdown at once, runs
-check_audio on its own thread, and queues every other command for a single job
+check_audio and prepare on their own threads, and queues every other command for a single job
 thread, which owns all MLX work. Only one large model (Breeze or Whisper) is in
 memory at a time; it is unloaded after IDLE_S seconds without use.
 """
@@ -28,6 +28,8 @@ IDLE_S = 120.0
 # 4-bit and made renders twice as slow on 8 GB through swapping (README).
 MLX_CACHE_LIMIT = 256 * 2**20
 JOB_COMMANDS = {"transcribe", "render", "score", "split", "group_speakers", "mix", "unload"}
+# Run at once on their own threads: neither touches MLX, and a long download must not hold up renders.
+SIDE_COMMANDS = {"check_audio", "prepare"}
 
 
 class Cancelled(Exception):
@@ -52,7 +54,7 @@ def memory() -> dict:
 
 
 class Engine:
-    """The real backend. Every method except status runs on the job thread."""
+    """The real backend. Every method except status, check_audio and prepare runs on the job thread."""
 
     def __init__(self):
         import mlx.core as mx
@@ -119,6 +121,10 @@ class Engine:
 
     def check_audio(self, request, job) -> dict:
         return audio.check_audio(_path(request, "audio"))
+
+    def prepare(self, request, job) -> dict:
+        from . import models
+        return models.prepare(str(request.get("model", "")), job.progress, job.check)
 
     def transcribe(self, request, job) -> dict:
         from . import stt
@@ -245,6 +251,7 @@ def serve(engine, stdin, stdout, idle_poll: float = 5.0) -> None:
     lock = threading.Lock()
     jobs: queue.Queue = queue.Queue()
     cancelled: set = set()
+    side: set = set()  # ids of SIDE_COMMANDS jobs still running
     state = {"running": None, "stopping": False}
 
     def send(message: dict) -> None:
@@ -315,7 +322,7 @@ def serve(engine, stdin, stdout, idle_poll: float = 5.0) -> None:
                   "idle_unload_s": IDLE_S, **engine.status()})
         elif cmd == "cancel":
             target = request.get("target")
-            known = target is not None and (target == state["running"] or
+            known = target is not None and (target == state["running"] or target in side or
                                             any(item and item[0] == target for item in list(jobs.queue)))
             if known:
                 cancelled.add(target)
@@ -324,8 +331,16 @@ def serve(engine, stdin, stdout, idle_poll: float = 5.0) -> None:
             stop()
             send({"id": job_id, "event": "result", "shutdown": True})
             return
-        elif cmd == "check_audio":
-            threading.Thread(target=run, args=(job_id, cmd, request), daemon=True).start()
+        elif cmd in SIDE_COMMANDS:
+            side.add(job_id)
+
+            def run_side(job_id=job_id, cmd=cmd, request=request):
+                try:
+                    run(job_id, cmd, request)
+                finally:
+                    side.discard(job_id)
+
+            threading.Thread(target=run_side, daemon=True).start()
         elif cmd in JOB_COMMANDS:
             jobs.put((job_id, cmd, request))
         else:

@@ -1,7 +1,8 @@
 # Engine protocol
 
-Start the worker with `engine/.venv/bin/python -m vocalcord_engine` (working
-directory `engine/`). It reads one JSON object per line on stdin and writes one
+Start the worker with `python -m vocalcord_engine` from the engine's venv, with
+the folder that holds `vocalcord_engine` as the working directory (`engine/` in a
+checkout, `VocalCord.app/Contents/Resources/engine` in the app). It reads one JSON object per line on stdin and writes one
 JSON object per line on stdout. Logs go to stderr only; anything a library prints
 is redirected there too, so stdout carries nothing but replies.
 
@@ -20,7 +21,7 @@ Every reply carries the request's `id` and an `event`:
 A line that is not a JSON object gets `{"id": null, "event": "error", "code": "invalid", ...}`.
 
 **Ordering.** `ping`, `status`, `cancel` and `shutdown` are answered at once.
-`check_audio` runs immediately on its own thread. `transcribe`, `render`,
+`check_audio` and `prepare` run immediately, each on its own thread. `transcribe`, `render`,
 `score`, `split`, `group_speakers`, `mix` and `unload` queue and run one at a
 time in arrival order, so replies for different ids can interleave.
 
@@ -85,8 +86,8 @@ share of samples at or above 0.99 of full scale. `warnings` holds any of:
 {"id": 4, "cmd": "transcribe", "audio": "/Users/me/take.m4a"}
 {"id": 4, "event": "progress", "stage": "load", "model": "whisper:mlx-community/whisper-large-v3-turbo-asr-8bit"}
 {"id": 4, "event": "progress", "stage": "transcribe", "done": 10.6, "total": 10.6}
-{"id": 4, "event": "result", "text": "Every voice tells a story…",
- "words": [{"word": "Over", "start": 0.0, "end": 1.22}, {"word": "past", "start": 1.22, "end": 1.64}],
+{"id": 4, "event": "result", "text": "Thanks for having me. Today I want to show you…",
+ "words": [{"word": "Thanks", "start": 0.0, "end": 0.42}, {"word": "for", "start": 0.42, "end": 0.58}],
  "duration": 10.6}
 ```
 
@@ -105,7 +106,7 @@ natural pauses, each with its exact transcript.
 {"id": 5, "event": "progress", "stage": "transcribe", "done": 28.6, "total": 165.1}
 {"id": 5, "event": "result", "text": "…", "duration": 165.1,
  "clips": [{"path": "/Users/me/clips/clip-001.wav", "start": 0.0, "end": 10.2, "duration": 10.2,
-            "text": "Every voice tells a story…"}]}
+            "text": "Thanks for having me. Today I want to show you…"}]}
 ```
 
 `min_s` and `max_s` are optional (3 and 20). Clips are mono 16-bit WAVs at the
@@ -239,6 +240,34 @@ as one file plus optional extras. Loads no model.
 - Files are made in a temporary folder and moved in at the end; a cancelled or
   failed mix leaves nothing.
 
+### prepare
+
+Downloads the models the engine needs into the Hugging Face cache: the chosen
+Breeze model, Whisper, and the two scoring models. The app runs it during first-run
+setup and when Settings switches to a model for the first time.
+
+```json
+{"id": 14, "cmd": "prepare", "model": "4bit"}
+{"id": 14, "event": "progress", "stage": "list", "repo": "mlx-community/Breeze-TTS-2-mlx-4bit"}
+{"id": 14, "event": "progress", "stage": "download", "done": 0, "total": 3042440182, "file": null}
+{"id": 14, "event": "progress", "stage": "download", "done": 52428800, "total": 3042440182,
+ "file": "mlx-community/Breeze-TTS-2-mlx-4bit/model.safetensors"}
+{"id": 14, "event": "result", "downloaded": 3042440182}
+```
+
+- `model` (required): `4bit` or `8bit`. A Breeze copy under
+  `~/voice/models/Breeze-TTS-2-mlx-*` counts as present, as in `render`.
+- From Breeze and Whisper it takes the files mlx-audio loads (weights, configs,
+  tokenizers); from the scoring models, their ONNX files. A file already in the
+  cache for the repo's current revision is skipped.
+- `done` and `total` are bytes, counting only what was missing when `prepare`
+  started; `download` events come at most four times a second.
+- Resumable: each file downloads to `<blob>.part` in the cache's `blobs` folder,
+  and the next `prepare` continues it with an HTTP range request. Finished files
+  stay, so a retry fetches only what is left.
+- Cancellable between 1 MB chunks. One `prepare` runs at a time; a second waits.
+- `HF_HOME` or `HF_HUB_CACHE` choose the cache, as for the rest of the engine.
+
 ### cancel
 
 ```json
@@ -251,7 +280,7 @@ as one file plus optional extras. Loads no model.
 dropped when it reaches the front; a running `render` stops before its next line
 (a line in progress finishes first, up to about 30 s) and writes nothing,
 `transcribe` and `split` before their next chunk, `group_speakers` before its
-next clip, `mix` before its next file.
+next clip, `mix` before its next file, `prepare` before its next 1 MB.
 
 ### unload
 

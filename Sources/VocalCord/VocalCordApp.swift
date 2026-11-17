@@ -9,9 +9,14 @@ struct VocalCordApp: App {
     @State private var waveforms = Waveforms()
     @State private var terminals: Terminals
     @State private var jev: Jev
+    @State private var setup: Setup
 
     init() {
-        let store = VoiceStore(engine: EngineClient())
+        // A dev engine runs as it is; otherwise the app installs its own on first run.
+        let dev = EngineLocation.dev
+        let engine = EngineClient(location: dev ?? EngineInstall.standard.location)
+        _setup = State(initialValue: Setup(engine: engine, install: dev == nil ? .standard : nil))
+        let store = VoiceStore(engine: engine)
         let projects = ProjectStore()
         let player = Player()
         let jev = Jev()
@@ -37,11 +42,12 @@ struct VocalCordApp: App {
                 .environment(waveforms)
                 .environment(terminals)
                 .environment(jev)
+                .environment(setup)
         }
         .defaultSize(width: 1280, height: 800)
 
         Settings {
-            SettingsView().environment(jev).preferredColorScheme(.dark)
+            SettingsView().environment(jev).environment(setup).preferredColorScheme(.dark)
         }
     }
 }
@@ -51,9 +57,28 @@ enum Mode: String { case clone, generate }
 struct RootView: View {
     @Environment(VoiceStore.self) private var store
     @Environment(ProjectStore.self) private var projects
+    @Environment(Setup.self) private var setup
     @AppStorage("mode") private var mode = Mode.clone
 
     var body: some View {
+        Group {
+            if setup.done { modes } else { SetupView() }
+        }
+        .frame(minWidth: 1000, minHeight: 640)
+        // The blue focus ring clashes with the grey design; text fields turn it back on.
+        .focusEffectDisabled()
+        .containerBackground(Theme.base, for: .window)
+        .preferredColorScheme(.dark)
+        .foregroundStyle(Theme.text)
+        .alert(store.error ?? "", isPresented: Binding(present: Bindable(store).error)) {
+            Button("OK") {}
+        }
+        .alert(projects.error ?? "", isPresented: Binding(present: Bindable(projects).error)) {
+            Button("OK") {}
+        }
+    }
+
+    private var modes: some View {
         Group {
             switch mode {
             case .clone: CloneView()
@@ -70,18 +95,6 @@ struct RootView: View {
                 .labelsHidden()
                 .frame(width: 220)
             }
-        }
-        .frame(minWidth: 1000, minHeight: 640)
-        // The blue focus ring clashes with the grey design; text fields turn it back on.
-        .focusEffectDisabled()
-        .containerBackground(Theme.base, for: .window)
-        .preferredColorScheme(.dark)
-        .foregroundStyle(Theme.text)
-        .alert(store.error ?? "", isPresented: Binding(present: Bindable(store).error)) {
-            Button("OK") {}
-        }
-        .alert(projects.error ?? "", isPresented: Binding(present: Bindable(projects).error)) {
-            Button("OK") {}
         }
     }
 }
@@ -141,17 +154,32 @@ struct SidebarLayout<Sidebar: View, Detail: View>: View {
 }
 
 struct SettingsView: View {
+    @Environment(Setup.self) private var setup
     @AppStorage(EngineSettings.modelKey) private var model = EngineSettings.defaultModel
 
     var body: some View {
         TabView {
             Tab("General", systemImage: "gearshape") {
                 Form {
-                    Picker("Model", selection: $model) {
-                        Text("Best quality (8-bit)").tag("8bit")
-                        Text("Fast (4-bit)").tag("4bit")
+                    // A model's first choice downloads it; the switch happens once it's ready.
+                    Picker("Model", selection: Binding(get: { setup.switching ?? model }, set: { setup.choose($0) })) {
+                        ForEach(["8bit", "4bit"], id: \.self) { Text(EngineSettings.titles[$0]!).tag($0) }
                     }
                     .pickerStyle(.radioGroup)
+                    .disabled(!setup.done || setup.switching != nil)
+                    if setup.done, let progress = setup.progress {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                ProgressView(value: progress.fraction)
+                                Button("Cancel", action: setup.cancel)
+                            }
+                            Text("\(progress.step): \(progress.detail)").monospacedDigit().foregroundStyle(Theme.secondary)
+                        }
+                        .padding(.top, 8)
+                    }
+                    if setup.done, let error = setup.error {
+                        Warning(text: error).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
+                    }
                 }
                 .padding(24)
                 .frame(width: 440)
