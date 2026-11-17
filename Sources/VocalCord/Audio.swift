@@ -227,18 +227,33 @@ final class Recorder {
     }
 }
 
+/// Plays one file at a time, so starting anything stops the rest.
 @MainActor @Observable
 final class Player: NSObject, AVAudioPlayerDelegate {
     private(set) var playing: URL?
     @ObservationIgnored private var player: AVAudioPlayer?
 
     func toggle(_ url: URL) {
-        player?.stop()
-        guard playing != url else { playing = nil; return }
-        player = try? AVAudioPlayer(contentsOf: url)
-        player?.delegate = self
+        if playing == url { pause() } else { play(url, from: 0) }
+    }
+
+    func play(_ url: URL, from time: Double) {
+        if player?.url != url {
+            player?.stop()
+            player = try? AVAudioPlayer(contentsOf: url)
+            player?.delegate = self
+        }
+        player?.currentTime = max(0, time)
         playing = player?.play() == true ? url : nil
     }
+
+    func pause() {
+        player?.pause()
+        playing = nil
+    }
+
+    /// Seconds into the loaded file.
+    var time: Double { player?.currentTime ?? 0 }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in self.playing = nil }

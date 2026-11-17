@@ -21,8 +21,8 @@ A line that is not a JSON object gets `{"id": null, "event": "error", "code": "i
 
 **Ordering.** `ping`, `status`, `cancel` and `shutdown` are answered at once.
 `check_audio` runs immediately on its own thread. `transcribe`, `render`,
-`score`, `split` and `unload` queue and run one at a time in arrival order, so
-replies for different ids can interleave.
+`score`, `split`, `mix` and `unload` queue and run one at a time in arrival
+order, so replies for different ids can interleave.
 
 **Memory.** Only one large model is loaded at a time: Breeze (for `render`) or
 Whisper (for `transcribe`, `split`, `score`). A command that needs the other one
@@ -155,7 +155,8 @@ between chunks and clips.
 - Each spoken part has its outer silence trimmed; the whole render is loudness
   normalised with ffmpeg. `start`/`end` are seconds in the output, end before
   `pause_after`. The same `lines` list is written to `timing_path`.
-- `cancel` stops it before the next line; nothing is written.
+- `cancel` stops it before the next line or before the files are written;
+  nothing is written.
 
 ### score
 
@@ -180,6 +181,44 @@ between chunks and clips.
   (lowercase, no punctuation, numbers spelled out), floored at 0.
 - `heard`: what Whisper heard.
 
+### mix
+
+The export: rendered lines joined in order with their pauses, loudness-normalised,
+as one file plus optional extras. Loads no model.
+
+```json
+{"id": 12, "cmd": "mix", "out_dir": "/Users/me/Movies/VocalCord/Launch film", "name": "Launch film",
+ "format": "m4a", "lufs": -16, "per_line": false, "per_voice": false, "srt": true, "timing": false,
+ "lines": [{"audio": "/Users/me/renders/a.wav", "text": "Meet the next chapter.", "voice": "Me",
+            "pause_after": 0.5, "number": 1},
+           {"audio": "/Users/me/renders/b.wav", "text": "Everything is ready.", "voice": "Me", "number": 3}]}
+{"id": 12, "event": "progress", "stage": "read", "done": 1, "total": 2}
+{"id": 12, "event": "result", "path": "/Users/me/Movies/VocalCord/Launch film/Launch film.m4a",
+ "files": ["/Users/me/Movies/VocalCord/Launch film/Launch film.m4a",
+           "/Users/me/Movies/VocalCord/Launch film/Launch film.srt"],
+ "duration": 3.22, "lufs": -16.0,
+ "lines": [{"index": 0, "number": 1, "text": "…", "voice": "Me", "start": 0.0, "end": 1.36},
+           {"index": 1, "number": 3, "text": "…", "voice": "Me", "start": 1.86, "end": 3.22}]}
+```
+
+- `format`: `wav` (16-bit, default) or `m4a` (AAC 160 kbps); mono at 24 kHz.
+- `lufs` −30 to −10 (default −16): two-pass ffmpeg loudnorm with a −1.5 dBTP
+  ceiling, a plain gain unless the peak needs limiting. The result's `lufs` is
+  measured on the written file (null for silence).
+- Each line: `audio` (any ffmpeg-readable file), `text` (captions drop `[tags]`
+  and `(cues)`), optional `voice` (a name, for per-voice files), `pause_after`
+  seconds 0–10 (ignored on the last line), and `number`, the script line number
+  used in names (default its position).
+- Files, all in `out_dir`: `<name>.<format>` (first in `files`), and when asked
+  `<name> line <number>.<format>` (`per_line`), `<name> <voice>.<format>`
+  (`per_voice`: the whole timeline with only that voice's lines), `<name>.srt`
+  (`srt`), `<name>.json` (`timing`, the `lines` list). If any of them exists,
+  the name becomes `<name> 2`, `<name> 3`… so nothing is overwritten. `/`, `:`
+  and `\` in names become `-`.
+- `start`/`end` are seconds in the mix, end before `pause_after`.
+- Files are made in a temporary folder and moved in at the end; a cancelled or
+  failed mix leaves nothing.
+
 ### cancel
 
 ```json
@@ -190,8 +229,8 @@ between chunks and clips.
 
 `cancelled` is false when `target` is not running or queued. A queued job is
 dropped when it reaches the front; a running `render` stops before its next line
-(a line in progress finishes first, up to about 30 s), `transcribe` and `split`
-before their next chunk.
+(a line in progress finishes first, up to about 30 s) and writes nothing,
+`transcribe` and `split` before their next chunk, `mix` before its next file.
 
 ### unload
 

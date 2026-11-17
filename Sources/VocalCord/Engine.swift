@@ -34,6 +34,30 @@ struct Scores: Codable, Hashable, Sendable {
     var heard: String
 }
 
+/// One line of an export: a render and where it sits in the script.
+struct MixLine: Sendable {
+    var audio: URL
+    var text: String
+    var voice: String
+    var pauseAfter: Double
+    var number: Int
+}
+
+struct MixRequest: Sendable {
+    var lines: [MixLine]
+    var folder: URL
+    var name: String
+    var options: ExportOptions
+}
+
+/// The engine's `mix` result: the files written, the mix first.
+struct MixResult: Sendable {
+    var files: [URL]
+    var duration: Double
+    /// Measured on the written mix.
+    var lufs: Double?
+}
+
 /// What the app needs from the speech engine. Each call maps to one command in `engine/PROTOCOL.md`.
 protocol Engine: Sendable {
     /// `transcribe`: Whisper transcript of a clip.
@@ -47,6 +71,8 @@ protocol Engine: Sendable {
     func render(_ line: RenderLine, to output: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Double
     /// `score`: the three line scores. `hints` are words Whisper should expect, such as respelled names.
     func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores
+    /// `mix`: the export.
+    func mix(_ request: MixRequest) async throws -> MixResult
 }
 
 enum EngineSettings {
@@ -144,6 +170,19 @@ actor EngineClient: Engine {
 
     func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
         try await call("score", ["audio": render.path, "reference": reference.path, "text": text, "hints": hints], as: Scores.self)
+    }
+
+    func mix(_ request: MixRequest) async throws -> MixResult {
+        struct Result: Decodable { var files: [String]; var duration: Double; var lufs: Double? }
+        let options = request.options
+        let lines: [[String: Any]] = request.lines.map {
+            ["audio": $0.audio.path, "text": $0.text, "voice": $0.voice, "pause_after": $0.pauseAfter, "number": $0.number]
+        }
+        let result = try await call("mix", [
+            "out_dir": request.folder.path, "name": request.name, "format": options.format, "lufs": options.lufs, "lines": lines,
+            "per_line": options.perLine, "per_voice": options.perVoice, "srt": options.srt, "timing": options.timing,
+        ], as: Result.self)
+        return MixResult(files: result.files.map { URL(filePath: $0) }, duration: result.duration, lufs: result.lufs)
     }
 
     // MARK: Worker
@@ -340,5 +379,14 @@ struct FakeEngine: Engine {
     func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
         try await Task.sleep(for: delay / 4)
         return Scores(likeYou: 88 + pick(render) % 11, human: 3.5, words: 100, heard: text)
+    }
+
+    /// The first line's audio as the mix, never overwriting.
+    func mix(_ request: MixRequest) async throws -> MixResult {
+        try FileManager.default.createDirectory(at: request.folder, withIntermediateDirectories: true)
+        let url = (1...).lazy.map { request.folder.appending(path: "\(request.name)\($0 == 1 ? "" : " \($0)").\(request.options.format)") }
+            .first { !FileManager.default.fileExists(atPath: $0.path) }!
+        try FileManager.default.copyItem(at: request.lines[0].audio, to: url)
+        return MixResult(files: [url], duration: request.lines.reduce(0) { $0 + audioDuration($1.audio) + $1.pauseAfter }, lufs: Double(request.options.lufs))
     }
 }

@@ -4,10 +4,12 @@ import UniformTypeIdentifiers
 struct GenerateView: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
+    @Environment(Preview.self) private var preview
     @AppStorage("project") private var selection = ""
     @State private var naming: NameRequest?
     @State private var name = ""
     @State private var deleting: String?
+    @State private var exporting = false
 
     /// The New project and Rename alerts share one text field.
     private enum NameRequest: Identifiable {
@@ -20,21 +22,33 @@ struct GenerateView: View {
             ProjectsSidebar(selection: $selection, onNew: { name = ""; naming = .new },
                             onRename: { id in name = projects.project(id)?.name ?? ""; naming = .rename(id) },
                             onDelete: { deleting = $0 })
-                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
                 .toolbar(removing: .sidebarToggle)
         } detail: {
-            HStack(spacing: 0) {
+            Group {
                 if let project = projects.project(selection) {
-                    ScriptPane(project: project).id(project.id)
+                    let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
+                    HStack(spacing: 0) {
+                        ScriptPane(project: project).id(project.id)
+                        VStack(spacing: 8) {
+                            PreviewPane(project: project)
+                            OutputsPane(project: project).id(project.id)
+                        }
+                        .frame(width: 320)
+                        .padding(8)
+                    }
+                    .task(id: timeline) { await preview.load(timeline) }
+                    .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
                 } else {
-                    Text("No projects").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Text("No projects").foregroundStyle(Theme.secondary)
                 }
-                PreviewPlaceholder()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.content)
+            .onDisappear { preview.pause() }
         }
         .toolbar { toolbar }
+        .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
         .onAppear { if projects.project(selection) == nil { selection = projects.projects.first?.id ?? "" } }
         .alert(naming.map { if case .new = $0 { "New project" } else { "Rename project" } } ?? "",
                isPresented: Binding(present: $naming), presenting: naming) { request in
@@ -76,12 +90,11 @@ struct GenerateView: View {
             }
         }
         .sharedBackgroundVisibility(.hidden)
-        // shortcut: Export arrives in milestone 6.
         ToolbarItem(placement: .primaryAction) {
-            Button {} label: { Label("Export", systemImage: "square.and.arrow.up") }
+            Button { exporting = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
                 .labelStyle(.titleAndIcon)
                 .buttonStyle(.primary(height: 32))
-                .disabled(true)
+                .disabled(!(projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false))
         }
         .sharedBackgroundVisibility(.hidden)
     }
@@ -128,33 +141,19 @@ struct ProjectsSidebar: View {
     }
 }
 
-/// Preview and Outputs arrive in milestone 6.
-struct PreviewPlaceholder: View {
-    var body: some View {
-        Text("Preview")
-            .font(.system(size: 17, weight: .bold))
-            .padding(18)
-            .frame(width: 260, alignment: .leading)
-            .frame(maxHeight: .infinity, alignment: .top)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
-        .padding(8)
-    }
-}
-
 // MARK: Script
 
+/// Fixed widths; Text takes the rest.
 private enum Column {
-    static let number: CGFloat = 28
-    static let voice: CGFloat = 102
-    static let tone: CGFloat = 108
-    static let pause: CGFloat = 52
-    static let like: CGFloat = 68
-    static let human: CGFloat = 52
-    static let words: CGFloat = 56
-    static let version: CGFloat = 94
-    static let gutter: CGFloat = 38
-    /// Everything but Text, plus the row's side padding.
-    static let fixed = number + voice + tone + pause + like + human + words + version + gutter + 16
+    static let number: CGFloat = 22
+    static let voice: CGFloat = 88
+    static let tone: CGFloat = 94
+    static let pause: CGFloat = 40
+    static let like: CGFloat = 56
+    static let human: CGFloat = 48
+    static let words: CGFloat = 44
+    static let version: CGFloat = 86
+    static let gutter: CGFloat = 30
 }
 
 struct ScriptPane: View {
@@ -164,7 +163,6 @@ struct ScriptPane: View {
     @State private var splitText: String?
     @State private var importing = false
     @State private var comparing: [String]?
-    @State private var textWidth: CGFloat = 200
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -184,7 +182,7 @@ struct ScriptPane: View {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
                         LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
-                                textWidth: textWidth, onCompare: { comparing = [line.id] })
+                                onCompare: { comparing = [line.id] })
                         Theme.line.frame(height: 1).padding(.horizontal, 8)
                     }
                     footer
@@ -192,7 +190,6 @@ struct ScriptPane: View {
             }
             .scrollIndicators(.automatic)
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { textWidth = max(150, $0 - Column.fixed - 16) }
         .background(Color.white.opacity(0.015))
         .clipShape(.rect(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.line))
@@ -222,7 +219,7 @@ struct ScriptPane: View {
     private var header: some View {
         HStack(spacing: 0) {
             Text("#").frame(width: Column.number)
-            Text("Text").padding(.horizontal, 8).frame(width: textWidth, alignment: .leading)
+            Text("Text").padding(.horizontal, 8).frame(maxWidth: .infinity, alignment: .leading)
             Text("Voice").padding(.horizontal, 8).frame(width: Column.voice, alignment: .leading)
             Text("Tone").padding(.horizontal, 8).frame(width: Column.tone, alignment: .leading)
             Text("Pause").frame(width: Column.pause)
@@ -232,9 +229,9 @@ struct ScriptPane: View {
             Text("Version").padding(.horizontal, 8).frame(width: Column.version, alignment: .leading)
             Color.clear.frame(width: Column.gutter)
         }
-        .font(.system(size: 13, weight: .semibold))
+        .font(.system(size: 12, weight: .semibold))
         .lineLimit(1)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
         .frame(height: 40)
     }
 
@@ -254,11 +251,11 @@ struct LineRow: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
     @Environment(Player.self) private var player
+    @Environment(Preview.self) private var preview
     let projectID: String
     let line: Line
     let number: Int
     let isLast: Bool
-    let textWidth: CGFloat
     let onCompare: () -> Void
 
     var body: some View {
@@ -269,11 +266,12 @@ struct LineRow: View {
             TextField("Text", text: Binding(get: { line.text }, set: { projects.setText($0, line: line.id, in: projectID) }), axis: .vertical)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 8)
-                .frame(width: textWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             voiceMenu.frame(width: Column.voice)
             toneMenu.frame(width: Column.tone)
             pauseField.frame(width: Column.pause)
-            ScoreCell(value: scores.map { "\($0.likeYou)%" }, flag: version?.likeYouFlag).frame(width: Column.like)
+            ScoreCell(value: scores.map { "\($0.likeYou)%" }, flag: version?.likeYouFlag, dim: version?.likeYouJudged == false,
+                      help: version?.likeYouJudged == false ? "Too short to judge" : nil).frame(width: Column.like)
             ScoreCell(value: scores.map { String(format: "%.1f", $0.human) }, flag: version?.humanFlag).frame(width: Column.human)
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
@@ -281,10 +279,12 @@ struct LineRow: View {
             rerenderButton.frame(width: Column.gutter)
         }
         .font(.system(size: 14).monospacedDigit())
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
         .padding(.vertical, 9)
         .frame(minHeight: 50)
+        .background { RoundedRectangle(cornerRadius: 8).fill(preview.currentLine == line.id ? Theme.selection : .clear).padding(.horizontal, 4) }
         .contentShape(.rect)
+        .simultaneousGesture(TapGesture().onEnded { preview.seek(toLine: line.id) })
         .contextMenu {
             Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
             Divider()
@@ -306,7 +306,7 @@ struct LineRow: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 3)
         .accessibilityLabel("Voice")
     }
 
@@ -321,7 +321,7 @@ struct LineRow: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 3)
         .accessibilityLabel("Tone")
     }
 
@@ -416,13 +416,12 @@ private struct MenuBox: View {
     var dim = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(title).lineLimit(1).foregroundStyle(dim ? Theme.secondary : Theme.text)
-            Spacer(minLength: 2)
+        HStack(spacing: 3) {
+            Text(title).lineLimit(1).foregroundStyle(dim ? Theme.secondary : Theme.text).frame(maxWidth: .infinity, alignment: .leading)
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 6)
         .frame(height: 28)
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
         .contentShape(.rect)
@@ -430,9 +429,11 @@ private struct MenuBox: View {
 }
 
 /// A score as a number; a low one gets the amber triangle, a bold value and its reason on hover.
+/// A dim one is shown but not judged.
 private struct ScoreCell: View {
     let value: String?
     let flag: String?
+    var dim = false
     var help: String?
 
     var body: some View {
@@ -442,14 +443,14 @@ private struct ScoreCell: View {
             }
             Text(value ?? "–")
                 .fontWeight(flag == nil ? .regular : .bold)
-                .foregroundStyle(value == nil ? Theme.secondary : Theme.text)
+                .foregroundStyle(value == nil || dim ? Theme.secondary : Theme.text)
         }
         .lineLimit(1)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(.rect)
         .help(flag ?? help ?? "")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([value ?? "None", flag].compactMap(\.self).joined(separator: ", "))
+        .accessibilityLabel([value ?? "None", flag ?? (dim ? help : nil)].compactMap(\.self).joined(separator: ", "))
     }
 }
 

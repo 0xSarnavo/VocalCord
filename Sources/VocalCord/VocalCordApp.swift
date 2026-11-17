@@ -4,8 +4,15 @@ import SwiftUI
 struct VocalCordApp: App {
     @State private var store = VoiceStore(engine: EngineClient())
     @State private var projects = ProjectStore()
-    @State private var player = Player()
+    @State private var player: Player
+    @State private var preview: Preview
     @State private var waveforms = Waveforms()
+
+    init() {
+        let player = Player()
+        _player = State(initialValue: player)
+        _preview = State(initialValue: Preview(player: player))
+    }
 
     var body: some Scene {
         Window("VocalCord", id: "main") {
@@ -13,6 +20,7 @@ struct VocalCordApp: App {
                 .environment(store)
                 .environment(projects)
                 .environment(player)
+                .environment(preview)
                 .environment(waveforms)
         }
         .defaultSize(width: 1280, height: 800)

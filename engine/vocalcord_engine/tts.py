@@ -163,7 +163,8 @@ def _load_breath(path: str, rate: int) -> np.ndarray:
 
 def render(model, job: dict, progress=lambda **_: None, check=lambda: None) -> dict:
     """Render a prepared job with a loaded Breeze model. `check` raises to cancel;
-    it runs before each line."""
+    it runs before each line and before the files are written, so a cancelled
+    render leaves nothing behind."""
     rate = model.sample_rate
     pieces, timing, breaths = [], [], {}
     elapsed = 0.0
@@ -210,15 +211,20 @@ def render(model, job: dict, progress=lambda **_: None, check=lambda: None) -> d
         progress(stage="render", done=index + 1, total=total, line=timing[-1])
 
     output = job["output"]
+    timing_path = output.with_suffix(".json")
+    check()
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Both files are made in a temporary folder, which is deleted on cancel or failure.
     with tempfile.TemporaryDirectory(dir=output.parent) as temp:
         raw = Path(temp) / "raw.wav"
         normalized = Path(temp) / "normalized.wav"
+        timing_temp = Path(temp) / "timing.json"
         sf.write(raw, np.concatenate(pieces), rate)
         audio.loudnorm(raw, normalized, job["lufs"], rate)
+        timing_temp.write_text(json.dumps(timing, indent=2) + "\n", encoding="utf-8")
+        check()
         os.replace(normalized, output)
-    timing_path = output.with_suffix(".json")
-    timing_path.write_text(json.dumps(timing, indent=2) + "\n", encoding="utf-8")
+        os.replace(timing_temp, timing_path)
     return {
         "path": str(output),
         "timing_path": str(timing_path),

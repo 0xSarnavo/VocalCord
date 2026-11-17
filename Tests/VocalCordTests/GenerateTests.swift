@@ -144,12 +144,64 @@ private func fakeEngineFolder() throws -> URL {
 }
 
 @Test func lowScoresAreFlagged() {
-    var version = Version(id: "v", text: "Hi", voiceID: "me", tone: "Neutral", direction: false, seed: 1, duration: 1,
+    var version = Version(id: "v", text: "Hi", voiceID: "me", tone: "Neutral", direction: false, seed: 1, duration: 3,
                           createdAt: .now, scores: Scores(likeYou: 70, human: 3.1, words: 90, heard: "Hi"), referenceHuman: 3.6)
     #expect(version.likeYouFlag == nil && version.wordsFlag == nil && version.humanFlag == nil)
     version.scores = Scores(likeYou: 62, human: 3.0, words: 80, heard: "Hey")
-    #expect(version.likeYouFlag != nil && version.humanFlag == "Human 0.6 below the take's 3.6")
+    #expect(version.likeYouJudged && version.likeYouFlag != nil && version.humanFlag == "Human 0.6 below the take's 3.6")
     #expect(version.wordsFlag?.contains("Hey") == true)
+    // Under 3 s, Like you isn't judged.
+    version.duration = 1.4
+    #expect(!version.likeYouJudged && version.likeYouFlag == nil && version.wordsFlag != nil)
+}
+
+@Test func timelineKeepsPausesAndGaps() {
+    func version(_ id: String, _ duration: Double) -> Version {
+        Version(id: id, text: "x", voiceID: "me", tone: "Neutral", direction: false, seed: 1, duration: duration, createdAt: .now)
+    }
+    var project = Project(name: "P")
+    project.lines = [
+        Line(id: "a", text: "One.", voiceID: "me", pauseAfter: 0.5, versions: [version("a1", 1), version("a2", 1.5)], chosen: "a2"),
+        Line(id: "b", text: String(repeating: "x", count: 30), voiceID: "me", pauseAfter: 0.25),
+        Line(id: "blank", text: " ", voiceID: "me"),
+        Line(id: "c", text: "Three.", voiceID: "me", pauseAfter: 2, versions: [version("c1", 2)], chosen: "c1"),
+    ]
+    let timeline = Timeline(project) { URL(filePath: "/r/\($0.id).wav") }
+    #expect(timeline.segments.map(\.lineID) == ["a", "b", "c"])
+    #expect(timeline.segments.map(\.start) == [0, 2, 4.25])
+    #expect(timeline.segments.map(\.audio?.lastPathComponent) == ["a2.wav", nil, "c1.wav"])
+    #expect(timeline.duration == 6.25)  // the last pause is left off
+    #expect(timeline.line(at: 1.8) == "a" && timeline.line(at: 2) == "b" && timeline.line(at: 6) == "c")
+}
+
+@MainActor @Test func exportListsOutputsAndKeepsChosenTakes() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let root = try tempFolder(), movies = try tempFolder()
+    let projects = ProjectStore(root: root, exportsRoot: movies)
+    let id = projects.create(name: "Launch/film")
+    projects.addLines(["One.", "Two."], to: id, voices: voices)
+    projects.renderNeeded(id, voices: voices)
+    try await waitForRender(projects)
+
+    let options = ExportOptions(format: "m4a", srt: true)
+    let first = try await projects.export(id, options: options, voices: voices)
+    let second = try await projects.export(id, options: options, voices: voices)
+    #expect(first.files.map(\.path) == [movies.appending(path: "Launch-film/Launch-film.m4a").path])
+    #expect(second.files[0].lastPathComponent == "Launch-film 2.m4a")
+
+    let outputs = projects.outputs(id)
+    #expect(outputs.map(\.name) == ["Launch-film 2", "Launch-film", "Line 2 · v1", "Line 1 · v1"])
+    #expect(outputs.map(\.format) == ["M4A", "M4A", "WAV", "WAV"])
+    #expect(outputs.map(\.usedBy) == [nil, nil, 2, 1])
+
+    // A line's chosen take can't be deleted.
+    projects.deleteOutput(outputs[3].id, in: id)
+    #expect(projects.project(id)?.lines[0].versions.count == 1)
+    #expect(ProjectStore(root: root, exportsRoot: movies).project(id)?.exports?.count == 2)
 }
 
 // MARK: Script import
@@ -182,6 +234,27 @@ private func fakeEngineFolder() throws -> URL {
 }
 
 // MARK: Real engine
+
+/// Exports the user's "Scratch" project as M4A at −16 LUFS with captions, through ProjectStore.export and the real
+/// engine. It is listed in that project's Outputs. Opt in: `VOCALCORD_E2E_EXPORT=1 swift test --filter realExport`.
+@MainActor @Test(.enabled(if: ProcessInfo.processInfo.environment["VOCALCORD_E2E_EXPORT"] != nil))
+func realExportOfScratch() async throws {
+    let repo = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let voicesCopy = try tempFolder().appending(path: "Voices")
+    try FileManager.default.copyItem(at: VoiceStore.defaultRoot, to: voicesCopy)
+    let voices = VoiceStore(root: voicesCopy, engine: EngineClient(directory: repo.appending(path: "engine")))
+    let projects = ProjectStore()
+    let scratch = try #require(projects.projects.first { $0.name == "Scratch" })
+    let result = try await projects.export(scratch.id, options: ExportOptions(format: "m4a", lufs: -16, srt: true), voices: voices)
+    for file in result.files {
+        let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
+        print("EXPORT \(file.path) \(size) bytes")
+    }
+    print("EXPORT duration \(result.duration) s, measured \(result.lufs.map { String($0) } ?? "–") LUFS")
+    #expect(result.files.map(\.pathExtension) == ["m4a", "srt"])
+    #expect(abs((result.lufs ?? 0) + 16) <= 1)
+    #expect(projects.outputs(scratch.id).first?.url == result.files[0])
+}
 
 /// Renders and scores two lines in "My voice" with the real engine. Opt in: `VOCALCORD_E2E=1 swift test --filter realEngine`.
 /// Reads a copy of the user's voices; `VOCALCORD_E2E_PROJECTS` sets where the scratch project goes (default: a temp folder).

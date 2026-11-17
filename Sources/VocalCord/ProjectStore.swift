@@ -18,9 +18,13 @@ struct Version: Codable, Identifiable, Hashable, Sendable {
     var referenceHuman: Double?
 
     static let likeYouFloor = 70, wordsFloor = 90, humanDrop = 0.5
+    /// Speaker similarity is unreliable on shorter audio: lines of about 1.4 s scored 31–57%.
+    static let likeYouMinSeconds = 3.0
+
+    var likeYouJudged: Bool { duration >= Self.likeYouMinSeconds }
 
     var likeYouFlag: String? {
-        guard let scores, scores.likeYou < Self.likeYouFloor else { return nil }
+        guard let scores, likeYouJudged, scores.likeYou < Self.likeYouFloor else { return nil }
         return "Like you under \(Self.likeYouFloor)%"
     }
 
@@ -53,11 +57,47 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// A video to watch the voiceover over. Only its path is kept; the file stays where it is.
+struct Video: Codable, Hashable, Sendable {
+    var path: String
+    /// Seconds the video starts after the voiceover; negative starts it earlier.
+    var offset = 0.0
+}
+
+/// One export's files in `~/Movies/VocalCord/<project>/`, the mix first.
+struct Export: Codable, Identifiable, Hashable, Sendable {
+    var id = UUID().uuidString
+    var files: [String]
+    var duration: Double
+    var createdAt = Date.now
+}
+
 struct Project: Codable, Identifiable, Hashable, Sendable {
     var id = UUID().uuidString
     var name: String
     var createdAt = Date.now
     var lines: [Line] = []
+    // Optional so projects saved before they existed still decode.
+    var video: Video?
+    var exports: [Export]?
+}
+
+/// A render or export in the Outputs list.
+struct Output: Identifiable, Hashable {
+    var id: String
+    var name: String
+    var url: URL
+    var duration: Double
+    var date: Date
+    /// The number of the line whose chosen take this is; such a take can't be deleted.
+    var usedBy: Int?
+    var format: String { url.pathExtension.uppercased() }
+}
+
+struct ExportOptions: Sendable {
+    var format = "wav"
+    var lufs = -16
+    var perLine = false, perVoice = false, srt = false, timing = false
 }
 
 /// Each project is `Projects/<id>/project.json`, with its renders in `Projects/<id>/renders/`.
@@ -72,12 +112,17 @@ final class ProjectStore {
     /// Set while a render runs: 0–1.
     private(set) var progress: Double?
     private(set) var renderingLine: String?
+    static let defaultExports = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
+        .appending(path: "VocalCord", directoryHint: .isDirectory)
+
     let root: URL
+    let exportsRoot: URL
     @ObservationIgnored private var task: Task<Void, Never>?
     private let files = FileManager.default
 
-    init(root: URL = ProjectStore.defaultRoot) {
+    init(root: URL = ProjectStore.defaultRoot, exportsRoot: URL = ProjectStore.defaultExports) {
         self.root = root
+        self.exportsRoot = exportsRoot
         do {
             try files.createDirectory(at: root, withIntermediateDirectories: true)
             var unreadable: [String] = []
@@ -192,6 +237,68 @@ final class ProjectStore {
 
     /// The line leaves the script; its renders stay on disk.
     func deleteLine(_ lineID: String, in projectID: String) { update(projectID) { $0.lines.removeAll { $0.id == lineID } } }
+
+    func setVideo(_ video: Video?, in projectID: String) { update(projectID) { $0.video = video } }
+
+    // MARK: Outputs
+
+    /// Every render and export, newest first.
+    func outputs(_ projectID: String) -> [Output] {
+        guard let project = project(projectID) else { return [] }
+        let renders = project.lines.enumerated().flatMap { number, line in
+            line.versions.enumerated().map { index, version in
+                Output(id: version.id, name: "Line \(number + 1) · v\(index + 1)", url: audioURL(version, projectID: projectID),
+                       duration: version.duration, date: version.createdAt, usedBy: line.chosen == version.id ? number + 1 : nil)
+            }
+        }
+        let exports = (project.exports ?? []).map { export in
+            let url = URL(filePath: export.files[0])
+            return Output(id: export.id, name: url.deletingPathExtension().lastPathComponent, url: url,
+                          duration: export.duration, date: export.createdAt)
+        }
+        return (renders + exports).sorted { $0.date > $1.date }
+    }
+
+    /// Moves an export's files, or a render and its timing file, to the Trash. A line's chosen take stays.
+    func deleteOutput(_ id: String, in projectID: String) {
+        guard let project = project(projectID) else { return }
+        let urls: [URL]
+        if let export = project.exports?.first(where: { $0.id == id }) {
+            urls = export.files.map { URL(filePath: $0) }
+        } else if let line = project.lines.first(where: { line in line.versions.contains { $0.id == id } }), line.chosen != id,
+                  let version = line.versions.first(where: { $0.id == id }) {
+            let audio = audioURL(version, projectID: projectID)
+            urls = [audio, audio.deletingPathExtension().appendingPathExtension("json")]
+        } else { return }
+        do {
+            for url in urls where files.fileExists(atPath: url.path) { try files.trashItem(at: url, resultingItemURL: nil) }
+        } catch {
+            self.error = "Couldn't move this to the Trash. \(error.localizedDescription)"
+            return
+        }
+        update(projectID) { project in
+            project.exports?.removeAll { $0.id == id }
+            for index in project.lines.indices { project.lines[index].versions.removeAll { $0.id == id } }
+        }
+    }
+
+    /// Mixes each line's chosen take into `exportsRoot/<project name>/` and lists the export in Outputs.
+    /// Lines without a render are left out. Returns the files, the mix first.
+    func export(_ projectID: String, options: ExportOptions, voices: VoiceStore) async throws -> MixResult {
+        guard let project = project(projectID) else { throw AppError("This project no longer exists.") }
+        let lines = project.lines.enumerated().compactMap { number, line in
+            line.chosenVersion.map { version in
+                MixLine(audio: audioURL(version, projectID: projectID), text: version.text,
+                        voice: voices.voice(version.voiceID)?.name ?? "Voice", pauseAfter: line.pauseAfter, number: number + 1)
+            }
+        }
+        guard !lines.isEmpty else { throw AppError("Render a line first.") }
+        let name = project.name.replacing(/[\/:]/, with: "-")
+        let folder = exportsRoot.appending(path: name, directoryHint: .isDirectory)
+        let result = try await voices.engine.mix(MixRequest(lines: lines, folder: folder, name: name, options: options))
+        update(projectID) { $0.exports = ($0.exports ?? []) + [Export(files: result.files.map(\.path), duration: result.duration)] }
+        return result
+    }
 
     // MARK: Rendering
 

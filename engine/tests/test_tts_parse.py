@@ -1,6 +1,10 @@
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
-from vocalcord_engine import tts
+from vocalcord_engine import tts, worker
 
 
 def test_tone_key_and_free_instruction():
@@ -71,3 +75,30 @@ def test_prepare_rejects_bad_settings(tmp_path):
         tts.prepare({**request, "cfg_scale": 9})
     with pytest.raises(ValueError, match="lines"):
         tts.prepare({**request, "lines": []})
+
+
+class _Model:
+    """Stands in for Breeze: a short tone per spoken part."""
+    sample_rate = 24000
+
+    def generate(self, **_):
+        t = np.arange(4800) / self.sample_rate
+        return [SimpleNamespace(audio=0.3 * np.sin(2 * np.pi * 220 * t))]
+
+
+def test_cancel_during_the_last_line_writes_nothing(tmp_path):
+    job = tts.prepare(_request(tmp_path))
+    checks = []
+
+    def check():                     # passes before the line, cancels before the write
+        checks.append(1)
+        if len(checks) > 1:
+            raise worker.Cancelled()
+
+    with pytest.raises(worker.Cancelled):
+        tts.render(_Model(), job, check=check)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ref.wav"]
+
+    result = tts.render(_Model(), job)
+    assert Path(result["path"]).is_file() and Path(result["timing_path"]).is_file()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.json", "out.wav", "ref.wav"]

@@ -27,7 +27,7 @@ IDLE_S = 120.0
 # MLX keeps freed buffers for reuse; uncapped that cache reached 2.2 GB with Breeze
 # 4-bit and made renders twice as slow on 8 GB through swapping (README).
 MLX_CACHE_LIMIT = 256 * 2**20
-JOB_COMMANDS = {"transcribe", "render", "score", "split", "unload"}
+JOB_COMMANDS = {"transcribe", "render", "score", "split", "mix", "unload"}
 
 
 class Cancelled(Exception):
@@ -177,6 +177,10 @@ class Engine:
         prepared = tts.prepare(request)
         model = self._tts(prepared["model"], job.progress)
         return tts.render(model, prepared, job.progress, job.check)
+
+    def mix(self, request, job) -> dict:
+        from . import mix
+        return mix.mix(request, job.progress, job.check)
 
     def score(self, request, job) -> dict:
         from . import scoring, stt
