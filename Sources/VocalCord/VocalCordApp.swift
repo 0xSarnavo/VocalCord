@@ -12,6 +12,13 @@ struct VocalCordApp: App {
     @State private var setup: Setup
 
     init() {
+        // A downloaded copy marks every file as quarantined. Opening the app clears the check for the app itself,
+        // not for the helpers it starts (uv, and vocalcord-mcp, which the terminal agents launch), so drop the
+        // mark on those. It fails quietly when the app isn't writable, e.g. when run straight from the DMG.
+        let helpers = Bundle.main.executableURL!.deletingLastPathComponent()
+        for name in ["uv", "vocalcord-mcp"] {
+            removexattr(helpers.appending(path: name).path, "com.apple.quarantine", 0)
+        }
         // A dev engine runs as it is; otherwise the app installs its own on first run.
         let dev = EngineLocation.dev
         let engine = EngineClient(location: dev ?? EngineInstall.standard.location)
