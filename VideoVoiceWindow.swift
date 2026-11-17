@@ -32,12 +32,12 @@ final class VideoVoiceWindowController: NSWindowController {
 
     private var projectURL: URL { Bundle.main.bundleURL.deletingLastPathComponent() }
     private var modelsURL: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("voice/models") }
-    private var outputFolder: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/VoiceDesk", isDirectory: true) }
+    private var outputFolder: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/VocalCord", isDirectory: true) }
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 870, height: 750),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "VoiceDesk · Video voiceover"
+        window.title = "VocalCord · Video voiceover"
         window.minSize = NSSize(width: 830, height: 730)
         super.init(window: window)
         buildWindow()
@@ -223,7 +223,7 @@ final class VideoVoiceWindowController: NSWindowController {
 
         let outputCard = card()
         let outputTitle = sectionTitle("Results")
-        let outputHint = label("Saved in Movies / VoiceDesk", size: 12, color: .secondaryLabelColor)
+        let outputHint = label("Saved in Movies / VocalCord", size: 12, color: .secondaryLabelColor)
         let outputHeading = column([outputTitle, outputHint], spacing: 2)
         renderButton.bezelStyle = .rounded
         renderButton.keyEquivalent = "\r"
@@ -340,7 +340,7 @@ final class VideoVoiceWindowController: NSWindowController {
                 guard allowed else { self.showError("Allow microphone access in System Settings, then try again."); return }
                 do {
                     let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                        .appendingPathComponent("VoiceDesk", isDirectory: true)
+                        .appendingPathComponent("VocalCord", isDirectory: true)
                     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                     let url = folder.appendingPathComponent("breath-\(UUID().uuidString).wav")
                     let settings: [String: Any] = [AVFormatIDKey: Int(kAudioFormatLinearPCM),
@@ -399,9 +399,9 @@ final class VideoVoiceWindowController: NSWindowController {
         let destination = outputFolder.appendingPathComponent("Breeze-TTS-2-\(modelChoice.indexOfSelectedItem == 0 ? "8bit" : "4bit")-\(stamp).wav")
         do { try FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true) }
         catch { showError("Could not create the output folder: \(error.localizedDescription)"); return }
-        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("voicedesk-\(UUID().uuidString).txt")
-        let referenceTextURL = FileManager.default.temporaryDirectory.appendingPathComponent("voicedesk-ref-\(UUID().uuidString).txt")
-        let referenceMapURL = FileManager.default.temporaryDirectory.appendingPathComponent("voicedesk-map-\(UUID().uuidString).json")
+        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("vocalcord-\(UUID().uuidString).txt")
+        let referenceTextURL = FileManager.default.temporaryDirectory.appendingPathComponent("vocalcord-ref-\(UUID().uuidString).txt")
+        let referenceMapURL = FileManager.default.temporaryDirectory.appendingPathComponent("vocalcord-map-\(UUID().uuidString).json")
         let temporary = [scriptURL, referenceTextURL, referenceMapURL]
         do {
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -472,7 +472,7 @@ final class VideoVoiceWindowController: NSWindowController {
         cancelButton.isHidden = true
         temporary.forEach { try? FileManager.default.removeItem(at: $0) }
         if cancelled {
-            status.stringValue = "Render stopped. Completed files, if any, are in Movies / VoiceDesk."
+            status.stringValue = "Render stopped. Completed files, if any, are in Movies / VocalCord."
             return
         }
         if succeeded {

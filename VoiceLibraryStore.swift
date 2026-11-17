@@ -28,9 +28,21 @@ final class VoiceLibraryStore {
     private let root: URL
     private var indexURL: URL { root.appendingPathComponent("library.json") }
 
+    private static let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    private static let folder = appSupport.appendingPathComponent("VocalCord/Voices", isDirectory: true)
+
+    /// Copies voices saved under the app's old name. The old folder is never moved or deleted.
+    /// Take paths come from the folder and take ID, so the copy works as is.
+    static func copyOldVoicesIfNeeded() {
+        let old = appSupport.appendingPathComponent("VoiceDesk/Voices", isDirectory: true)
+        let files = FileManager.default
+        guard !files.fileExists(atPath: folder.path), files.fileExists(atPath: old.path) else { return }
+        try? files.createDirectory(at: folder.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? files.copyItem(at: old, to: folder)
+    }
+
     private init() {
-        root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VoiceDesk/Voices", isDirectory: true)
+        root = Self.folder
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: indexURL),
            let decoded = try? JSONDecoder().decode([VoiceProfile].self, from: data) {
@@ -69,7 +81,7 @@ final class VoiceLibraryStore {
     private func importAudio(_ source: URL, to destination: URL, clean: Bool) throws {
         let ffmpeg = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let ffmpeg else { throw NSError(domain: "VoiceDesk", code: 1, userInfo: [NSLocalizedDescriptionKey: "ffmpeg is needed to import audio."]) }
+        guard let ffmpeg else { throw NSError(domain: "VocalCord", code: 1, userInfo: [NSLocalizedDescriptionKey: "ffmpeg is needed to import audio."]) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)
         var arguments = ["-hide_banner", "-loglevel", "error", "-y", "-i", source.path, "-ac", "1", "-ar", "24000"]
@@ -83,13 +95,13 @@ final class VoiceLibraryStore {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: destination)
-            throw NSError(domain: "VoiceDesk", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not read this recording. \(errorText.suffix(180))"])
+            throw NSError(domain: "VocalCord", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not read this recording. \(errorText.suffix(180))"])
         }
         let audio = try AVAudioFile(forReading: destination)
         let seconds = Double(audio.length) / audio.processingFormat.sampleRate
         guard (3...60).contains(seconds) else {
             try? FileManager.default.removeItem(at: destination)
-            throw NSError(domain: "VoiceDesk", code: 3, userInfo: [NSLocalizedDescriptionKey: "Use a recording between 3 and 60 seconds."])
+            throw NSError(domain: "VocalCord", code: 3, userInfo: [NSLocalizedDescriptionKey: "Use a recording between 3 and 60 seconds."])
         }
     }
 
@@ -108,7 +120,7 @@ final class VoiceLibraryStore {
     @discardableResult
     func addTake(profileID: String, source: URL, transcript: String, style: String, clean: Bool = false) throws -> String {
         guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
-            throw NSError(domain: "VoiceDesk", code: 4, userInfo: [NSLocalizedDescriptionKey: "Select a voice first."])
+            throw NSError(domain: "VocalCord", code: 4, userInfo: [NSLocalizedDescriptionKey: "Select a voice first."])
         }
         let name = clean ? "Cleaned reference" : source.deletingPathExtension().lastPathComponent
         let take = VoiceTake(id: UUID().uuidString, name: name, transcript: transcript,

@@ -83,7 +83,7 @@ final class VoiceLibraryWindowController: NSWindowController {
         selectedTakeID = store.profiles.first?.currentTakeID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 580),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "VoiceDesk · Voice library"
+        window.title = "VocalCord · Voice library"
         window.appearance = NSAppearance(named: .darkAqua)
         window.minSize = NSSize(width: 1000, height: 560)
         window.maxSize = NSSize(width: 1250, height: 900)
@@ -155,7 +155,7 @@ final class VoiceLibraryWindowController: NSWindowController {
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor(calibratedRed: 0.045, green: 0.061, blue: 0.066, alpha: 1).cgColor
 
-        let brand = label("≋  VoiceDesk", size: 15, weight: .bold)
+        let brand = label("≋  VocalCord", size: 15, weight: .bold)
         let videoTab = NSButton(title: "Video voiceover", target: self, action: #selector(openVoiceover))
         let local = label("●  PRIVATE ON THIS MAC", size: 10, weight: .semibold,
                           color: NSColor(calibratedRed: 0.64, green: 0.86, blue: 0.77, alpha: 1))
@@ -623,7 +623,7 @@ final class VoiceLibraryWindowController: NSWindowController {
                     self.showError("Allow microphone access in System Settings to record a take.")
                     return
                 }
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent("voicedesk-take-\(UUID().uuidString).wav")
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("vocalcord-take-\(UUID().uuidString).wav")
                 let settings: [String: Any] = [AVFormatIDKey: Int(kAudioFormatLinearPCM),
                                                AVSampleRateKey: 24000, AVNumberOfChannelsKey: 1,
                                                AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
@@ -652,7 +652,7 @@ final class VoiceLibraryWindowController: NSWindowController {
         guard FileManager.default.fileExists(atPath: model.appendingPathComponent("model.safetensors").path) else {
             showError("The Breeze 8-bit model is not installed on this Mac."); return
         }
-        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/VoiceDesk/Voice tests", isDirectory: true)
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/VocalCord/Voice tests", isDirectory: true)
         do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         catch { showError("Could not create the voice tests folder: \(error.localizedDescription)"); return }
         let base = folder.appendingPathComponent("Breeze-TTS-2-8bit-\(UUID().uuidString.prefix(8)).wav")
