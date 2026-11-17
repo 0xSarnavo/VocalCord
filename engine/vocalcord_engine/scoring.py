@@ -116,6 +116,50 @@ def words_right(script: str, heard: str) -> int:
     return round(100 * max(0.0, 1.0 - wer(normalize(script), normalize(heard))))
 
 
+# --- delivery: pitch and gaps ----------------------------------------------
+
+def _frames(samples: np.ndarray, size: int, hop: int) -> np.ndarray:
+    count = max(0, 1 + (len(samples) - size) // hop)
+    return np.stack([samples[i * hop:i * hop + size] for i in range(count)]) if count else np.zeros((0, size))
+
+
+def pitch(samples: np.ndarray, rate: int = RATE) -> float:
+    """Median pitch in Hz of the voiced 40 ms frames (autocorrelation, 70-400 Hz), or 0 with none. Compared with the
+    take's, it catches a render that drifts into a higher or lower voice, as a Happy direction once did by 6 semitones."""
+    size = int(0.04 * rate)
+    frames = _frames(samples.astype(np.float64), size, size // 2)
+    if not len(frames):
+        return 0.0
+    frames = frames - frames.mean(axis=1, keepdims=True)
+    loud = np.sqrt(np.mean(frames ** 2, axis=1)) >= np.max(np.abs(samples)) * 0.05
+    frames = frames[loud]
+    if not len(frames):
+        return 0.0
+    spectrum = np.fft.rfft(frames, 2 * size, axis=1)
+    corr = np.fft.irfft(np.abs(spectrum) ** 2, axis=1)[:, :size]
+    low, high = int(rate / 400), int(rate / 70)
+    lags = low + np.argmax(corr[:, low:high], axis=1)
+    voiced = corr[np.arange(len(lags)), lags] > 0.5 * corr[:, 0]
+    return round(float(np.median(rate / lags[voiced])), 1) if voiced.any() else 0.0
+
+
+def longest_pause(samples: np.ndarray, rate: int = RATE) -> float:
+    """Longest stretch inside the audio (not at its ends) of 20 ms frames 40 dB under the speech level, in seconds."""
+    frames = _frames(samples.astype(np.float64), int(0.02 * rate), int(0.02 * rate))
+    if len(frames) < 3:
+        return 0.0
+    level = 20 * np.log10(np.sqrt(np.mean(frames ** 2, axis=1)) + 1e-9)
+    quiet = level < np.percentile(level, 95) - 40
+    loud = np.flatnonzero(~quiet)
+    if not len(loud):
+        return 0.0
+    longest = run = 0
+    for q in quiet[loud[0]:loud[-1] + 1]:
+        run = run + 1 if q else 0
+        longest = max(longest, run)
+    return round(longest * 0.02, 2)
+
+
 # --- small ONNX models ---------------------------------------------------
 
 def fbank(samples: np.ndarray) -> np.ndarray:

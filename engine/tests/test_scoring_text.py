@@ -20,6 +20,19 @@ def test_normalize_numbers_and_symbols(text, words):
     assert scoring.normalize(text) == words.split()
 
 
+def test_pitch_and_longest_pause():
+    import numpy as np
+    rate = scoring.RATE
+    t = np.arange(rate) / rate
+    voice = 0.3 * np.sin(2 * np.pi * 110 * t) + 0.1 * np.sin(2 * np.pi * 220 * t)   # a low voice with a harmonic
+    assert scoring.pitch(voice) == pytest.approx(110, abs=3)
+    assert scoring.pitch(np.zeros(rate)) == 0
+    gap = np.zeros(int(1.3 * rate))
+    assert scoring.longest_pause(np.concatenate([voice, gap, voice])) == pytest.approx(1.3, abs=0.03)
+    # Silence before the first word or after the last isn't a gap.
+    assert scoring.longest_pause(np.concatenate([gap, voice, gap])) == 0
+
+
 def test_wer():
     ref = "the cat sat on the mat".split()
     assert scoring.wer(ref, ref) == 0

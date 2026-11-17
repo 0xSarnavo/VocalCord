@@ -3,13 +3,14 @@ import Observation
 
 /// Raw values match the engine's `check_audio` warnings.
 enum AudioIssue: String, Codable, Sendable, CaseIterable {
-    case quiet, clipped, noisy
+    case quiet, clipped, noisy, cutOff = "cut_off"
 
     var label: String {
         switch self {
         case .quiet: "Too quiet"
         case .clipped: "Clipping"
         case .noisy: "Background noise"
+        case .cutOff: "Cut off: record again with half a second of silence before and after"
         }
     }
 }
@@ -68,6 +69,8 @@ struct LevelAnalyzer: Sendable {
         if percentile(0.95) < -35 { found.append(.quiet) }
         if Double(clipped) / Double(max(count, 1)) >= 0.0001 { found.append(.clipped) }
         if percentile(0.1) > -50 { found.append(.noisy) }
+        // Starts or stops mid-word: the model carries a take's last sound into the start of every render.
+        if blocks.count >= 2, max(blocks[0], blocks[blocks.count - 1]) > percentile(0.95) - 20 { found.append(.cutOff) }
         return found
     }
 }

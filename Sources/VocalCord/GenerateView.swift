@@ -94,12 +94,17 @@ struct GenerateView: View {
             if let progress = projects.progress {
                 HStack(spacing: 8) {
                     ProgressView(value: progress).frame(width: 90).padding(.leading, 10)
+                    // Lines that failed a check render again, keeping the best of up to five.
+                    if let attempt = projects.renderTry, attempt > 1 {
+                        Text("Try \(attempt) of \(Version.tries)").font(.system(size: 12)).foregroundStyle(Theme.secondary).monospacedDigit()
+                    }
                     Button("Cancel") { projects.cancel() }
                 }
             } else {
                 Button { projects.renderNeeded(selection, voices: voices) } label: { Label("Render", systemImage: "play.fill") }
                     .labelStyle(.titleAndIcon)
-                    .disabled(!(projects.project(selection)?.lines.contains(where: \.needsRender) ?? false))
+                    .disabled(voices.busy != nil || !(projects.project(selection)?.lines.contains(where: \.needsRender) ?? false))
+                    .help(voices.busy != nil ? "A voice check or audition is running" : "")
             }
         }
         ToolbarItem(placement: .primaryAction) {
@@ -303,29 +308,32 @@ struct LineRow: View {
         let decision: CGFloat = line.proposal == nil ? 0 : 22
         HStack(spacing: 0) {
             Text("\(number)").foregroundStyle(Theme.secondary).frame(width: Column.number, alignment: .leading)
-            Group {
+            // The script rules the line breaks show under its text, for the pending change while there is one.
+            VStack(alignment: .leading, spacing: 4) {
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
                 } else {
                     TextField("Text", text: Binding(get: { line.text }, set: { projects.setText($0, line: line.id, in: projectID) }), axis: .vertical)
                         .textFieldStyle(.plain)
                 }
+                ForEach(Script.warnings(line.proposal?.text ?? line.text), id: \.self) { Warning(text: $0) }
             }
             .padding(.horizontal, 6)
             .frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
             voiceMenu.frame(width: Column.voice)
             toneMenu.frame(width: Column.tone)
             pauseField.frame(width: Column.pause)
-            ScoreCell(value: scores.map { "\($0.likeYou)%" }, flag: version?.likeYouFlag, dim: version?.likeYouJudged == false,
+            ScoreCell(value: scores.map { "\($0.likeYou)%" }, flag: joined(version?.likeYouFlag, version?.pitchFlag), dim: version?.likeYouJudged == false,
                       help: version?.likeYouJudged == false ? "Too short to judge" : nil).frame(width: Column.like)
-            ScoreCell(value: scores.map { String(format: "%.1f", $0.human) }, flag: version?.humanFlag).frame(width: Column.human)
+            ScoreCell(value: scores.map { String(format: "%.1f", $0.human) },
+                      flag: joined(version?.humanFlag, version?.paceFlag, version?.gapFlag)).frame(width: Column.human)
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
             if jev.added { JevCell(subject: JevSubject(line)).frame(width: Column.jev) }
             versionControl.frame(width: Column.version - decision)
             Group {
                 if line.proposal != nil {
-                    DecisionButtons(label: "change to line \(number)",
+                    DecisionButtons(label: line.added == true ? "new line \(number)" : "change to line \(number)",
                                     onAccept: { projects.accept([line.id], in: projectID) },
                                     onReject: { projects.reject([line.id], in: projectID) })
                 } else {
@@ -354,6 +362,12 @@ struct LineRow: View {
             Divider()
             Button("Delete line", role: .destructive) { projects.deleteLine(line.id, in: projectID) }
         }
+    }
+
+    /// A score cell's flags: Like you also covers pitch, Human also covers pace and gaps.
+    private func joined(_ flags: String?...) -> String? {
+        let found = flags.compactMap(\.self)
+        return found.isEmpty ? nil : found.joined(separator: "\n")
     }
 
     private var voiceMenu: some View {
@@ -471,8 +485,8 @@ struct LineRow: View {
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .trailing)
-            .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil)
-            .help("Render again")
+            .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil || voices.busy != nil)
+            .help("Render again, until a version passes")
             .accessibilityLabel("Render line \(number) again")
         }
     }
@@ -505,18 +519,21 @@ struct DecisionButtons: View {
     }
 }
 
-/// A line's pending change: the old text struck through above the new, and any tone or pause change.
+/// A line's pending change: the old text struck through above the new, and any tone or pause change. A line an agent
+/// added is marked new.
 private struct ProposalText: View {
     let line: Line
     let proposal: Proposal
 
     var body: some View {
         let changes = [
+            line.added == true ? "New line" : nil,
             proposal.tone == line.tone ? nil : "\(line.tone) → \(proposal.tone)",
             proposal.pauseAfter == line.pauseAfter ? nil : "\(seconds(line.pauseAfter)) → \(seconds(proposal.pauseAfter))",
         ].compactMap(\.self)
+        let replaced = !line.text.isEmpty && proposal.text != line.text
         VStack(alignment: .leading, spacing: 3) {
-            if proposal.text != line.text {
+            if replaced {
                 Text(line.text).strikethrough().foregroundStyle(Theme.secondary)
             }
             Text(proposal.text)
@@ -525,7 +542,7 @@ private struct ProposalText: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel((["Proposed: \(proposal.text)"] + (proposal.text == line.text ? [] : ["was: \(line.text)"]) + changes).joined(separator: ", "))
+        .accessibilityLabel((["Proposed: \(proposal.text)"] + (replaced ? ["was: \(line.text)"] : []) + changes).joined(separator: ", "))
     }
 
     private func seconds(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...2))) + "s" }

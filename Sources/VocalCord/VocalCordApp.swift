@@ -30,6 +30,7 @@ struct VocalCordApp: App {
         let engine = EngineClient(location: dev ?? EngineInstall.standard.location)
         _setup = State(initialValue: Setup(engine: engine, install: dev == nil ? .standard : nil))
         let store = VoiceStore(engine: engine)
+        Task { await store.checkCutOff() }
         let projects = ProjectStore()
         let player = Player()
         let jev = Jev()

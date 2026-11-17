@@ -10,7 +10,8 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 
 - **Clone a voice** from one 10–20 second clip, a guided session of about 8 minutes, or any audio or video file. Long files are cut into clips, grouped by speaker.
 - **Write a script** line by line, each with its own voice, tone and pause. Tags such as `[confident]`, `[pause 0.3]` and `(sigh)` steer a line.
-- **Score every line:** how much it sounds like you, how human it sounds, and whether the words came out right.
+- **Score every line:** how much it sounds like you, how human it sounds, whether the words came out right, and whether its pitch, pace and pauses stay true to your take. A line that fails renders again, up to five times, and keeps its best version.
+- **Voice check:** render ten test lines (every tone, one line ten times, or long lines) to see how a voice holds up, with the time it will take on your Mac shown first.
 - **Preview against your video**, then export WAV or M4A, with captions and per-line or per-voice files.
 - **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script and proposes edits that you accept or reject.
 - **Jev plugin** (optional): checks that each line reads as speech and fits its tone.

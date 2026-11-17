@@ -76,6 +76,7 @@ struct Voice: Codable, Identifiable, Hashable, Sendable {
     var session: Session?
     /// Pronunciations a terminal agent proposed, each waiting for the user to accept or reject it.
     var proposedPronunciations: [Pronunciation]?
+    var lastCheck: VoiceCheck?
 
     func takes(_ tone: String) -> [Take] { takes.filter { $0.tone == tone } }
     func mainTake(_ tone: String) -> Take? {
@@ -103,6 +104,13 @@ final class VoiceStore {
     var error: String?
     /// The voice an audition is running for.
     private(set) var auditioning: String?
+    /// The voice a voice check is running for, with its progress (0-1) and which line and try it is on.
+    private(set) var checking: String?
+    private(set) var checkProgress = 0.0
+    private(set) var checkStatus = ""
+    @ObservationIgnored private var checkTask: Task<Void, Never>?
+    /// The voice an audition or a check is using the engine for; renders in Generate wait for it.
+    var busy: String? { auditioning ?? checking }
     let root: URL
     let engine: any Engine
     /// Set when voices.json exists but cannot be read, so a save never overwrites it.
@@ -344,6 +352,29 @@ final class VoiceStore {
 
     func setMain(_ take: Take, voiceID: String) { update(voiceID) { $0.mains[take.tone] = take.id } }
 
+    /// Takes saved before the cut-off check existed get it here; each launch reads the takes not yet flagged.
+    func checkCutOff() async {
+        for voice in voices {
+            for take in voice.takes where !take.issues.contains(.cutOff) {
+                guard let samples = try? await loadSamples(audioURL(take, voiceID: voice.id)) else { continue }
+                var analyzer = LevelAnalyzer()
+                analyzer.add(samples, sampleRate: 24000)
+                guard analyzer.issues.contains(.cutOff) else { continue }
+                update(voice.id) { voice in
+                    if let index = voice.takes.firstIndex(where: { $0.id == take.id }) { voice.takes[index].issues.append(.cutOff) }
+                }
+            }
+        }
+    }
+
+    /// The take's own Human score, scored once and kept: renders more than 0.5 below it are flagged.
+    func scoreHuman(_ take: Take, voiceID: String) async throws {
+        guard voice(voiceID)?.takes.first(where: { $0.id == take.id })?.human == nil else { return }
+        try Task.checkCancellation()
+        let url = audioURL(take, voiceID: voiceID)
+        setHuman(try await engine.score(url, reference: url, text: take.transcript, hints: []).human, takeID: take.id, voiceID: voiceID)
+    }
+
     func setHuman(_ human: Double, takeID: String, voiceID: String) {
         update(voiceID) { voice in
             if let index = voice.takes.firstIndex(where: { $0.id == takeID }) { voice.takes[index].human = human }
@@ -457,7 +488,7 @@ final class VoiceStore {
     /// Returns the best take's ID per tone.
     @discardableResult
     func audition(_ voiceID: String, proposing: Bool = false, progress: @escaping @Sendable (Double) -> Void) async throws -> [String: String] {
-        guard auditioning == nil else { throw AppError("An audition is running. Try again when it finishes.") }
+        guard busy == nil else { throw AppError("An audition or voice check is running. Try again when it finishes.") }
         guard let voice = voice(voiceID) else { return [:] }
         auditioning = voiceID
         defer { auditioning = nil }
@@ -494,5 +525,86 @@ final class VoiceStore {
         }
         if proposing { for id in best.values { propose(TakeProposal(main: true), take: id, voiceID: voiceID) } }
         return best
+    }
+
+    // MARK: Voice check
+
+    func checkURL(_ version: Version, voiceID: String) -> URL { folder(voiceID).appending(path: "check/\(version.id).wav") }
+
+    /// Runs a voice check in the background; `checking` and `checkProgress` follow it, and `lastCheck` gets the report.
+    func startCheck(_ voiceID: String, test: VoiceTest, busyElsewhere: Bool) {
+        guard busy == nil, !busyElsewhere else { error = "A render or audition is running. Try again when it finishes."; return }
+        checking = voiceID
+        checkProgress = 0
+        checkStatus = "Starting"
+        checkTask = Task {
+            defer { checking = nil; checkTask = nil }
+            do { try await check(voiceID, test: test) } catch is CancellationError {} catch {
+                self.error = "The voice check stopped. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelCheck() { checkTask?.cancel() }
+
+    /// Rounds like Generate's: render every pending line, score them all, then render again the lines whose best
+    /// version still fails a check, up to `Version.tries`. The renders are written to a fresh folder that replaces the
+    /// last check's once this one finishes.
+    func check(_ voiceID: String, test: VoiceTest) async throws {
+        guard let voice = voice(voiceID), !voice.takes.isEmpty else { throw AppError("Add a take in Clone first.") }
+        let lines = test.lines
+        let fresh = folder(voiceID).appending(path: "check-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try files.createDirectory(at: fresh, withIntermediateDirectories: true)
+        var finished = false
+        defer { if !finished { try? files.removeItem(at: fresh) } }
+        var best = [Version?](repeating: nil, count: lines.count), tries = [Int](repeating: 0, count: lines.count)
+        var pending = Array(lines.indices)
+        for attempt in 1...Version.tries where !pending.isEmpty {
+            var made: [(index: Int, version: Version, take: Take)] = []
+            for (step, index) in pending.enumerated() {
+                try Task.checkCancellation()
+                let (text, tone) = lines[index]
+                guard let take = voice.reference(tone) else { continue }
+                checkStatus = "Line \(index + 1) of \(lines.count)" + (attempt > 1 ? ", try \(attempt) of \(Version.tries)" : "")
+                var version = Version(id: UUID().uuidString, text: text, voiceID: voiceID, tone: tone, direction: take.tone != tone,
+                                      seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
+                let clock = ContinuousClock.now, share = 0.85 / Double(pending.count)
+                version.duration = try await engine.render(
+                    RenderLine(text: text, tone: tone, reference: audioURL(take, voiceID: voiceID), referenceText: take.transcript,
+                               pronunciations: voice.pronunciationMap, seed: version.seed),
+                    to: fresh.appending(path: "\(version.id).wav")
+                ) { value in Task { @MainActor in self.checkProgress = (Double(step) + value) * share } }
+                let elapsed = ContinuousClock.now - clock
+                RenderSpeed.record(rendering: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18,
+                                   audio: version.duration)
+                made.append((index, version, take))
+                tries[index] += 1
+            }
+            checkStatus = "Scoring" + (attempt > 1 ? ", try \(attempt) of \(Version.tries)" : "")
+            for item in made { try await scoreHuman(item.take, voiceID: voiceID) }
+            for (step, item) in made.enumerated() {
+                try Task.checkCancellation()
+                var version = item.version
+                version.scores = try await engine.score(fresh.appending(path: "\(version.id).wav"), reference: audioURL(item.take, voiceID: voiceID),
+                                                        text: version.text, hints: voice.pronunciations.map(\.word))
+                    .paced(text: version.text, duration: version.duration, take: item.take)
+                version.referenceHuman = self.voice(voiceID)?.takes.first { $0.id == item.take.id }?.human
+                if best[item.index].map({ version.rank > $0.rank }) ?? true { best[item.index] = version }
+                checkProgress = 0.85 + 0.15 * Double(step + 1) / Double(made.count)
+            }
+            pending = pending.filter { !(best[$0]?.passes ?? true) }
+        }
+        let kept = Set(best.compactMap { $0?.id })
+        for file in (try? files.contentsOfDirectory(at: fresh, includingPropertiesForKeys: nil)) ?? []
+        where !kept.contains(file.deletingPathExtension().lastPathComponent) {
+            try? files.removeItem(at: file)
+        }
+        let folder = folder(voiceID).appending(path: "check", directoryHint: .isDirectory)
+        try? files.removeItem(at: folder)
+        try files.moveItem(at: fresh, to: folder)
+        finished = true
+        let report = VoiceCheck(test: test, date: .now, model: EngineSettings.model,
+                                lines: zip(best, tries).compactMap { version, tries in version.map { VoiceCheck.Line(version: $0, tries: tries) } })
+        update(voiceID) { $0.lastCheck = report }
     }
 }

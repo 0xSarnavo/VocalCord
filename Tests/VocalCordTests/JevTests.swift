@@ -71,7 +71,7 @@ final class FakeTypeSafe: Sendable {
     }
     #expect(questions["spoken"]?["instructions"] as? String == "Does `line` read like something a person would say aloud?")
     #expect(questions["fits_tone"]?["instructions"] as? String == "Does `line` suit being spoken in a Happy tone?")
-    #expect((questions["fits_tone"]?["criteria"] as? [String: String])?["true"]?.contains("warm, genuine happiness") == true)
+    #expect((questions["fits_tone"]?["criteria"] as? [String: String])?["true"]?.contains("pleased, upbeat") == true)
     #expect(questions["keeps_meaning"]?["instructions"] as? [String: String]
         == ["question": "Does `line` keep the meaning of `original`?", "original": "The team shipped the product today."])
 

@@ -1,0 +1,81 @@
+---
+name: voice-direction
+description: How to get natural voiceover from VocalCord's local voice model (Breeze TTS 2) - recording takes to clone from, writing scripts for the ear, choosing tones, reading scores and testing changes. Use when writing or fixing a voiceover script, judging or recording takes, changing tone directions or render settings, or when a render sounds unnatural, choppy, cut off or unlike the speaker.
+---
+
+# Voice direction
+
+VocalCord clones a voice from one take per line. Most quality comes from the take and the script, not from settings.
+The in-app agent can't load this skill: its short version of these rules is `Agent.instructions` in
+`Sources/VocalCord/Terminal.swift`, and the rules code can check are `Script.warnings` (`ProjectStore.swift`) and
+`AudioIssue.cutOff` (`Audio.swift`, `engine/vocalcord_engine/audio.py`). Change all three together.
+
+## How a render works
+
+- Breeze is an in-context model, the same family as Qwen3-TTS (it uses Qwen3-TTS's audio encoder). Each render gets
+  one reference take and its exact transcript, then continues it with the new text. It copies the take's timbre,
+  mood, pace and room, not just "the voice". There is no training on the user's voice.
+- The take is the tone's main take (`Voice.reference`); a tone with no take uses the Neutral take plus a written
+  direction (`STYLES` in `engine/vocalcord_engine/tts.py`) at `cfg_scale` 4. That multiplies the direction's effect, so
+  a direction can move the voice: "brighter, slightly quicker" for Happy raised the pitch by up to 6 semitones in a
+  test. Directions must not ask for pitch or speed changes; a real take in that tone beats any direction.
+- Every `generate` call is a fresh take. Within one call the voice keeps its flow; across calls mood, pace and
+  intonation restart. `[pause]` splits a line into separate calls, and so does text over 600 characters.
+- Limits: 12.5 sound frames a second, at most 750 per call, so 60 s is the hard cap of one call (it cuts off mid-word).
+  About 600 characters (35-40 s) is the practical line length; keep slow lines to 300-400 characters.
+- Speed on an 8 GB M1: 4-bit renders a short line in roughly 10-70 s, 8-bit about 3-4 times slower.
+
+## Takes (what to record)
+
+1. 10-15 s, up to 20. Longer adds little and can make Qwen-family models loop or hang.
+2. Half a second of silence before and after. A take that starts or ends mid-word is the strongest single sign of a
+   bad reference: the model carries the last sound into the start of every render. `cut_off` flags it.
+3. Clean beats long: a hand's width from the mic, a quiet room with soft furnishings, no fan or music. Echo and noise
+   are cloned as if they were the voice.
+4. One mood per take, spoken the way the output should sound: a flat take gives flat renders, a storytelling take
+   gives storytelling renders. Record a take per tone the scripts use.
+5. The transcript must match the words exactly; clear speech whose Whisper transcript is confident clones best.
+6. Choose takes by what they render, not by how clean they sound. `audition` renders a test line from the top
+   candidates per tone and scores them.
+
+## Scripts (what to write)
+
+- One paragraph per line, up to 600 characters; a new line at a change of scene or tone.
+- Short sentences, one idea each, under 25 words, with a very short one now and then ("It shouldn't.").
+- Pauses come from punctuation: comma short, full stop longer, colon sets up, ellipsis adds weight (rarely),
+  question mark rises. Longer gaps go in the line's pause after. Use `[pause]` rarely.
+- Put the stressed word at the end of its sentence; English stresses the last content word.
+- Contractions ("don't"). Numbers, symbols and abbreviations as spoken words ("four ninety-nine", "Doctor").
+- Let the words carry the emotion, and give the line the tone they call for.
+- About 150 words is a minute. Keep a normal pace and pause after new ideas; don't slow everything down.
+- Respell words the voice says wrong (pronunciations, such as Kuber as Koo-ber).
+
+## Judging a render
+
+- Scores (`engine/README.md`): like_you under 70%, words under 90%, or human more than 0.5 below the take's own are
+  low. like_you is unreliable under 3 s of audio.
+- Delivery checks (`Version.flags` in `ProjectStore.swift`): pitch more than 1.5 semitones off the take
+  (`scoring.pitch`), pace more than 35% off the take's on lines of 6 s or more (`Scores.paced`), and a gap over 1.2 s
+  mid-line (`scoring.longest_pause`). Slow and Hesitant skip pace and gaps.
+- Render in Generate retries a line that fails any check, up to `Version.tries` (5), and keeps the best by
+  `Version.rank`; `render_line` renders once for the agent. Voice check in Clone (`VoiceCheck.swift`) runs the same
+  loop over ten test lines and shows its time estimate first, from `RenderSpeed` (measured seconds of rendering per
+  second of audio).
+- Each render comes out a little different: render again before rewriting. Listen on a phone speaker too.
+- Choppy or cut pauses: check for `[pause]` splits and for a take that is cut off; renders fade at part edges and
+  drop a stray pop after dead air (`audio.fade`, `audio.trim_outer_silence`).
+
+## Testing a change
+
+Scores from two renders are noise (like_you was 78 and 98 for the same line and settings). Before changing a direction,
+cfg or default, render the same 2-3 lines with 2+ seeds per variant from the same take, then compare like_you, pitch
+(median F0 against the take's) and the user's ears, blind if possible. Load the model as `worker.py` does
+(`mlx_audio.tts.load`) and score with `scoring.Scorer`; close other apps on 8 GB.
+
+## Sources
+
+- [What makes a good audio prompt for zero-shot TTS](https://arxiv.org/html/2610.40372v1) (take choice, ending in silence)
+- [Breeze TTS 2 model card](https://huggingface.co/BreezeBlue/Breeze-TTS-2)
+- [Qwen3-TTS cloning guide](https://ocdevel.com/blog/20260302-qwen-tts-voice-cloning) (10-15 s, transcripts, looping)
+- [ElevenLabs best practices](https://elevenlabs.io/docs/overview/capabilities/text-to-speech/best-practices) (pauses, normalisation)
+- [Writing for AI voices](https://kveeky.com/resources/ai-voice-pacing-emphasis-breath) (stress, sentence length, pace)

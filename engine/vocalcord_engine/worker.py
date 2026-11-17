@@ -223,6 +223,9 @@ class Engine:
             "words": scoring.words_right(text, heard),
             "heard": heard,
             "similarity": round(similarity, 4),
+            "pitch_hz": scoring.pitch(render),
+            "reference_pitch_hz": scoring.pitch(reference),
+            "longest_pause": scoring.longest_pause(render),
         }
 
 

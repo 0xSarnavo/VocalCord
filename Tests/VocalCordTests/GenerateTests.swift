@@ -131,6 +131,66 @@ private func fakeEngineFolder() throws -> URL {
     #expect(ProjectStore(root: root).projects == projects.projects)
 }
 
+/// Counts the scores asked for each text, so a fake engine can fail the first few.
+final class ScoreCounter: Sendable {
+    private let counts = Mutex([String: Int]())
+    func next(_ text: String) -> Int { counts.withLock { $0[text, default: 0] += 1; return $0[text]! } }
+}
+
+@Test func checksCatchPitchPaceAndGaps() {
+    var version = Version(id: "v", text: "One two three four five six.", voiceID: "x", tone: "Neutral", direction: false, seed: 1,
+                          duration: 8, createdAt: .now)
+    #expect(!version.passes)                                  // not scored yet
+    version.scores = Scores(likeYou: 90, human: 3.8, words: 100, heard: "", pitchHz: 108, referencePitchHz: 103,
+                            longestPause: 0.6, pace: 2.6, referencePace: 2.5)
+    #expect(version.passes && version.flags.isEmpty)
+    version.scores?.pitchHz = 140                             // the Happy direction's kind of drift
+    #expect(version.pitchFlag == "Pitch 5.3 semitones above the take")
+    version.scores?.pitchHz = 108
+    version.scores?.pace = 3.5
+    #expect(version.paceFlag == "Pace 40% faster than the take")
+    version.duration = 4                                      // too short to judge pace
+    #expect(version.paceFlag == nil)
+    version.duration = 8
+    version.scores?.longestPause = 1.6
+    #expect(version.gapFlag == "A 1.6 s gap mid-line" && !version.passes)
+    version.tone = "Hesitant"                                 // meant to pause and slow down
+    #expect(version.passes)
+    // Older scores without these measurements pass on the score floors alone.
+    version.scores = Scores(likeYou: 90, human: 3.8, words: 100, heard: "")
+    #expect(version.passes)
+
+    let take = Take(id: "t", tone: "Neutral", transcript: "One two three four five six seven eight nine ten.", duration: 5, score: nil,
+                    issues: [], createdAt: .now)
+    let paced = Scores(likeYou: 90, human: 3.8, words: 100, heard: "").paced(text: "Hello there [pause 1.0] friend. (sigh)", duration: 3, take: take)
+    #expect(paced.pace == 1.5 && paced.referencePace == 2)
+}
+
+@MainActor @Test func renderRetriesUntilALinePassesAndKeepsTheBest() async throws {
+    let counter = ScoreCounter()
+    let engine = FakeEngine(delay: .zero, scores: { _, text in
+        guard text != "Hello." else { return nil }            // the take's own Human score
+        let fails = text.hasPrefix("Never") || counter.next(text) <= 2
+        return Scores(likeYou: fails ? 50 : 95, human: 3.6, words: 100, heard: text)
+    })
+    let voices = VoiceStore(root: try tempFolder(), engine: engine)
+    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)   // long enough to judge Like you
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "Retry")
+    projects.addLines(["Third time lucky.", "Never good enough."], to: id, voices: voices)
+
+    projects.renderNeeded(id, voices: voices)
+    try await waitForRender(projects)
+    let lines = try #require(projects.project(id)?.lines)
+    #expect(lines[0].versions.count == 3 && lines[0].chosen == lines[0].versions[2].id && lines[0].chosenVersion?.passes == true)
+    #expect(lines[1].versions.count == Version.tries && lines[1].chosenVersion?.passes == false)
+    #expect(projects.error?.hasPrefix("Line 2 still has a flag after \(Version.tries) tries") == true)
+    #expect(projects.renderTry == nil)
+}
+
 @MainActor @Test func unreadableProjectIsNeverOverwritten() throws {
     let root = try tempFolder()
     let broken = root.appending(path: "broken/project.json")
@@ -231,6 +291,20 @@ private func fakeEngineFolder() throws -> URL {
         "First point", "Second point [pause 0.3]", "Quoted line.",
     ])
     #expect(Script.lines(Script.plainText("One.\r\nTwo.\r\n\r\nThree."), by: .paragraphs) == ["One. Two.", "Three."])
+}
+
+@Test func scriptRulesAComputerCanCheck() {
+    #expect(Script.warnings("Every voice app wanted the same thing. My money, and my voice.") == [])
+    // Tags don't count: one pause is fine, and (sigh) is speech.
+    #expect(Script.warnings("Weeks went by. [pause 0.3] Nothing worked. (sigh)") == [])
+    let warnings = Script.warnings("It costs $4.99 [pause 0.2] and [pause 0.3] takes 10 minutes.")
+    #expect(warnings.count == 2)
+    #expect(warnings[0].hasPrefix("2 [pause] tags"))
+    #expect(warnings[1] == "Write numbers and symbols as spoken words: \u{201C}$4.99\u{201D}, \u{201C}10\u{201D}.")
+    let long = Array(repeating: "word", count: 30).joined(separator: " ") + "."
+    #expect(Script.warnings(long) == ["A 30-word sentence. Break it up; keep sentences under 25 words."])
+    let paragraph = Array(repeating: "A short sentence here.", count: 30).joined(separator: " ")
+    #expect(Script.warnings(paragraph).first?.hasPrefix("Over 600 characters") == true)
 }
 
 // MARK: Real engine

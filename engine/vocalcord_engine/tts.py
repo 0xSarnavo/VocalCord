@@ -21,7 +21,8 @@ STYLES = {
     "neutral": "Speak naturally at a relaxed conversational pace.",
     "confident": "Speak with quiet confidence, a steady pace, and firm natural emphasis. Do not sound theatrical.",
     "sad": "Speak softly and more slowly with restrained sadness. Sound natural, without crying.",
-    "happy": "Speak with warm, genuine happiness and a brighter, slightly quicker delivery. Do not overact.",
+    # "Brighter, slightly quicker" raised the pitch by up to 6 semitones, enough to sound like someone else.
+    "happy": "Speak in your own natural voice, sounding pleased and upbeat. Keep your usual pitch.",
     "angry": "Speak with controlled anger and firm emphasis. Keep the words clear, without shouting.",
     "soft": "Speak gently and quietly, with a close conversational delivery.",
     "slow": "Speak clearly at a measured, slower pace, with natural pauses.",
@@ -190,8 +191,8 @@ def render(model, job: dict, progress=lambda **_: None, check=lambda: None) -> d
                     cfg_scale=job["cfg_scale"],
                     seed=seed,
                 )
-                piece = audio.trim_outer_silence(
-                    np.concatenate([np.asarray(chunk.audio, dtype=np.float32) for chunk in chunks]), rate)
+                piece = audio.fade(audio.trim_outer_silence(
+                    np.concatenate([np.asarray(chunk.audio, dtype=np.float32) for chunk in chunks]), rate), rate)
                 segment += 1
             if start is None:
                 start = elapsed

@@ -37,6 +37,45 @@ struct Version: Codable, Identifiable, Hashable, Sendable {
         guard let scores, let referenceHuman, scores.human < referenceHuman - Self.humanDrop else { return nil }
         return "Human " + String(format: "%.1f below the take's %.1f", referenceHuman - scores.human, referenceHuman)
     }
+
+    /// Renders that fail a check are rendered again, up to this many times in all, keeping the best.
+    static let tries = 5
+    /// A direction once raised a voice by 6 semitones; this many is still the same voice. Good renders' pace was 6-17% off
+    /// their take's, and short lines run faster than a take naturally (fewer pauses), so pace is judged from 6 s.
+    static let pitchDrift = 1.5, paceDrift = 0.35, paceMinSeconds = 6.0, longestGap = 1.2
+    /// Slow and Hesitant are meant to differ from the take in pace and pauses.
+    private var paceChecked: Bool { !["Slow", "Hesitant"].contains(tone) }
+
+    var pitchFlag: String? {
+        guard let scores, let pitch = scores.pitchHz, let reference = scores.referencePitchHz, pitch > 0, reference > 0 else { return nil }
+        let semitones = 12 * log2(pitch / reference)
+        guard abs(semitones) > Self.pitchDrift else { return nil }
+        return String(format: "Pitch %.1f semitones %@ the take", abs(semitones), semitones > 0 ? "above" : "below")
+    }
+
+    var paceFlag: String? {
+        guard paceChecked, duration >= Self.paceMinSeconds, let scores, let pace = scores.pace, let reference = scores.referencePace,
+              reference > 0 else { return nil }
+        let change = pace / reference - 1
+        guard abs(change) > Self.paceDrift else { return nil }
+        return "Pace \(Int((abs(change) * 100).rounded()))% \(change > 0 ? "faster" : "slower") than the take"
+    }
+
+    var gapFlag: String? {
+        guard paceChecked, let gap = scores?.longestPause, gap > Self.longestGap else { return nil }
+        return String(format: "A %.1f s gap mid-line", gap)
+    }
+
+    var flags: [String] { [likeYouFlag, humanFlag, wordsFlag, pitchFlag, paceFlag, gapFlag].compactMap(\.self) }
+
+    /// Scored with nothing flagged, so the retry loop keeps it.
+    var passes: Bool { scores != nil && flags.isEmpty }
+
+    /// Passing versions first, then the most like the voice and the most natural.
+    var rank: Double {
+        guard let scores else { return -1 }
+        return (passes ? 1000 : 0) + Double(scores.likeYou) + 15 * scores.human
+    }
 }
 
 struct Line: Codable, Identifiable, Hashable, Sendable {
@@ -51,6 +90,8 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     var proposal: Proposal?
     /// The text before the first accepted agent rewrite, for Jev's meaning check. Cleared when the user edits the text.
     var original: String?
+    /// An agent added this line: it stays empty until the user accepts its proposal, and rejecting removes it.
+    var added: Bool?
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
 
@@ -127,6 +168,8 @@ final class ProjectStore {
     /// Set while a render runs: 0–1.
     private(set) var progress: Double?
     private(set) var renderingLine: String?
+    /// Which round of the retry loop is rendering, from 1.
+    private(set) var renderTry: Int?
     static let defaultExports = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
         .appending(path: "VocalCord", directoryHint: .isDirectory)
 
@@ -274,6 +317,15 @@ final class ProjectStore {
         return pending
     }
 
+    /// Inserts lines an agent proposed at `index`, each with its own voice. They wait like any other change.
+    func proposeLines(_ lines: [(proposal: Proposal, voiceID: String)], at index: Int, in projectID: String) {
+        update(projectID) { project in
+            let new = lines.map { Line(text: "", voiceID: $0.voiceID, tone: $0.proposal.tone, pauseAfter: $0.proposal.pauseAfter,
+                                       proposal: $0.proposal, added: true) }
+            project.lines.insert(contentsOf: new, at: min(max(index, 0), project.lines.count))
+        }
+    }
+
     /// Applies the lines' pending changes. A version already rendered for a line's new text and tone becomes its chosen one;
     /// otherwise the line needs a render.
     func accept(_ lineIDs: [String], in projectID: String) {
@@ -286,6 +338,7 @@ final class ProjectStore {
                 line.tone = proposal.tone
                 line.pauseAfter = proposal.pauseAfter
                 line.proposal = nil
+                line.added = nil
                 if let match = line.versions.last(where: { $0.text == line.text && $0.voiceID == line.voiceID && $0.tone == line.tone }) {
                     line.chosen = match.id
                 }
@@ -294,8 +347,10 @@ final class ProjectStore {
         }
     }
 
+    /// Clears the lines' pending changes; a line an agent added leaves the script.
     func reject(_ lineIDs: [String], in projectID: String) {
         update(projectID) { project in
+            project.lines.removeAll { lineIDs.contains($0.id) && $0.added == true }
             for index in project.lines.indices where lineIDs.contains(project.lines[index].id) { project.lines[index].proposal = nil }
         }
     }
@@ -369,18 +424,20 @@ final class ProjectStore {
         var choose: Bool
         /// Text other than the line's own, such as a pending change.
         var text: String?
+        /// Renders again with a new seed while the version fails a check (`Version.passes`), this many times in all.
+        var tries = 1
     }
 
-    /// Every line with text that has no version for its current text, voice and tone.
+    /// Every line with text that has no version for its current text, voice and tone, each until it passes.
     func renderNeeded(_ projectID: String, voices: VoiceStore) {
         let lines = project(projectID)?.lines.filter(\.needsRender) ?? []
-        start(lines.map { Job(lineID: $0.id, tone: $0.tone, choose: true) }, in: projectID, voices: voices)
+        start(lines.map { Job(lineID: $0.id, tone: $0.tone, choose: true, tries: Version.tries) }, in: projectID, voices: voices)
     }
 
-    /// A new version of one line, in its own tone.
+    /// A new version of one line, in its own tone, until one passes.
     func rerender(_ lineID: String, in projectID: String, voices: VoiceStore) {
         guard let line = project(projectID)?.lines.first(where: { $0.id == lineID }) else { return }
-        start([Job(lineID: line.id, tone: line.tone, choose: true)], in: projectID, voices: voices)
+        start([Job(lineID: line.id, tone: line.tone, choose: true, tries: Version.tries)], in: projectID, voices: voices)
     }
 
     /// Extra versions of each line in each tone; the chosen versions stay as they are.
@@ -388,8 +445,8 @@ final class ProjectStore {
         start(lineIDs.flatMap { id in tones.map { Job(lineID: id, tone: $0, choose: false) } }, in: projectID, voices: voices)
     }
 
-    /// A new version of one line, scored. A line with a pending change renders that change, and the version waits
-    /// unchosen until the change is accepted. Nil while another render runs.
+    /// A new version of one line, scored once: the agent reads the scores and decides. A line with a pending change
+    /// renders that change, and the version waits unchosen until the change is accepted. Nil while another render runs.
     func renderLine(_ lineID: String, in projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
         guard let line = project(projectID)?.lines.first(where: { $0.id == lineID }) else { return nil }
         let job = line.proposal.map { Job(lineID: line.id, tone: $0.tone, choose: false, text: $0.text) }
@@ -402,12 +459,13 @@ final class ProjectStore {
     /// The returned task fails with the render's error, which also shows in the app.
     @discardableResult
     private func start(_ jobs: [Job], in projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
-        guard task == nil, !jobs.isEmpty else { return nil }
+        guard task == nil, voices.busy == nil, !jobs.isEmpty else { return nil }
         progress = 0
         let task = Task {
             defer {
                 progress = nil
                 renderingLine = nil
+                renderTry = nil
                 self.task = nil
             }
             do { try await run(jobs, in: projectID, voices: voices) } catch is CancellationError { throw CancellationError() } catch {
@@ -419,13 +477,48 @@ final class ProjectStore {
         return task
     }
 
-    /// Renders every job first, then scores them all, so the engine swaps Breeze for Whisper once.
+    /// Rounds of rendering: each renders its jobs, then scores them, so the engine swaps Breeze for Whisper once a round.
+    /// A job whose version fails a check goes into the next round with a new seed, until it passes or runs out of tries.
+    /// A line that chooses gets the best version this run made, and the lines that never passed are reported.
     private func run(_ jobs: [Job], in projectID: String, voices: VoiceStore) async throws {
-        struct Rendered { var lineID: String; var version: Version; var take: Take; var voice: Voice }
+        var pending = jobs, attempt = 0
+        var made: [String: [String]] = [:]
+        while !pending.isEmpty {
+            attempt += 1
+            renderTry = attempt
+            let rendered = try await round(pending, in: projectID, voices: voices)
+            for (job, id) in rendered where job.choose { made[job.lineID, default: []].append(id) }
+            update(projectID) { project in
+                for index in project.lines.indices {
+                    guard let ids = made[project.lines[index].id] else { continue }
+                    let best = project.lines[index].versions.filter { ids.contains($0.id) }.max { $0.rank < $1.rank }
+                    if let best { project.lines[index].chosen = best.id }
+                }
+            }
+            pending = rendered.filter { job, id in
+                attempt < job.tries && project(projectID)?.lines.first { $0.id == job.lineID }?.versions.first { $0.id == id }?.passes == false
+            }.map(\.0)
+        }
+        guard let lines = project(projectID)?.lines else { return }
+        let failing = jobs.filter { $0.tries > 1 }.compactMap { job -> Int? in
+            guard let number = lines.firstIndex(where: { $0.id == job.lineID }), lines[number].chosenVersion?.passes == false else { return nil }
+            return number + 1
+        }
+        if !failing.isEmpty {
+            let which = failing.count == 1 ? "Line \(failing[0]) still has" : "Lines " + failing.map(String.init).joined(separator: ", ") + " still have"
+            error = "\(which) a flag after \(Version.tries) tries, so the best version is kept. A cleaner take, a take in "
+                + "the line's tone or a rewrite usually fixes it; the flags say what's off."
+        }
+    }
+
+    /// Renders every job, then scores them all. Returns each job with the version it made.
+    private func round(_ jobs: [Job], in projectID: String, voices: VoiceStore) async throws -> [(Job, String)] {
+        struct Rendered { var job: Job; var version: Version; var take: Take; var voice: Voice }
         let engine = voices.engine
         // A render counts as 10 steps and a score as 1.
         let steps = Double(jobs.count * 11)
         var done = 0.0
+        progress = 0
         var rendered: [Rendered] = []
         for job in jobs {
             try Task.checkCancellation()
@@ -437,39 +530,36 @@ final class ProjectStore {
             var version = Version(id: UUID().uuidString, text: text, voiceID: voice.id, tone: job.tone,
                                   direction: take.tone != job.tone, seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
             renderingLine = line.id
-            let start = done
+            let start = done, clock = ContinuousClock.now
             version.duration = try await engine.render(
                 RenderLine(text: text, tone: job.tone, reference: voices.audioURL(take, voiceID: voice.id),
                            referenceText: take.transcript, pronunciations: voice.pronunciationMap, seed: version.seed),
                 to: audioURL(version, projectID: projectID)
             ) { value in Task { @MainActor in if self.progress != nil { self.progress = (start + value * 10) / steps } } }
+            let elapsed = ContinuousClock.now - clock
+            RenderSpeed.record(rendering: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18,
+                               audio: version.duration)
             updateLine(projectID, line.id) { line in
                 line.versions.append(version)
-                if job.choose { line.chosen = version.id }
+                if job.choose, line.chosen == nil || !(line.chosenVersion?.passes ?? false) { line.chosen = version.id }
             }
-            rendered.append(Rendered(lineID: line.id, version: version, take: take, voice: voice))
+            rendered.append(Rendered(job: job, version: version, take: take, voice: voice))
             done += 10
             progress = done / steps
         }
 
         // Each reference take's own Human score, once; renders more than 0.5 below it are flagged.
-        var seen = Set<String>()
-        for item in rendered where seen.insert(item.take.id).inserted {
-            try Task.checkCancellation()
-            guard voices.voice(item.voice.id)?.takes.first(where: { $0.id == item.take.id })?.human == nil else { continue }
-            let url = voices.audioURL(item.take, voiceID: item.voice.id)
-            let scores = try await engine.score(url, reference: url, text: item.take.transcript, hints: [])
-            voices.setHuman(scores.human, takeID: item.take.id, voiceID: item.voice.id)
-        }
+        for item in rendered { try await voices.scoreHuman(item.take, voiceID: item.voice.id) }
 
         for item in rendered {
             try Task.checkCancellation()
-            renderingLine = item.lineID
+            renderingLine = item.job.lineID
             let scores = try await engine.score(audioURL(item.version, projectID: projectID),
                                                 reference: voices.audioURL(item.take, voiceID: item.voice.id),
                                                 text: item.version.text, hints: item.voice.pronunciations.map(\.word))
+                .paced(text: item.version.text, duration: item.version.duration, take: item.take)
             let referenceHuman = voices.voice(item.voice.id)?.takes.first { $0.id == item.take.id }?.human
-            updateLine(projectID, item.lineID) { line in
+            updateLine(projectID, item.job.lineID) { line in
                 guard let index = line.versions.firstIndex(where: { $0.id == item.version.id }) else { return }
                 line.versions[index].scores = scores
                 line.versions[index].referenceHuman = referenceHuman
@@ -477,6 +567,7 @@ final class ProjectStore {
             done += 1
             progress = done / steps
         }
+        return rendered.map { ($0.job, $0.version.id) }
     }
 }
 
@@ -515,6 +606,26 @@ enum Script {
             out += block ? ["", line, ""] : [line]
         }
         return out.joined(separator: "\n")
+    }
+
+    /// The script rules a computer can check, each as a fix to make. The rest (key word last, contractions, emotion in
+    /// the words) live in the agents' instructions and the voice-direction skill.
+    static func warnings(_ text: String) -> [String] {
+        let spoken = text.replacing(/\[[^\]]*\]/, with: " ")
+        var found: [String] = []
+        if spoken.count > 600 {
+            found.append("Over 600 characters, so the voice splits it into separate takes. Split the line at a sentence.")
+        }
+        let pauses = text.matches(of: /\[\s*pause/.ignoresCase()).count
+        if pauses > 1 { found.append("\(pauses) [pause] tags, and each one splits the take. Use punctuation instead.") }
+        if let longest = lines(spoken, by: .sentences).map({ $0.split(whereSeparator: \.isWhitespace).count }).max(), longest > 25 {
+            found.append("A \(longest)-word sentence. Break it up; keep sentences under 25 words.")
+        }
+        let symbols = Array(Set(spoken.matches(of: /\S*[0-9$%&@#€£¥+=\/]\S*/).map { String($0.output) })).sorted().prefix(3)
+        if !symbols.isEmpty {
+            found.append("Write numbers and symbols as spoken words: " + symbols.map { "\u{201C}\($0)\u{201D}" }.joined(separator: ", ") + ".")
+        }
+        return found
     }
 
     /// Splits plain text into script lines. Paragraphs are separated by blank lines.

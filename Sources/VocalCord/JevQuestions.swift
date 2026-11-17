@@ -15,7 +15,7 @@ enum JevQuestions {
     static let toneMeaning = [
         "Neutral": "naturally, at a relaxed conversational pace",
         "Confident": "with quiet confidence, a steady pace and firm, natural emphasis",
-        "Happy": "with warm, genuine happiness and a brighter, slightly quicker delivery",
+        "Happy": "in a pleased, upbeat way, at the speaker's usual pitch",
         "Sad": "softly and more slowly, with restrained sadness",
         "Angry": "with controlled anger and firm emphasis, without shouting",
         "Soft": "gently and quietly, with a close, conversational delivery",

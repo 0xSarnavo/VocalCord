@@ -122,7 +122,7 @@ final class ToolBridge {
 
     static let scriptTools: [[String: Any]] = [
         tool("get_voices", "Every voice with its takes per tone and its pronunciations. A tone with no takes still renders, from a written direction."),
-        tool("get_script", "The script of the project open in VocalCord: each line's number, text, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change."),
+        tool("get_script", "The script of the project open in VocalCord: each line's number, text, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change. A pending new line has no text until the user accepts it."),
         tool("update_script", "Propose changes to lines. Nothing is applied: each changed line waits in the script for the user to accept or reject it. Fields left out keep their pending or current value.",
              properties: ["changes": [
                  "type": "array",
@@ -133,9 +133,22 @@ final class ToolBridge {
                      "pause": ["type": "number", "minimum": 0, "maximum": 10, "description": "Seconds of silence after the line"],
                  ]],
              ]], required: ["changes"]),
+        tool("add_lines", "Propose new lines, such as a whole script for an empty project. Nothing is applied: each new line waits in the script for the user to accept or reject it, and a rejected one is removed.",
+             properties: [
+                 "after": ["type": "integer", "minimum": 0, "description": "Add after this line number; 0 for the top. Left out: at the end."],
+                 "lines": [
+                     "type": "array",
+                     "items": ["type": "object", "required": ["text"], "properties": [
+                         "text": ["type": "string"],
+                         "voice": ["type": "string", "description": "A voice name from get_voices. Left out: the last line's voice"],
+                         "tone": ["type": "string", "enum": Tone.all],
+                         "pause": ["type": "number", "minimum": 0, "maximum": 10, "description": "Seconds of silence after the line"],
+                     ]],
+                 ],
+             ], required: ["lines"]),
         tool("render_line", "Render one line with VocalCord's engine, then score it; can take a few minutes. A line with a pending change renders that change as a new version, chosen only once the user accepts it.",
              properties: lineProperty, required: ["line"]),
-        tool("get_scores", "Every version of a line with its scores: like_you (speaker similarity, %), human (naturalness, 1 to 5), words (% of words right) and heard (what Whisper heard), plus flags for low scores.",
+        tool("get_scores", "Every version of a line with its scores: like_you (speaker similarity, %), human (naturalness, 1 to 5), words (% of words right) and heard (what Whisper heard), plus flags for low scores and for pitch, pace or gaps that drift from the take.",
              properties: lineProperty, required: ["line"]),
     ]
 
@@ -213,6 +226,7 @@ final class ToolBridge {
             case "get_voices": return (try json(voiceList()), false)
             case "get_script": return (try json(script(currentProject())), false)
             case "update_script": return (try json(propose(arguments, in: currentProject())), false)
+            case "add_lines": return (try json(add(arguments, in: currentProject())), false)
             case "render_line": return (try json(await render(arguments, in: currentProject())), false)
             case "get_scores": return (try json(scores(arguments, in: currentProject())), false)
             case "check_script":
@@ -244,6 +258,9 @@ final class ToolBridge {
         var pause: Double
         var chosenVersion: VersionInfo?
         var pendingChange: Proposal?
+        var pendingNewLine: Bool?
+        /// Script rule warnings for the pending text if any, else the line's own.
+        var warnings: [String]?
     }
 
     private struct VersionInfo: Encodable {
@@ -267,7 +284,15 @@ final class ToolBridge {
         var proposed: [Int] = []
         var unchanged: [Int] = []
         var errors: [String] = []
+        var warnings: [String] = []
         var note = "The user accepts or rejects each proposed line in the script."
+    }
+
+    private struct AddResult: Encodable {
+        var proposed: [Int] = []
+        var errors: [String] = []
+        var warnings: [String] = []
+        var note = "The user accepts or rejects each new line in the script; a rejected one is removed."
     }
 
     private struct ScoresResult: Encodable {
@@ -352,7 +377,7 @@ final class ToolBridge {
     }
 
     private func versionInfo(_ version: Version, in line: Line) -> VersionInfo {
-        var flags = [version.likeYouFlag, version.humanFlag, version.wordsFlag].compactMap(\.self)
+        var flags = version.flags
         if version.scores != nil, !version.likeYouJudged { flags.append("Like you not judged: under \(Int(Version.likeYouMinSeconds)) s") }
         return VersionInfo(version: (line.versions.firstIndex(of: version) ?? 0) + 1, of: line.versions.count, text: version.text,
                            tone: version.tone, chosen: line.chosen == version.id, seconds: (version.duration * 100).rounded() / 100,
@@ -363,7 +388,8 @@ final class ToolBridge {
         ScriptInfo(project: project.name, tones: Tone.all, lines: project.lines.enumerated().map { index, line in
             LineInfo(line: index + 1, text: line.text, voice: voices.voice(line.voiceID)?.name ?? "None", tone: line.tone,
                      pause: line.pauseAfter, chosenVersion: line.chosenVersion.map { versionInfo($0, in: line) },
-                     pendingChange: line.proposal)
+                     pendingChange: line.proposal, pendingNewLine: line.added,
+                     warnings: Optional(Script.warnings(line.proposal?.text ?? line.text)).flatMap { $0.isEmpty ? nil : $0 })
         })
     }
 
@@ -393,27 +419,90 @@ final class ToolBridge {
                 proposal.text = text
             }
             if let value = change["tone"] {
-                guard let tone = Tone.all.first(where: { $0.caseInsensitiveCompare(value as? String ?? "") == .orderedSame }) else {
+                guard let tone = Self.tone(value) else {
                     result.errors.append("Line \(number): tone must be one of \(Tone.all.joined(separator: ", ")).")
                     continue
                 }
                 proposal.tone = tone
             }
             if let value = change["pause"] {
-                guard let pause = (value as? NSNumber)?.doubleValue, (0...10).contains(pause) else {
+                guard let pause = Self.pause(value) else {
                     result.errors.append("Line \(number): pause must be 0 to 10 seconds.")
                     continue
                 }
                 proposal.pauseAfter = pause
             }
             if projects.propose(proposal, line: line.id, in: project.id) { result.proposed.append(number) } else { result.unchanged.append(number) }
+            result.warnings += Script.warnings(proposal.text).map { "Line \(number): \($0)" }
+        }
+        return result
+    }
+
+    private static func tone(_ value: Any) -> String? {
+        Tone.all.first { $0.caseInsensitiveCompare(value as? String ?? "") == .orderedSame }
+    }
+
+    private static func pause(_ value: Any) -> Double? {
+        (value as? NSNumber).map(\.doubleValue).flatMap { (0...10).contains($0) ? $0 : nil }
+    }
+
+    /// New lines go in as pending; ones with errors are left out and the rest are added in order.
+    private func add(_ arguments: [String: Any], in project: Project) throws -> AddResult {
+        guard let items = arguments["lines"] as? [[String: Any]], !items.isEmpty else {
+            throw AppError("lines must be a list of {text, voice, tone, pause}.")
+        }
+        var after = project.lines.count
+        if let value = arguments["after"] {
+            guard let number = (value as? NSNumber)?.intValue, (0...project.lines.count).contains(number) else {
+                throw AppError("after must be from 0 to \(project.lines.count).")
+            }
+            after = number
+        }
+        let lastVoice = projects.defaultVoice(project.id, voices: voices)
+        var result = AddResult()
+        var lines: [(proposal: Proposal, voiceID: String)] = []
+        for (index, item) in items.enumerated() {
+            let label = "New line \(index + 1)"
+            guard let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                result.errors.append("\(label): text can't be empty.")
+                continue
+            }
+            var voiceID = lastVoice
+            if let value = item["voice"] {
+                guard let voice = voices.voices.first(where: { $0.name.caseInsensitiveCompare(value as? String ?? "") == .orderedSame }) else {
+                    result.errors.append("\(label): voice must be one of \(voices.voices.map(\.name).joined(separator: ", ")).")
+                    continue
+                }
+                voiceID = voice.id
+            }
+            var proposal = Proposal(text: text, tone: "Neutral", pauseAfter: 0.5)
+            if let value = item["tone"] {
+                guard let tone = Self.tone(value) else {
+                    result.errors.append("\(label): tone must be one of \(Tone.all.joined(separator: ", ")).")
+                    continue
+                }
+                proposal.tone = tone
+            }
+            if let value = item["pause"] {
+                guard let pause = Self.pause(value) else {
+                    result.errors.append("\(label): pause must be 0 to 10 seconds.")
+                    continue
+                }
+                proposal.pauseAfter = pause
+            }
+            lines.append((proposal, voiceID))
+        }
+        projects.proposeLines(lines, at: after, in: project.id)
+        result.proposed = lines.indices.map { after + $0 + 1 }
+        for (index, line) in lines.enumerated() {
+            result.warnings += Script.warnings(line.proposal.text).map { "Line \(after + index + 1): \($0)" }
         }
         return result
     }
 
     private func render(_ arguments: [String: Any], in project: Project) async throws -> VersionInfo {
         let (number, line) = try line(arguments, in: project)
-        guard projects.progress == nil, voices.auditioning == nil, let task = projects.renderLine(line.id, in: project.id, voices: voices) else {
+        guard projects.progress == nil, voices.busy == nil, let task = projects.renderLine(line.id, in: project.id, voices: voices) else {
             throw AppError("A render or audition is running. Try again when it finishes.")
         }
         do { try await task.value } catch is CancellationError { throw AppError("The render was cancelled.") }
@@ -523,7 +612,7 @@ final class ToolBridge {
 
     private func audition(_ voice: Voice) async throws -> AuditionResult {
         guard !voice.takes.isEmpty else { throw AppError("\u{201C}\(voice.name)\u{201D} has no takes. Add one in Clone.") }
-        guard voices.auditioning == nil, projects.progress == nil else {
+        guard voices.busy == nil, projects.progress == nil else {
             throw AppError("A render or audition is running. Try again when it finishes.")
         }
         let best: [String: String]

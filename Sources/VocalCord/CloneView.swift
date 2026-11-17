@@ -164,6 +164,7 @@ struct VoicePage: View {
     let onDelete: (String) -> Void
     @AppStorage("pronunciationsOpen") private var inspectorOpen = true
     @State private var auditioning = Progress()
+    @State private var checkingVoice = false
     @State private var recordTone: String?
     @State private var picking = false
     @State private var pickTone = "Neutral"
@@ -184,6 +185,10 @@ struct VoicePage: View {
                             if voice.session != nil {
                                 Button("Resume session", action: onResume).buttonStyle(.primary(height: 30))
                             }
+                            Button("Voice check\u{2026}") { checkingVoice = true }
+                                .buttonStyle(.outline)
+                                .disabled(voice.takes.isEmpty)
+                                .help("Render test lines, retrying each until it passes, and see how the voice holds up")
                             auditionButton
                         }
                         TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
@@ -209,6 +214,7 @@ struct VoicePage: View {
                     .focusEffectDisabled()
             }
         }
+        .sheet(isPresented: $checkingVoice) { VoiceCheckSheet(voice: voice) }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie]) { result in
             guard case .success(let url) = result else { return }
             let tone = pickTone
@@ -254,7 +260,7 @@ struct VoicePage: View {
             }
         }
         .buttonStyle(.outline)
-        .disabled(auditioning.active || store.auditioning != nil || voice.takes.isEmpty)
+        .disabled(auditioning.active || store.busy != nil || voice.takes.isEmpty)
     }
 
     private func importUpload(_ url: URL, tone: String) async {

@@ -11,10 +11,12 @@ func tempFolder() throws -> URL {
 }
 
 /// Half-second bursts of a tone at `amplitude`, separated by noise at `floor`.
-func speechLike(seconds: Double, amplitude: Float, floor: Float, rate: Double = 24000) -> [Float] {
+/// Half-second bursts of tone with gaps. Silent edges leave a quarter second without tone at each end, like a recording
+/// that starts and stops in silence.
+func speechLike(seconds: Double, amplitude: Float, floor: Float, rate: Double = 24000, silentEdges: Bool = true) -> [Float] {
     (0..<Int(seconds * rate)).map { index in
         let time = Double(index) / rate
-        let talking = Int(time * 2) % 2 == 0
+        let talking = Int(time * 2) % 2 == 0 && (!silentEdges || (0.25..<seconds - 0.25).contains(time))
         let noise = Float.random(in: -floor...floor)
         return talking ? min(1, max(-1, amplitude * Float(sin(2 * .pi * 220 * time)))) + noise : noise
     }
@@ -31,6 +33,59 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     #expect(issues(speechLike(seconds: 4, amplitude: 0.003, floor: 0.0003)) == [.quiet])
     #expect(issues(speechLike(seconds: 4, amplitude: 1.5, floor: 0.0003)) == [.clipped])
     #expect(issues(speechLike(seconds: 4, amplitude: 0.3, floor: 0.03)) == [.noisy])
+    #expect(issues(speechLike(seconds: 4, amplitude: 0.3, floor: 0.0003, silentEdges: false)) == [.cutOff])
+}
+
+@Test func voiceCheckLinesFollowTheScriptRules() {
+    for test in VoiceTest.allCases {
+        #expect(test.lines.count == 10)
+        for line in test.lines { #expect(Script.warnings(line.text) == [], "\(line.text)") }
+        let minutes = test.estimate(model: "4bit")
+        #expect(minutes.lowerBound >= 1 && minutes.lowerBound < minutes.upperBound)
+    }
+    #expect(Set(VoiceTest.range.lines.map(\.tone)) == Set(Tone.all))
+    #expect(VoiceTest.long.estimate(model: "8bit").lowerBound > VoiceTest.long.estimate(model: "4bit").lowerBound)
+}
+
+@MainActor @Test func voiceCheckRetriesEachLineAndReplacesTheLastCheck() async throws {
+    let counter = ScoreCounter()
+    let engine = FakeEngine(delay: .zero, scores: { _, text in
+        guard text != "Hello." else { return nil }
+        return Scores(likeYou: counter.next(text) == 1 ? 50 : 95, human: 3.6, words: 100, heard: text)   // first try fails
+    })
+    let store = VoiceStore(root: try tempFolder(), engine: engine)
+    let id = store.createVoice(name: "Me", fullClone: false)
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: wav)
+    try store.addTake(id, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+
+    try await store.check(id, test: .range)
+    var report = try #require(store.voice(id)?.lastCheck)
+    #expect(report.test == .range && report.passed == 10 && report.lines.allSatisfy { $0.tries == 2 })
+    #expect(report.lines.filter(\.version.direction).count == 7)   // only Neutral has a take
+    let folder = store.folder(id).appending(path: "check")
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 10)   // only each line's best
+
+    // The same line ten times: only its first render fails, and the new check replaces the last one's files.
+    try await store.check(id, test: .consistency)
+    report = try #require(store.voice(id)?.lastCheck)
+    #expect(report.test == .consistency && report.passed == 10 && report.lines.map(\.tries) == [1] + Array(repeating: 1, count: 9))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 10)
+    #expect(report.lines.allSatisfy { FileManager.default.fileExists(atPath: store.checkURL($0.version, voiceID: id).path) })
+}
+
+@MainActor @Test func takesSavedBeforeTheCutOffCheckGetIt() async throws {
+    let store = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let id = store.createVoice(name: "Me", fullClone: false)
+    for silentEdges in [true, false] {
+        let wav = try tempFolder().appending(path: "take.wav")
+        try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0.0003, silentEdges: silentEdges)[...], rate: 24000, to: wav)
+        try store.addTake(id, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    }
+    await store.checkCutOff()
+    #expect(store.voice(id)?.takes.map(\.issues) == [[], [.cutOff]])
+    await store.checkCutOff()   // a take already flagged isn't flagged again
+    #expect(store.voice(id)?.takes[1].issues == [.cutOff])
 }
 
 @MainActor @Test func migratesOldLibraryWithoutTouchingIt() throws {

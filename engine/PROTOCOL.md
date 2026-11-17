@@ -61,8 +61,8 @@ process memory Activity Monitor shows; it includes MLX's Metal buffers, which
 
 ### check_audio
 
-Level check for a recording or upload, for the too-quiet / clipped / noisy
-warnings. Long files are streamed, not loaded whole.
+Level check for a recording or upload, for the too-quiet / clipped / noisy /
+cut-off warnings. Long files are streamed, not loaded whole.
 
 ```json
 {"id": 3, "cmd": "check_audio", "audio": "/Users/me/upload.mov"}
@@ -79,6 +79,7 @@ share of samples at or above 0.99 of full scale. `warnings` holds any of:
 | `quiet` | `speech_dbfs` < −35 |
 | `clipped` | `clipping_ratio` ≥ 0.0001 |
 | `noisy` | `noise_floor_dbfs` > −50 |
+| `cut_off` | the first or last frame is within 20 dB of `speech_dbfs`: it starts or ends mid-word |
 
 ### transcribe
 
@@ -186,7 +187,8 @@ in a file with several. Uses the speaker model from `score`; loads no large mode
  "reference": "/Users/me/voices/me/neutral.wav", "text": "Kuber keeps every savings circle honest.",
  "hints": ["Kuber"]}
 {"id": 8, "event": "result", "like_you": 74, "human": 3.01, "words": 67,
- "heard": "Kubler keeps every saving circle honest.", "similarity": 0.6927}
+ "heard": "Kubler keeps every saving circle honest.", "similarity": 0.6927,
+ "pitch_hz": 112.4, "reference_pitch_hz": 108.0, "longest_pause": 0.42}
 ```
 
 - `start`/`end` (optional) score one line of a longer render, from the render's timing.
@@ -201,6 +203,11 @@ in a file with several. Uses the speaker model from `score`; loads no large mode
 - `words` 0–100: (1 − WER) × 100 between `text` and `heard` after normalising
   (lowercase, no punctuation, numbers spelled out), floored at 0.
 - `heard`: what Whisper heard.
+- `pitch_hz`, `reference_pitch_hz`: median pitch of the voiced 40 ms frames of the
+  render and of the reference (autocorrelation, 70–400 Hz), 0 when none is voiced.
+  The app flags a render more than 1.5 semitones off its take.
+- `longest_pause`: the longest gap inside the render (20 ms frames 40 dB under
+  its speech level, ends excluded), in seconds.
 
 ### mix
 

@@ -32,6 +32,46 @@ struct Scores: Codable, Hashable, Sendable {
     var words: Int
     /// What Whisper heard.
     var heard: String
+    /// Median pitch in Hz of the render and of its take (0 when nothing is voiced). Nil in scores saved before the
+    /// engine measured them, and those aren't checked.
+    var pitchHz: Double?
+    var referencePitchHz: Double?
+    /// The longest gap inside the render, in seconds.
+    var longestPause: Double?
+    /// Words a second in the render and in its take, set by the app (`paced`).
+    var pace: Double?
+    var referencePace: Double?
+}
+
+extension Scores {
+    /// With the pace check's inputs: words a second in the render (its [pause] seconds left out) and in its take.
+    func paced(text: String, duration: Double, take: Take) -> Scores {
+        func words(_ text: String) -> Double {
+            Double(text.replacing(/\[[^\]]*\]|\([^)]*\)/, with: " ").split(whereSeparator: \.isWhitespace).count)
+        }
+        let pauses = text.matches(of: /\[\s*pause\s+(\d+(?:\.\d+)?)\s*\]/.ignoresCase()).reduce(0.0) { $0 + (Double($1.output.1) ?? 0) }
+        var scores = self
+        scores.pace = duration - pauses > 0.5 ? words(text) / (duration - pauses) : nil
+        scores.referencePace = take.duration > 0 ? words(take.transcript) / take.duration : nil
+        return scores
+    }
+}
+
+/// Seconds of rendering per second of audio on this Mac, per model, learned from recent renders. For time estimates.
+enum RenderSpeed {
+    /// Until a render is measured: 4-bit on an 8 GB M1, and 8-bit about 3.5 times slower.
+    static let initial = ["4bit": 6.0, "8bit": 20.0]
+
+    static func factor(_ model: String = EngineSettings.model) -> Double {
+        let saved = UserDefaults.standard.double(forKey: "renderSpeed." + model)
+        return saved > 0 ? saved : initial[model] ?? 10
+    }
+
+    static func record(rendering seconds: Double, audio: Double, model: String = EngineSettings.model) {
+        guard audio > 0.5, seconds > 0 else { return }
+        let measured = seconds / audio
+        UserDefaults.standard.set(factor(model) * 0.7 + measured * 0.3, forKey: "renderSpeed." + model)
+    }
 }
 
 /// One line of an export: a render and where it sits in the script.
@@ -347,6 +387,8 @@ actor EngineClient: Engine {
 struct FakeEngine: Engine {
     var delay = Duration.milliseconds(500)
     var speakers = 1
+    /// Scores to return instead of the made-up ones, such as a failing score for a test of the retry loop.
+    var scores: (@Sendable (_ render: URL, _ text: String) -> Scores?)?
 
     private static let lines = [
         "I'll send the file in a minute.", "The meeting starts at ten.", "Let me double-check that.",
@@ -376,12 +418,14 @@ struct FakeEngine: Engine {
         let energy = stride(from: 0, to: samples.count, by: block).map { start in
             samples[start..<min(start + block, samples.count)].reduce(0) { $0 + $1 * $1 }
         }
-        // Cut at the quietest 100 ms block between min and max seconds, leaving at least 2 s after it.
+        // Cut at the quietest 100 ms block between min and max seconds, leaving at least 2 s after it. Smoothed with its
+        // neighbours, like the engine's `quietest`, so the cut lands mid-pause and no clip starts or ends on a word.
+        let quiet = { (index: Int) in energy[max(index - 1, 0)...min(index + 1, energy.count - 1)].reduce(0, +) }
         let longest = Int(maxSeconds * 10), shortest = Int(minSeconds * 10)
         var cuts = [0]
         while energy.count - cuts.last! > longest {
             let low = cuts.last! + shortest, high = min(cuts.last! + longest, energy.count - 20)
-            guard low < high, let cut = (low..<high).min(by: { energy[$0] < energy[$1] }) else { break }
+            guard low < high, let cut = (low..<high).min(by: { quiet($0) < quiet($1) }) else { break }
             cuts.append(cut)
         }
         cuts.append(energy.count)
@@ -418,7 +462,7 @@ struct FakeEngine: Engine {
 
     func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
         try await Task.sleep(for: delay / 4)
-        return Scores(likeYou: 88 + pick(render) % 11, human: 3.5, words: 100, heard: text)
+        return scores?(render, text) ?? Scores(likeYou: 88 + pick(render) % 11, human: 3.5, words: 100, heard: text)
     }
 
     /// The first line's audio as the mix, never overwriting.

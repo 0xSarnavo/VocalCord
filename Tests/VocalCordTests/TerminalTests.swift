@@ -100,7 +100,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     // check_script is listed only once Jev is added.
     let tools = try #require((try await rpc(bridge, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(tools.compactMap { $0["name"] as? String }
-        == ["get_voices", "get_script", "update_script", "render_line", "get_scores", "get_takes", "propose_take_changes", "audition"])
+        == ["get_voices", "get_script", "update_script", "add_lines", "render_line", "get_scores", "get_takes", "propose_take_changes", "audition"])
     let withJev = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys("k"), send: FakeTypeSafe([:]).send)) { open }
     let jevTools = try #require((try await rpc(withJev, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(jevTools.compactMap { $0["name"] as? String }.contains("check_script"))
@@ -139,6 +139,48 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     let scores = try await callTool(bridge, "get_scores", ["line": 2])
     #expect(scores.text.contains("\"heard\":\"Now, let us take a closer look together.\""))
     #expect(try await callTool(bridge, "get_scores", ["line": 0]).isError)
+}
+
+@MainActor @Test func addLinesProposesNewLinesEvenIntoAnEmptyProject() async throws {
+    let (projects, voices, _) = try scriptFixture()
+    let other = voices.createVoice(name: "Narrator", fullClone: false)
+    let id = projects.create(name: "Origin story")
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
+
+    let added = try await callTool(bridge, "add_lines", ["lines": [
+        ["text": "Every voice app wanted the same thing.", "tone": "angry", "pause": 0.6],
+        ["text": "  "],
+        ["text": "I called it VocalCord.", "voice": "narrator"],
+        ["text": "Always.", "voice": "Nobody"],
+    ]])
+    #expect(!added.text.contains("\"warnings\":[\""))   // these lines follow the script rules
+    #expect(!added.isError, "\(added.text)")
+    #expect(added.text.contains("\"proposed\":[1,2]") && added.text.contains("New line 2: text can't be empty."))
+    #expect(added.text.contains("New line 4: voice must be one of"))
+    var lines = try #require(projects.project(id)?.lines)
+    // Pending only: empty until accepted, with the tone, pause and voice already set.
+    #expect(lines.map(\.text) == ["", ""] && lines.allSatisfy { $0.added == true })
+    #expect(lines[0].proposal == Proposal(text: "Every voice app wanted the same thing.", tone: "Angry", pauseAfter: 0.6))
+    #expect(lines[0].tone == "Angry" && lines[0].pauseAfter == 0.6 && lines[1].voiceID == other)
+    #expect(try await callTool(bridge, "get_script").text.contains("\"pending_new_line\":true"))
+
+    // after inserts in place; out of range is an error.
+    _ = try await callTool(bridge, "add_lines", ["after": 1, "lines": [["text": "Upload your recordings, they said."]]])
+    #expect(projects.project(id)?.lines.map { $0.proposal?.text } == ["Every voice app wanted the same thing.", "Upload your recordings, they said.", "I called it VocalCord."])
+    #expect(try await callTool(bridge, "add_lines", ["after": 9, "lines": [["text": "Nope."]]]).isError)
+    // Lines that break a rule a computer can check come back with a warning to fix, and get_script shows it.
+    let digits = try await callTool(bridge, "add_lines", ["lines": [["text": "It took 3 weeks."]]])
+    #expect(digits.text.contains("Line 4: Write numbers and symbols as spoken words"))
+    #expect(try await callTool(bridge, "get_script").text.contains("\"warnings\":[\"Write numbers"))
+    projects.reject([try #require(projects.project(id)?.lines.last?.id)], in: id)
+
+    // Accepting keeps a new line; rejecting removes it.
+    lines = try #require(projects.project(id)?.lines)
+    projects.accept([lines[0].id], in: id)
+    projects.reject([lines[1].id], in: id)
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines.count == 2 && lines[0].text == "Every voice app wanted the same thing." && lines[0].added == nil && lines[0].proposal == nil)
+    #expect(lines[1].added == true)
 }
 
 // MARK: Take tools

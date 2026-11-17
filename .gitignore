@@ -10,3 +10,4 @@ engine/.venv/
 assets/logo/concepts/
 assets/logo/AppIcon.iconset/
 dist/
+.claude/settings.local.json

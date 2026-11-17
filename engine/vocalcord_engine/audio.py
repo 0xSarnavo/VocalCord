@@ -27,6 +27,9 @@ QUIET_SPEECH_DBFS = -35.0
 CLIPPED_RATIO = 0.0001
 CLIP_LEVEL = 0.99
 NOISY_FLOOR_DBFS = -50.0
+# A first or last 50 ms frame this close to the speech level means the recording starts or stops mid-word. Clips that
+# end in silence clone better: the model carries the clip's last sound into the start of every render.
+CUT_OFF_DB = 20.0
 
 
 def _ffmpeg(*args: str) -> list[str]:
@@ -78,13 +81,33 @@ def loudnorm(src: Path, dst: Path, lufs: float, rate: int) -> None:
     )
 
 
+# A last sound this short, after at least this much silence, is a Breeze artifact such as a pop after the last word.
+STRAY_GAP_S, STRAY_BURST_S = 0.3, 0.15
+
+
 def trim_outer_silence(audio: np.ndarray, rate: int) -> np.ndarray:
-    """Ported from directed_voice.py."""
+    """Ported from directed_voice.py, plus dropping a stray last sound."""
     audible = np.flatnonzero(np.abs(audio) > max(0.002, np.max(np.abs(audio)) * 0.005))
     if not len(audible):
         return audio
+    # Sounds split by silences of at least STRAY_GAP_S.
+    sounds = np.split(audible, np.flatnonzero(np.diff(audible) >= STRAY_GAP_S * rate) + 1)
+    while len(sounds) > 1 and sounds[-1][-1] - sounds[-1][0] < STRAY_BURST_S * rate:
+        sounds.pop()
     padding = round(0.08 * rate)
-    return audio[max(0, audible[0] - padding):min(len(audio), audible[-1] + padding + 1)]
+    return audio[max(0, audible[0] - padding):min(len(audio), sounds[-1][-1] + padding + 1)]
+
+
+def fade(samples: np.ndarray, rate: int, fade_in: float = 0.01, fade_out: float = 0.03) -> np.ndarray:
+    """Raised-cosine fades at both ends, so speech never starts or stops on a jump to the silence of a pause.
+    Breeze sometimes starts or ends a part mid-sound, which plays as a click or a cut."""
+    out = np.array(samples, dtype=np.float32)
+    count_in, count_out = (min(round(seconds * rate), len(out) // 2) for seconds in (fade_in, fade_out))
+    if count_in:
+        out[:count_in] *= 0.5 - 0.5 * np.cos(np.pi * np.arange(count_in) / count_in)
+    if count_out:
+        out[-count_out:] *= 0.5 + 0.5 * np.cos(np.pi * np.arange(1, count_out + 1) / count_out)
+    return out
 
 
 def quietest(samples: np.ndarray, rate: int, frame_s: float = 0.02, smooth: int = 5) -> int:
@@ -147,6 +170,8 @@ class LevelMeter:
             warnings.append("clipped")
         if noise_floor > NOISY_FLOOR_DBFS:
             warnings.append("noisy")
+        if len(self.frame_rms) >= 2 and max(_db(self.frame_rms[0]), _db(self.frame_rms[-1])) > speech - CUT_OFF_DB:
+            warnings.append("cut_off")
         return {
             "duration": round(self.count / self.rate, 3),
             "peak_dbfs": _db(self.peak),
