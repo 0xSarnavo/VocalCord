@@ -21,8 +21,8 @@ A line that is not a JSON object gets `{"id": null, "event": "error", "code": "i
 
 **Ordering.** `ping`, `status`, `cancel` and `shutdown` are answered at once.
 `check_audio` runs immediately on its own thread. `transcribe`, `render`,
-`score`, `split`, `mix` and `unload` queue and run one at a time in arrival
-order, so replies for different ids can interleave.
+`score`, `split`, `group_speakers`, `mix` and `unload` queue and run one at a
+time in arrival order, so replies for different ids can interleave.
 
 **Memory.** Only one large model is loaded at a time: Breeze (for `render`) or
 Whisper (for `transcribe`, `split`, `score`). A command that needs the other one
@@ -116,6 +116,26 @@ quietest point between the neighbouring words and outer silence is trimmed to
 80 ms. A clip never spans a silence over 1.5 s; speech before such a silence too
 short for a clip is left out. `text` is Whisper's words for the clip. Cancellable
 between chunks and clips.
+
+### group_speakers
+
+Groups clips (usually from `split`) by who is speaking, for picking one speaker
+in a file with several. Uses the speaker model from `score`; loads no large model.
+
+```json
+{"id": 13, "cmd": "group_speakers", "clips": ["/Users/me/clips/clip-001.wav", "/Users/me/clips/clip-002.wav", "…"]}
+{"id": 13, "event": "progress", "stage": "embed", "done": 1, "total": 40}
+{"id": 13, "event": "result", "groups": [["/Users/me/clips/clip-001.wav", "…"], ["/Users/me/clips/clip-002.wav", "…"]]}
+```
+
+- Each clip gets a WeSpeaker embedding; groups are joined by average-linkage
+  clustering while their mean clip-to-clip cosine is at least `threshold`
+  (optional, default 0.5; other speakers score up to about 0.22).
+- `groups` holds the clip paths as given, largest group first. A group with
+  fewer than 5% of the clips (or one clip) is a stray, such as laughter or a
+  one-word reply, and is left out; the largest group is always kept, so a file
+  with one speaker gives one group. No clips gives no groups.
+- Cancellable between clips.
 
 ### render
 
@@ -230,7 +250,8 @@ as one file plus optional extras. Loads no model.
 `cancelled` is false when `target` is not running or queued. A queued job is
 dropped when it reaches the front; a running `render` stops before its next line
 (a line in progress finishes first, up to about 30 s) and writes nothing,
-`transcribe` and `split` before their next chunk, `mix` before its next file.
+`transcribe` and `split` before their next chunk, `group_speakers` before its
+next clip, `mix` before its next file.
 
 ### unload
 

@@ -2,10 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum Flow: Hashable {
-    case fast(String), full(String)
+    /// `file` holds the new voice's name: that voice is made only at the end.
+    case fast(String), full(String), file(String)
 
-    var voiceID: String {
-        switch self { case .fast(let id), .full(let id): id }
+    var voiceID: String? {
+        switch self {
+        case .fast(let id), .full(let id): id
+        case .file: nil
+        }
     }
 }
 
@@ -32,10 +36,15 @@ struct CloneView: View {
         .onAppear { if selection == nil { selection = store.voices.first?.id } }
         .onChange(of: selection) { if flow?.voiceID != selection { flow = nil } }
         .sheet(isPresented: $showNew) {
-            NewVoiceSheet { name, full in
-                let id = store.createVoice(name: name, fullClone: full)
+            NewVoiceSheet { name, kind in
+                if kind == .file {
+                    selection = nil
+                    flow = .file(name)
+                    return
+                }
+                let id = store.createVoice(name: name, fullClone: kind == .full)
                 selection = id
-                flow = full ? .full(id) : .fast(id)
+                flow = kind == .full ? .full(id) : .fast(id)
             }
         }
         // `presenting:` hands the ID to the actions, since dismissing clears the state.
@@ -61,6 +70,11 @@ struct CloneView: View {
             FullCloneView(voiceID: id) { flow = nil }.id(id)
         case .fast(let id):
             FastCloneView(voiceID: id) { flow = nil }.id(id)
+        case .file(let name):
+            FileCloneView(name: name) { id in
+                flow = nil
+                selection = id ?? store.voices.first?.id
+            }
         case nil:
             if let voice = store.voice(selection) {
                 VoicePage(voice: voice, onResume: { flow = .full(voice.id) }, onRename: startRename, onDelete: { deleting = $0 })
@@ -167,6 +181,9 @@ struct VoicePage: View {
                 TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
                            onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
             }
+            // Columns stop stretching on wide windows.
+            .frame(maxWidth: 1160, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 24)
             .padding(.top, 22)
             .padding(.bottom, 24)
@@ -229,8 +246,12 @@ private enum Column {
     static let main: CGFloat = 58
     static let gutter: CGFloat = 36
     static let row: CGFloat = 44
+    static let emptyRow: CGFloat = 36
     static let fixed = tone + length + like + main + gutter
 }
+
+/// Row separator: fainter than Theme.line so the table reads as rows, not a grid.
+private let rule = Color(hex: 0x1E2023)
 
 struct TakesTable: View {
     let voice: Voice
@@ -252,23 +273,24 @@ struct TakesTable: View {
                 cell("Main", width: Column.main)
                 Color.clear.frame(width: Column.gutter)
             }
-            .font(.system(size: 13, weight: .semibold))
-            .frame(height: 40)
-            Theme.line.frame(height: 1)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(Theme.secondary)
+            .frame(height: 34)
+            rule.frame(height: 1)
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(Tone.all, id: \.self) { tone in
                         group(tone)
-                        Theme.line.frame(height: 1)
+                        rule.frame(height: 1)
                     }
                 }
             }
             .scrollIndicators(.automatic)
+            .scrollBounceBehavior(.basedOnSize)
         }
+        // Measures the space offered, not the rows' own width, so the columns can shrink again.
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { takeWidth = max(120, $0 - Column.fixed) }
-        .background(Color.white.opacity(0.015))
-        .clipShape(.rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.line))
     }
 
     private func cell(_ title: String, width: CGFloat, alignment: Alignment = .center) -> some View {
@@ -276,51 +298,59 @@ struct TakesTable: View {
             .lineLimit(1)
             .padding(.horizontal, 12)
             .frame(width: width, alignment: alignment)
-            .frame(maxHeight: .infinity)
-            .overlay(alignment: .trailing) { Theme.line.frame(width: 1) }
     }
 
     private func group(_ tone: String) -> some View {
         let takes = voice.takes(tone)
         let isCollapsed = collapsed.contains(tone)
-        return HStack(alignment: .top, spacing: 0) {
-            Button {
-                if isCollapsed { collapsed.remove(tone) } else { collapsed.insert(tone) }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .rotationEffect(.degrees(isCollapsed ? -90 : 0))
-                        .foregroundStyle(Theme.secondary)
-                    Text(tone).font(.system(size: 14, weight: .semibold))
-                    Text("(\(takes.count))").font(.system(size: 14)).foregroundStyle(Theme.secondary)
-                }
-                .lineLimit(1)
-                .padding(.leading, 10)
-                .frame(width: Column.tone, height: Column.row, alignment: .leading)
-                .contentShape(.rect)
+        let collapsible = takes.count > 1
+        let height = takes.isEmpty ? Column.emptyRow : Column.row
+        let label = HStack(spacing: 6) {
+            // Hidden, not removed, so every tone name starts at the same x.
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .bold))
+                .rotationEffect(.degrees(isCollapsed ? -90 : 0))
+                .foregroundStyle(Theme.secondary)
+                .opacity(collapsible ? 1 : 0)
+            Text(tone)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(takes.isEmpty ? Theme.secondary : Theme.text)
+            if collapsible {
+                Text("(\(takes.count))").font(.system(size: 14)).foregroundStyle(Theme.secondary)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(tone), \(takes.count) takes, \(isCollapsed ? "collapsed" : "expanded")")
+        }
+        .lineLimit(1)
+        .padding(.leading, 10)
+        .frame(width: Column.tone, height: height, alignment: .leading)
+        .contentShape(.rect)
+        return HStack(alignment: .top, spacing: 0) {
+            if collapsible {
+                Button {
+                    if isCollapsed { collapsed.remove(tone) } else { collapsed.insert(tone) }
+                } label: { label }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(tone), \(takes.count) takes, \(isCollapsed ? "collapsed" : "expanded")")
+            } else {
+                label.accessibilityElement(children: .combine)
+            }
 
             VStack(spacing: 0) {
                 if isCollapsed || takes.isEmpty {
-                    blankRow(takes.isEmpty ? "No take" : nil)
+                    blankRow(takes.isEmpty ? "No take" : nil, height: height)
                 } else {
                     ForEach(Array(takes.enumerated()), id: \.element.id) { index, take in
                         TakeRow(take: take, voice: voice, showsMain: takes.count > 1, takeWidth: takeWidth)
-                            .overlay(alignment: .top) { if index > 0 { Theme.line.frame(height: 1) } }
+                            .overlay(alignment: .top) { if index > 0 { rule.frame(height: 1) } }
                     }
                 }
             }
-            .overlay(alignment: .leading) { Theme.line.frame(width: 1) }
 
             ZStack {
                 if !takes.isEmpty {
                     addMenu(tone).opacity(hovered == tone || importingTone == tone ? 1 : 0)
                 }
             }
-            .frame(width: Column.gutter, height: Column.row)
+            .frame(width: Column.gutter, height: height)
         }
         .overlay(alignment: .topTrailing) {
             if takes.isEmpty { emptyActions(tone).opacity(hovered == tone || importingTone == tone ? 1 : 0) }
@@ -368,29 +398,20 @@ struct TakesTable: View {
         }
         .fixedSize()
         .padding(.horizontal, 8)
-        .frame(height: Column.row)
-        .background { ZStack { Theme.content; Theme.selection.opacity(0.45) } }
+        .frame(height: Column.emptyRow)
     }
 
-    private func blankRow(_ note: String?) -> some View {
-        HStack(spacing: 0) {
-            Text(note ?? "")
-                .font(.system(size: 14))
-                .foregroundStyle(Theme.secondary)
-                .padding(.horizontal, 14)
-                .frame(width: takeWidth, alignment: .leading)
-            Color.clear.frame(width: Column.length).overlay(alignment: .leading) { Theme.line.frame(width: 1) }
-            Color.clear.frame(width: Column.like).overlay(alignment: .leading) { Theme.line.frame(width: 1) }
-            Color.clear.frame(width: Column.main).overlay(alignment: .leading) { Theme.line.frame(width: 1) }
-        }
-        .frame(height: Column.row)
-        .overlay(alignment: .trailing) { Theme.line.frame(width: 1) }
+    private func blankRow(_ note: String?, height: CGFloat) -> some View {
+        Text(note ?? "")
+            .font(.system(size: 14))
+            .foregroundStyle(Theme.secondary)
+            .padding(.horizontal, 12)
+            .frame(width: takeWidth + Column.length + Column.like + Column.main, height: height, alignment: .leading)
     }
 }
 
 struct TakeRow: View {
     @Environment(VoiceStore.self) private var store
-    @Environment(Player.self) private var player
     let take: Take
     let voice: Voice
     let showsMain: Bool
@@ -403,17 +424,8 @@ struct TakeRow: View {
         let isMain = voice.mainTake(take.tone)?.id == take.id
         HStack(spacing: 0) {
             HStack(spacing: 10) {
-                Button { player.toggle(url) } label: {
-                    Image(systemName: player.playing == url ? "stop.fill" : "play.fill")
-                        .font(.system(size: 11))
-                        .frame(width: 30, height: 24)
-                        .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 6))
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(player.playing == url ? "Stop" : "Play")
+                PlayButton(url: url)
                 SmallWaveform(url: url).frame(width: 54, height: 18)
-                Theme.line.frame(width: 1, height: 20)
                 TextField("Transcript", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(editing ? nil : 2)
@@ -435,12 +447,10 @@ struct TakeRow: View {
             Text(formatTime(take.duration))
                 .frame(width: Column.length)
                 .frame(maxHeight: .infinity)
-                .overlay(alignment: .leading) { Theme.line.frame(width: 1) }
             Text(take.score.map { "\(Int(($0 * 100).rounded()))%" } ?? "–")
                 .foregroundStyle(take.score == nil ? Theme.secondary : Theme.text)
                 .frame(width: Column.like)
                 .frame(maxHeight: .infinity)
-                .overlay(alignment: .leading) { Theme.line.frame(width: 1) }
             // ZStack, not Group: an empty Group would drop the column's fixed width.
             ZStack {
                 if showsMain {
@@ -457,8 +467,6 @@ struct TakeRow: View {
             }
             .frame(width: Column.main)
             .frame(maxHeight: .infinity)
-            .overlay(alignment: .leading) { Theme.line.frame(width: 1) }
-            .overlay(alignment: .trailing) { Theme.line.frame(width: 1) }
         }
         .font(.system(size: 14).monospacedDigit())
         .frame(minHeight: Column.row)
@@ -475,6 +483,23 @@ struct TakeRow: View {
     private func commit() {
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { text = take.transcript; return }
         store.setTranscript(text, take: take, voiceID: voice.id)
+    }
+}
+
+struct PlayButton: View {
+    @Environment(Player.self) private var player
+    let url: URL
+
+    var body: some View {
+        Button { player.toggle(url) } label: {
+            Image(systemName: player.playing == url ? "stop.fill" : "play.fill")
+                .font(.system(size: 11))
+                .frame(width: 30, height: 24)
+                .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 6))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(player.playing == url ? "Stop" : "Play")
     }
 }
 
@@ -522,7 +547,7 @@ struct PronunciationsPanel: View {
                     }
                     .padding(.horizontal, 18)
                     .frame(height: 64)
-                    Theme.line.frame(height: 1).padding(.horizontal, 12)
+                    rule.frame(height: 1).padding(.horizontal, 12)
                     ForEach(voice.pronunciations) { item in
                         HStack(spacing: 10) {
                             Text(item.word)
@@ -531,9 +556,8 @@ struct PronunciationsPanel: View {
                         }
                         .font(.system(size: 14))
                         .padding(.horizontal, 18)
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                         .contentShape(.rect)
-                        .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 12) }
                         .contextMenu {
                             Button("Delete", role: .destructive) { store.removePronunciation(item.id, voiceID: voice.id) }
                         }
@@ -541,9 +565,8 @@ struct PronunciationsPanel: View {
                     Button { adding = true } label: { Label("Add", systemImage: "plus") }
                         .buttonStyle(.outline(height: 32))
                         .frame(maxWidth: .infinity)
-                        .padding(.top, 16)
+                        .padding(.vertical, 16)
                         .popover(isPresented: $adding, arrowEdge: .bottom) { addForm }
-                    Spacer()
                 }
                 .frame(width: 240)
             } else {
@@ -552,12 +575,12 @@ struct PronunciationsPanel: View {
                     .help("Pronunciations")
                     .accessibilityLabel("Show pronunciations")
                     .frame(width: 44, height: 64)
-                    .frame(maxHeight: .infinity, alignment: .top)
             }
         }
-        .frame(maxHeight: .infinity, alignment: .top)
         .glassEffect(.regular, in: .rect(cornerRadius: 18))
         .padding(8)
+        // Hugs its content, so an empty list isn't a tall empty box.
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var addForm: some View {
@@ -586,10 +609,12 @@ struct PronunciationsPanel: View {
 // MARK: New voice
 
 struct NewVoiceSheet: View {
+    enum Kind { case fast, full, file }
+
     @Environment(\.dismiss) private var dismiss
-    let onStart: (String, Bool) -> Void
+    let onStart: (String, Kind) -> Void
     @State private var name = ""
-    @State private var full = false
+    @State private var kind = Kind.fast
     @State private var consent = false
 
     var body: some View {
@@ -599,8 +624,9 @@ struct NewVoiceSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .focusEffectDisabled(false)
             HStack(spacing: 12) {
-                choice("Fast clone", detail: "One 10–20 s clip", selected: !full) { full = false }
-                choice("Full clone", detail: "Guided, about 8 min", selected: full) { full = true }
+                choice("Fast clone", detail: "One 10–20 s clip", kind: .fast)
+                choice("Full clone", detail: "Guided, about 8 min", kind: .full)
+                choice("From a file", detail: "Any audio or video", kind: .file)
             }
             Toggle("This is my voice, or I have the speaker's permission.", isOn: $consent)
                 .toggleStyle(.checkbox)
@@ -608,7 +634,7 @@ struct NewVoiceSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
                 Button("Start") {
-                    onStart(name, full)
+                    onStart(name, kind)
                     dismiss()
                 }
                 .buttonStyle(.primary(height: 32))
@@ -617,14 +643,15 @@ struct NewVoiceSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 460)
+        .frame(width: 580)
         .background(Theme.content)
         .preferredColorScheme(.dark)
         .focusEffectDisabled()
     }
 
-    private func choice(_ title: String, detail: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func choice(_ title: String, detail: String, kind: Kind) -> some View {
+        let selected = self.kind == kind
+        return Button { self.kind = kind } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 15, weight: .semibold))
                 Text(detail).font(.system(size: 13)).foregroundStyle(Theme.secondary)
@@ -637,5 +664,279 @@ struct NewVoiceSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+// MARK: From a file
+
+/// Drop files, cut them into clips, pick the speaker, review the clips, then create the voice and audition it.
+struct FileCloneView: View {
+    @Environment(VoiceStore.self) private var store
+    let name: String
+    /// The new voice's ID, or nil when cancelled.
+    let onDone: (String?) -> Void
+
+    private enum Stage { case pick, cutting, grouping, speakers, review, auditioning }
+    @State private var stage = Stage.pick
+    @State private var working = Progress()
+    @State private var task: Task<Void, Never>?
+    /// Copies of the sources and every clip, until Create moves them to the voice's raw/.
+    @State private var folder: URL?
+    @State private var groups: [[FileClip]] = []
+    @State private var clips: [FileClip] = []
+    @State private var picking = false
+    @State private var dropping = false
+
+    var body: some View {
+        Group {
+            switch stage {
+            case .pick: pickView
+            case .cutting: progressView("Cutting into clips", button: "Cancel")
+            case .grouping: progressView("Finding speakers", button: "Cancel")
+            case .speakers: speakersView
+            case .review: reviewView
+            case .auditioning: progressView("Audition", button: "Skip")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { _ = start(urls) }
+        }
+        .onDisappear {
+            task?.cancel()
+            discard()
+        }
+    }
+
+    /// Full clone's layout: a large prompt, its controls, and one button at the bottom.
+    private func screen<Content: View>(_ title: String, bottom: String, action: @escaping () -> Void,
+                                       @ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            Spacer()
+            Text(title)
+                .font(.system(size: 34, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+            Spacer().frame(height: 52)
+            content()
+            Spacer()
+            Button(bottom, action: action).buttonStyle(.outline(height: 44)).padding(.bottom, 44)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var pickView: some View {
+        screen("Drop audio or video files", bottom: "Cancel", action: { onDone(nil) }) {
+            Button { picking = true } label: { Text("Choose files").frame(minWidth: 260) }
+                .buttonStyle(.primary(height: 76))
+        }
+        .background(dropping ? Theme.selection.opacity(0.5) : .clear, in: .rect(cornerRadius: 18))
+        .padding(8)
+        .dropDestination(for: URL.self) { urls, _ in start(urls) } isTargeted: { dropping = $0 }
+    }
+
+    private func progressView(_ title: String, button: String) -> some View {
+        screen(title, bottom: button, action: { task?.cancel() }) {
+            ProgressView(value: working.value).frame(width: 260)
+        }
+    }
+
+    private var speakersView: some View {
+        screen("Who do you want to clone?", bottom: "Cancel", action: { onDone(nil) }) {
+            VStack(spacing: 4) {
+                ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                    SpeakerRow(number: index + 1, clips: group) { choose(group) }
+                }
+            }
+            .frame(width: 440)
+        }
+    }
+
+    private var reviewView: some View {
+        let kept = clips.filter(\.keep)
+        let ready = !kept.isEmpty && !kept.contains { $0.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Text(title.isEmpty ? "Untitled voice" : title)
+                    .font(.system(size: 30, weight: .bold))
+                    .lineLimit(1)
+                Spacer()
+                if groups.count > 1 {
+                    Button("Back") { stage = .speakers }.buttonStyle(.outline(height: 34))
+                }
+                Button("Cancel") { onDone(nil) }.buttonStyle(.outline(height: 34))
+                Button("Create voice", action: create).buttonStyle(.primary).disabled(!ready)
+            }
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
+                    Color.clear.frame(width: FileColumn.issues)
+                    Text("Length").frame(width: FileColumn.length)
+                    Text("Tone").frame(width: FileColumn.tone, alignment: .leading)
+                }
+                .font(.system(size: 13, weight: .medium).monospacedDigit())
+                .foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                rule.frame(height: 1)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach($clips) { $clip in
+                            FileClipRow(clip: $clip)
+                            rule.frame(height: 1)
+                        }
+                    }
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            }
+        }
+        .frame(maxWidth: 1160, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 24)
+        .padding(.top, 22)
+        .padding(.bottom, 24)
+    }
+
+    /// Cuts the files, then groups the clips by speaker. Returns false when nothing dropped is audio or video.
+    private func start(_ urls: [URL]) -> Bool {
+        let media = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .audiovisualContent) == true }
+        guard !media.isEmpty, stage == .pick else { return false }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VocalCord-files-\(UUID().uuidString)", directoryHint: .isDirectory)
+        self.folder = folder
+        task = Task {
+            do {
+                stage = .cutting
+                working.start()
+                let all = try await store.cutFiles(media, into: folder, progress: working.callback)
+                stage = .grouping
+                working.start()
+                groups = try await store.groupBySpeaker(all, progress: working.callback)
+                if groups.count > 1 { stage = .speakers } else { choose(groups.first ?? all) }
+            } catch {
+                if !(error is CancellationError) {
+                    store.error = "Couldn't use \(media.count > 1 ? "these files" : "this file"). \(error.localizedDescription)"
+                }
+                discard()
+                stage = .pick
+            }
+            working.active = false
+        }
+        return true
+    }
+
+    private func choose(_ group: [FileClip]) {
+        clips = group
+        stage = .review
+    }
+
+    private func create() {
+        guard let folder else { return }
+        do {
+            let id = try store.createVoice(name: name, from: folder, clips: clips)
+            self.folder = nil
+            stage = .auditioning
+            working.start()
+            task = Task {
+                do { try await store.audition(id, progress: working.callback) } catch {
+                    if !(error is CancellationError) { store.error = "Audition failed. \(error.localizedDescription)" }
+                }
+                working.active = false
+                onDone(id)
+            }
+        } catch {
+            store.error = "Couldn't create this voice. \(error.localizedDescription)"
+        }
+    }
+
+    private func discard() {
+        if let folder { try? FileManager.default.removeItem(at: folder) }
+        folder = nil
+    }
+}
+
+private enum FileColumn {
+    static let issues: CGFloat = 170
+    static let length: CGFloat = 64
+    static let tone: CGFloat = 110
+}
+
+struct SpeakerRow: View {
+    let number: Int
+    let clips: [FileClip]
+    let onChoose: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        // The clean clip nearest 8 s says the most about the voice.
+        let sample = clips.filter(\.issues.isEmpty).min { abs($0.duration - 8) < abs($1.duration - 8) } ?? clips[0]
+        HStack(spacing: 14) {
+            PlayButton(url: sample.url)
+            Button(action: onChoose) {
+                HStack(spacing: 10) {
+                    Text("Speaker \(number)").font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    Text(clips.count == 1 ? "1 clip" : "\(clips.count) clips").foregroundStyle(Theme.secondary).monospacedDigit()
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondary)
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.system(size: 14))
+        .padding(.horizontal, 14)
+        .frame(height: 52)
+        .background(hovered ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
+        .onHover { hovered = $0 }
+    }
+}
+
+struct FileClipRow: View {
+    @Binding var clip: FileClip
+
+    var body: some View {
+        let warnings = clip.issues.map(\.label) + (clip.duration < 3 ? ["Too short"] : clip.duration > 20 ? ["Too long"] : [])
+        HStack(spacing: 12) {
+            Toggle("Use clip", isOn: $clip.keep).toggleStyle(.checkbox).labelsHidden()
+            PlayButton(url: clip.url)
+            SmallWaveform(url: clip.url).frame(width: 54, height: 18)
+            TextField("Transcript", text: $clip.transcript, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...3)
+                .foregroundStyle(clip.keep ? Theme.text : Theme.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // ZStack, not Group: an empty Group would drop the column's fixed width.
+            ZStack(alignment: .leading) {
+                if !warnings.isEmpty {
+                    Warning(text: warnings.joined(separator: ", ")).lineLimit(1).help(warnings.joined(separator: ", "))
+                }
+            }
+            .frame(width: FileColumn.issues, alignment: .leading)
+            Text(formatTime(clip.duration)).monospacedDigit().frame(width: FileColumn.length)
+            Menu {
+                Picker("Tone", selection: $clip.tone) {
+                    ForEach(Tone.all, id: \.self) { Text($0) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                HStack(spacing: 5) {
+                    Text(clip.tone)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
+                }
+                .contentShape(.rect)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .frame(width: FileColumn.tone, alignment: .leading)
+            .accessibilityLabel("Tone, \(clip.tone)")
+        }
+        .font(.system(size: 14))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(minHeight: 44)
     }
 }

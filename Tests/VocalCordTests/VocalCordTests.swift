@@ -126,3 +126,36 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     #expect(scored.count == min(5, ids.count))
     #expect(auditioned.mains["Happy"] == scored.max { $0.score! < $1.score! }?.id)
 }
+
+@Test func fileClipsWithWarningsOrOddLengthsStartUnticked() {
+    let clip = { (seconds: Double) in Clip(url: URL(filePath: "/clip.wav"), duration: seconds, transcript: "Hi.") }
+    #expect(FileClip(clip(8), issues: []).keep)
+    #expect(!FileClip(clip(8), issues: [.noisy]).keep)
+    #expect(!FileClip(clip(2.5), issues: []).keep)
+    #expect(!FileClip(clip(21), issues: []).keep)
+}
+
+@MainActor @Test func fromAFileKeepsSourcesAndClipsAndMakesTickedTakes() async throws {
+    let upload = try tempFolder().appending(path: "podcast.wav")
+    try writeWAV(speechLike(seconds: 40, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: upload)
+    let store = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero, speakers: 2))
+    let folder = try tempFolder()
+    let clips = try await store.cutFiles([upload], into: folder) { _ in }
+    let groups = try await store.groupBySpeaker(clips) { _ in }
+    #expect(groups.count == 2 && groups.joined().count == clips.count)
+
+    var chosen = try #require(groups.first { $0.count >= 2 })
+    chosen[0].keep = false
+    chosen[1].keep = true
+    chosen[1].tone = "Happy"
+    let id = try store.createVoice(name: "Podcast", from: folder, clips: chosen)
+    let voice = try #require(store.voice(id))
+    #expect(voice.takes.count == chosen.filter(\.keep).count && voice.takes("Happy").count == 1)
+    let kept = store.rawFolder(id).appending(path: folder.lastPathComponent)
+    #expect(FileManager.default.fileExists(atPath: kept.appending(path: "sources/1 podcast.wav").path))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: kept.appending(path: "clips-1").path).count == clips.count)
+    #expect(!FileManager.default.fileExists(atPath: folder.path) && FileManager.default.fileExists(atPath: upload.path))
+
+    try await store.audition(id) { _ in }
+    #expect(store.voice(id)?.mains["Happy"] == voice.takes("Happy").first?.id)
+}

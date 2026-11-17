@@ -223,6 +223,8 @@ final class Recorder {
         self.url = nil
         isRecording = false
         levels = [Float](repeating: 0, count: Self.meterBars)
+        // Live warnings belong to this recording; the next item starts clean.
+        issues = []
         return Recording(url: url, duration: audioDuration(url), issues: analyzer.issues)
     }
 }

@@ -27,7 +27,7 @@ IDLE_S = 120.0
 # MLX keeps freed buffers for reuse; uncapped that cache reached 2.2 GB with Breeze
 # 4-bit and made renders twice as slow on 8 GB through swapping (README).
 MLX_CACHE_LIMIT = 256 * 2**20
-JOB_COMMANDS = {"transcribe", "render", "score", "split", "mix", "unload"}
+JOB_COMMANDS = {"transcribe", "render", "score", "split", "group_speakers", "mix", "unload"}
 
 
 class Cancelled(Exception):
@@ -171,6 +171,19 @@ class Engine:
                     written.append({"path": str(path), "start": start, "end": end,
                                     "duration": round(end - start, 3), "text": clip["text"]})
         return {"text": transcript["text"], "duration": duration, "clips": written}
+
+    def group_speakers(self, request, job) -> dict:
+        from . import scoring
+        clips = request.get("clips")
+        if not isinstance(clips, list) or not all(isinstance(path, str) and path for path in clips):
+            raise ValueError("clips (a list of file paths) is required")
+        threshold = float(request.get("threshold", scoring.SAME_SPEAKER))
+        vectors = []
+        for index, path in enumerate(clips):
+            job.check()
+            vectors.append(self.scorer.embedding(audio.read_mono(path, scoring.RATE)))
+            job.progress(stage="embed", done=index + 1, total=len(clips))
+        return {"groups": [[clips[index] for index in group] for group in scoring.group_speakers(vectors, threshold)]}
 
     def render(self, request, job) -> dict:
         from . import tts

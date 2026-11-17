@@ -22,6 +22,26 @@ struct Take: Codable, Identifiable, Hashable, Sendable {
     var human: Double?
 }
 
+/// A clip cut from a dropped file, reviewed before its voice exists.
+struct FileClip: Identifiable, Hashable, Sendable {
+    var url: URL
+    var duration: Double
+    var transcript: String
+    var issues: [AudioIssue]
+    var tone = "Neutral"
+    var keep: Bool
+    var id: URL { url }
+
+    /// Clips with warnings or outside 3–20 s start unticked.
+    init(_ clip: Clip, issues: [AudioIssue]) {
+        url = clip.url
+        duration = clip.duration
+        transcript = clip.transcript
+        self.issues = issues
+        keep = issues.isEmpty && (3...20).contains(clip.duration)
+    }
+}
+
 struct Pronunciation: Codable, Identifiable, Hashable, Sendable {
     var id = UUID().uuidString
     var word: String
@@ -229,6 +249,61 @@ final class VoiceStore {
         let clips = try await engine.split(media, minSeconds: minSeconds, maxSeconds: maxSeconds, into: temp, progress: progress)
         guard !clips.isEmpty else { throw AppError("No speech found in this file.") }
         return clips
+    }
+
+    // MARK: From a file
+
+    /// Copies each upload into `folder/sources` and cuts it into checked clips in `folder/clips-N`.
+    func cutFiles(_ uploads: [URL], into folder: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> [FileClip] {
+        let sources = folder.appending(path: "sources", directoryHint: .isDirectory)
+        try files.createDirectory(at: sources, withIntermediateDirectories: true)
+        let total = Double(uploads.count)
+        var clips: [FileClip] = []
+        for (index, upload) in uploads.enumerated() {
+            let access = upload.startAccessingSecurityScopedResource()
+            defer { if access { upload.stopAccessingSecurityScopedResource() } }
+            let source = sources.appending(path: "\(index + 1) \(upload.lastPathComponent)")
+            try files.copyItem(at: upload, to: source)
+            let out = folder.appending(path: "clips-\(index + 1)", directoryHint: .isDirectory)
+            try files.createDirectory(at: out, withIntermediateDirectories: true)
+            let cut = try await engine.split(source, minSeconds: 3, maxSeconds: 20, into: out) { progress((Double(index) + $0 * 0.9) / total) }
+            for clip in cut {
+                clips.append(FileClip(clip, issues: try await engine.checkAudio(clip.url).issues))
+            }
+            progress(Double(index + 1) / total)
+        }
+        guard !clips.isEmpty else { throw AppError("No speech found in \(uploads.count > 1 ? "these files" : "this file").") }
+        return clips
+    }
+
+    /// The clips grouped by who speaks, largest group first.
+    func groupBySpeaker(_ clips: [FileClip], progress: @escaping @Sendable (Double) -> Void) async throws -> [[FileClip]] {
+        guard clips.count > 1 else { return [clips] }
+        let byPath = Dictionary(clips.map { ($0.url.path, $0) }) { first, _ in first }
+        return try await engine.groupSpeakers(clips.map(\.url), progress: progress)
+            .map { $0.compactMap { byPath[$0.path] } }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Makes a voice from reviewed clips: ticked clips become takes, and `folder` (sources and every clip) moves to raw/.
+    /// The caller runs the audition.
+    func createVoice(name: String, from folder: URL, clips: [FileClip]) throws -> String {
+        let id = createVoice(name: name, fullClone: false)
+        do {
+            let takes = try clips.filter(\.keep).map { clip in
+                let take = Take(id: UUID().uuidString, tone: clip.tone, transcript: clip.transcript.trimmingCharacters(in: .whitespacesAndNewlines),
+                                duration: clip.duration, score: nil, issues: clip.issues, createdAt: .now)
+                try files.copyItem(at: clip.url, to: audioURL(take, voiceID: id))
+                return take
+            }
+            try files.moveItem(at: folder, to: rawFolder(id).appending(path: folder.lastPathComponent, directoryHint: .isDirectory))
+            update(id) { $0.takes = takes }
+            return id
+        } catch {
+            // The sources stay in `folder`, so Create can be tried again.
+            deleteVoice(id)
+            throw error
+        }
     }
 
     /// Takes leave the list, but their audio moves to raw/ so no recording is lost.

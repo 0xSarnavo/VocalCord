@@ -21,6 +21,45 @@ def like_you(similarity: float) -> int:
     return round(100 * min(1.0, max(0.0, (similarity - SIM_FLOOR) / (SIM_CEIL - SIM_FLOOR))))
 
 
+# --- speakers ------------------------------------------------------------
+
+# Two groups join while their average clip-to-clip cosine is at least this: other speakers
+# score up to about 0.22 (above), clips of one speaker well over 0.5.
+SAME_SPEAKER = 0.5
+# Groups under this share of the clips (and never under 2 clips) are strays, such as laughter,
+# music, or someone saying one word; they are left out of the result.
+MIN_GROUP_SHARE = 0.05
+
+
+def group_speakers(vectors, threshold: float = SAME_SPEAKER) -> list[list[int]]:
+    """Average-linkage agglomerative clustering of unit speaker embeddings by cosine similarity.
+    Returns groups of row indices, largest first; stray groups are dropped, but the largest is always kept."""
+    n = len(vectors)
+    if n == 0:
+        return []
+    matrix = np.asarray(vectors, dtype=np.float64)
+    similarity = matrix @ matrix.T
+    np.fill_diagonal(similarity, -np.inf)
+    groups = [[i] for i in range(n)]
+    sizes = np.ones(n)
+    active = np.ones(n, dtype=bool)
+    for _ in range(n - 1):
+        masked = np.where(active[:, None] & active[None, :], similarity, -np.inf)
+        i, j = np.unravel_index(np.argmax(masked), masked.shape)
+        if masked[i, j] < threshold:
+            break
+        # Lance-Williams update for average linkage: the merged group's mean similarity to every other group.
+        similarity[i] = (similarity[i] * sizes[i] + similarity[j] * sizes[j]) / (sizes[i] + sizes[j])
+        similarity[:, i] = similarity[i]
+        similarity[i, i] = -np.inf
+        sizes[i] += sizes[j]
+        active[j] = False
+        groups[i] += groups[j]
+    found = sorted((sorted(groups[k]) for k in range(n) if active[k]), key=lambda g: (-len(g), g[0]))
+    smallest = max(2, int(np.ceil(MIN_GROUP_SHARE * n)))
+    return [found[0]] + [group for group in found[1:] if len(group) >= smallest]
+
+
 # --- words ---------------------------------------------------------------
 
 _ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()

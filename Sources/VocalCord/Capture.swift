@@ -338,7 +338,8 @@ struct FullCloneView: View {
                 }
                 .frame(height: 22)
             } else {
-                WarningRow(issues: recorder.issues)
+                // Room check records silence on purpose, so level warnings would always fire.
+                WarningRow(issues: session.step == 0 ? [] : recorder.issues)
             }
             LevelMeter(levels: recorder.levels).frame(width: 600, height: 64).padding(.top, 18)
             Spacer()

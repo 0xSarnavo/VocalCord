@@ -67,6 +67,8 @@ protocol Engine: Sendable {
     /// `split`: cuts audio or video into WAV clips at natural pauses, with their transcripts.
     func split(_ media: URL, minSeconds: Double, maxSeconds: Double, into folder: URL,
                progress: @escaping @Sendable (Double) -> Void) async throws -> [Clip]
+    /// `group_speakers`: clips grouped by who speaks, largest group first, stray clips left out.
+    func groupSpeakers(_ clips: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> [[URL]]
     /// `render` with one line. Returns the duration in seconds.
     func render(_ line: RenderLine, to output: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Double
     /// `score`: the three line scores. `hints` are words Whisper should expect, such as respelled names.
@@ -151,6 +153,14 @@ actor EngineClient: Engine {
             if let done = reply.done, let total = reply.total, total > 0 { progress(done / total) }
         }
         return result.clips.map { Clip(url: URL(filePath: $0.path), duration: $0.duration, transcript: $0.text) }
+    }
+
+    func groupSpeakers(_ clips: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> [[URL]] {
+        struct Result: Decodable { var groups: [[String]] }
+        let result = try await call("group_speakers", ["clips": clips.map(\.path)], as: Result.self) { reply in
+            if let done = reply.done, let total = reply.total, total > 0 { progress(done / total) }
+        }
+        return result.groups.map { $0.map { URL(filePath: $0) } }
     }
 
     func render(_ line: RenderLine, to output: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Double {
@@ -315,6 +325,7 @@ actor EngineClient: Engine {
 /// Real audio checks and splitting, made-up transcripts, renders and scores. For tests.
 struct FakeEngine: Engine {
     var delay = Duration.milliseconds(500)
+    var speakers = 1
 
     private static let lines = [
         "I'll send the file in a minute.", "The meeting starts at ten.", "Let me double-check that.",
@@ -364,6 +375,14 @@ struct FakeEngine: Engine {
             try await Task.sleep(for: delay / 5)
         }
         return clips
+    }
+
+    /// One speaker, unless `speakers` splits the clips in turn between that many.
+    func groupSpeakers(_ clips: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> [[URL]] {
+        progress(1)
+        return (0..<min(speakers, clips.count)).map { speaker in
+            clips.enumerated().filter { $0.offset % speakers == speaker }.map(\.element)
+        }
     }
 
     func render(_ line: RenderLine, to output: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Double {
