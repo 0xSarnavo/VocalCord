@@ -20,8 +20,10 @@ struct VocalCordApp: App {
         _player = State(initialValue: player)
         _preview = State(initialValue: Preview(player: player))
         _jev = State(initialValue: jev)
-        // The agents' tools act on the project open in Generate.
-        let tools = ToolBridge(projects: projects, voices: store, jev: jev) { UserDefaults.standard.string(forKey: "project") }
+        // The agents' tools act on the project open in Generate and the voice selected in Clone.
+        let tools = ToolBridge(projects: projects, voices: store, jev: jev,
+                               projectID: { UserDefaults.standard.string(forKey: "project") },
+                               voiceID: { UserDefaults.standard.string(forKey: "voice") })
         _terminals = State(initialValue: Terminals(tools: tools))
     }
 
@@ -49,7 +51,6 @@ enum Mode: String { case clone, generate }
 struct RootView: View {
     @Environment(VoiceStore.self) private var store
     @Environment(ProjectStore.self) private var projects
-    @Environment(\.openSettings) private var openSettings
     @AppStorage("mode") private var mode = Mode.clone
 
     var body: some View {
@@ -69,9 +70,6 @@ struct RootView: View {
                 .labelsHidden()
                 .frame(width: 220)
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Settings", systemImage: "gearshape") { openSettings() }
-            }
         }
         .frame(minWidth: 1000, minHeight: 640)
         // The blue focus ring clashes with the grey design; text fields turn it back on.
@@ -85,6 +83,60 @@ struct RootView: View {
         .alert(projects.error ?? "", isPresented: Binding(present: Bindable(projects).error)) {
             Button("OK") {}
         }
+    }
+}
+
+/// The gear, last in each mode's toolbar so it stays in the same corner.
+struct SettingsButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Settings", systemImage: "gearshape") { openSettings() }
+    }
+}
+
+/// A mode's sidebar as one glass panel, resizable from its edge, beside the canvas. Not NavigationSplitView: its sidebar
+/// splits into two boxes in full screen and opened at 148 pt on a first launch.
+struct SidebarLayout<Sidebar: View, Detail: View>: View {
+    @AppStorage("sidebarWidth") private var width = 220.0
+    @State private var dragStart: Double?
+    @ViewBuilder let sidebar: Sidebar
+    @ViewBuilder let detail: Detail
+
+    private static var range: ClosedRange<Double> { 220...360 }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: clamp(width))
+                .frame(maxHeight: .infinity, alignment: .top)
+                .glassEffect(.regular, in: .rect(cornerRadius: 18))
+                .padding(8)
+                .overlay(alignment: .trailing) { handle }
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.content)
+        }
+    }
+
+    private func clamp(_ value: Double) -> Double { min(max(value, Self.range.lowerBound), Self.range.upperBound) }
+
+    private var handle: some View {
+        Color.clear
+            .frame(width: 8)
+            .contentShape(.rect)
+            .pointerStyle(.frameResize(position: .trailing))
+            .gesture(DragGesture(coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStart ?? clamp(width)
+                    dragStart = start
+                    width = clamp(start + value.translation.width)
+                }
+                .onEnded { _ in dragStart = nil })
+            .accessibilityElement()
+            .accessibilityLabel("Resize sidebar")
+            .accessibilityValue("\(Int(clamp(width))) points")
+            .accessibilityAdjustableAction { direction in width = clamp(clamp(width) + (direction == .increment ? 20 : -20)) }
     }
 }
 
@@ -189,6 +241,8 @@ enum Theme {
     static let text = Color(hex: 0xF1F3F0)
     static let secondary = Color(hex: 0x9A9EA3)
     static let line = Color.white.opacity(0.09)
+    /// Table row separator: fainter than `line`, so a table reads as rows, not a grid.
+    static let rule = Color(hex: 0x1E2023)
     static let outline = Color.white.opacity(0.32)
     static let amber = Color(hex: 0xF2B544)
 }

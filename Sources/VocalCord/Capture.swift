@@ -100,6 +100,7 @@ struct TakeCapture: View {
             Spacer(minLength: 0)
         }
         .padding(large ? 48 : 28)
+        .frame(maxWidth: 880)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie]) { result in
             if case .success(let url) = result { Task { await upload(url) } }
@@ -306,26 +307,22 @@ struct FullCloneView: View {
     var body: some View {
         let session = session
         let item = FullClone.item(session)
+        // One centred column, its gaps capped, so the steps, prompt and buttons stay together in any window size.
         VStack(spacing: 0) {
+            Spacer(minLength: 20)
             StepBar(current: session.step)
-                .padding(.top, 28)
-                .frame(maxWidth: .infinity)
-                .overlay(alignment: .topTrailing) {
-                    Text(countText(session))
-                        .font(.system(size: 17, weight: .medium).monospacedDigit())
-                        .padding(.top, 36)
-                        .padding(.trailing, 32)
-                }
-            Spacer()
-            if session.step == 3 {
-                Text(item.tone).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.secondary).padding(.bottom, 12)
-            }
+            Spacer(minLength: 28).frame(maxHeight: 96)
+            // Kept when empty, so the prompt doesn't move between steps.
+            Text(progressText(session, item))
+                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Theme.secondary)
+                .frame(height: 20)
+                .padding(.bottom, 12)
             Text(item.prompt)
                 .font(.system(size: 34, weight: .semibold))
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 860)
                 .padding(.horizontal, 32)
-            Spacer().frame(height: 52)
+            Spacer().frame(height: 44)
             controls(session, item)
             Spacer().frame(height: 28)
             if working.active {
@@ -342,7 +339,7 @@ struct FullCloneView: View {
                 WarningRow(issues: session.step == 0 ? [] : recorder.issues)
             }
             LevelMeter(levels: recorder.levels).frame(width: 600, height: 64).padding(.top, 18)
-            Spacer()
+            Spacer(minLength: 28).frame(maxHeight: 64)
             HStack(spacing: 32) {
                 Button("Re-record previous") { rerecordPrevious() }
                     .disabled(session.previous.isEmpty || recorder.isRecording || working.active)
@@ -353,8 +350,10 @@ struct FullCloneView: View {
                 Button("Pause session") { _ = recorder.stop(); onExit() }
             }
             .buttonStyle(.outline(height: 44))
-            .padding(.bottom, 44)
+            Spacer(minLength: 20)
         }
+        .frame(maxWidth: 880)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie]) { result in
             if case .success(let url) = result { Task { await upload(url, item: item) } }
         }
@@ -381,11 +380,12 @@ struct FullCloneView: View {
         }
     }
 
-    private func countText(_ session: Session) -> String {
+    /// Where you are in the step, such as "12 / 30", with the tone in Tones.
+    private func progressText(_ session: Session, _ item: FullClone.Item) -> String {
         switch session.step {
-        case 3: "\(session.index % FullClone.perTone + 1) / \(FullClone.perTone)"
-        case 4: ""
-        default: "\(session.index + 1) / \(FullClone.count(session.step))"
+        case 3: "\(item.tone) · \(session.index % FullClone.perTone + 1) / \(FullClone.perTone)"
+        case 1, 2: "\(session.index + 1) / \(FullClone.count(session.step))"
+        default: ""
         }
     }
 

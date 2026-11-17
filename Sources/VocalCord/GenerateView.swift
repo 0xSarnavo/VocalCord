@@ -20,34 +20,40 @@ struct GenerateView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        SidebarLayout {
             ProjectsSidebar(selection: $selection, onNew: { name = ""; naming = .new },
                             onRename: { id in name = projects.project(id)?.name ?? ""; naming = .rename(id) },
                             onDelete: { deleting = $0 })
-                .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
-                .toolbar(removing: .sidebarToggle)
         } detail: {
             Group {
                 if let project = projects.project(selection) {
                     let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
                     HStack(spacing: 0) {
                         GeometryReader { proxy in
-                            VStack(spacing: 0) {
+                            VStack(alignment: .leading, spacing: 12) {
                                 ScriptPane(project: project).id(project.id)
                                 if terminalOpen {
                                     // The script keeps room for its header and a few lines.
                                     TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 230)
-                                        .padding(.leading, 8)
-                                        .padding(.bottom, 8)
                                 }
                             }
+                            // Columns stop stretching on wide windows.
+                            .frame(maxWidth: 1160, maxHeight: .infinity, alignment: .topLeading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // Less on the right, where the panels add their own margin.
+                            .padding(.leading, 24)
+                            .padding(.trailing, 8)
+                            .padding(.top, 22)
+                            .padding(.bottom, 8)
                         }
                         VStack(spacing: 8) {
                             PreviewPane(project: project)
                             OutputsPane(project: project).id(project.id)
                         }
-                        .frame(width: 320)
+                        .frame(width: 300)
                         .padding(8)
+                        // The panels fit their content rather than fill the column.
+                        .frame(maxHeight: .infinity, alignment: .top)
                     }
                     .task(id: timeline) { await preview.load(timeline) }
                     .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
@@ -55,8 +61,6 @@ struct GenerateView: View {
                     Text("No projects").foregroundStyle(Theme.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.content)
             .onDisappear { preview.pause() }
         }
         .toolbar { toolbar }
@@ -83,13 +87,8 @@ struct GenerateView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button("Terminal") { terminalOpen.toggle() }
-                .buttonStyle(.outline(height: 32))
-                .background(terminalOpen ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
-                .accessibilityAddTraits(terminalOpen ? .isSelected : [])
-        }
-        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .primaryAction) { TerminalButton() }
+            .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .primaryAction) {
             if let progress = projects.progress {
                 HStack(spacing: 10) {
@@ -111,6 +110,7 @@ struct GenerateView: View {
                 .disabled(!(projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false))
         }
         .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .primaryAction) { SettingsButton() }
     }
 }
 
@@ -160,14 +160,14 @@ struct ProjectsSidebar: View {
 /// Fixed widths; Text takes the rest.
 private enum Column {
     static let number: CGFloat = 22
-    static let voice: CGFloat = 88
-    static let tone: CGFloat = 94
-    static let pause: CGFloat = 40
-    static let like: CGFloat = 56
-    static let human: CGFloat = 48
-    static let words: CGFloat = 44
-    static let jev: CGFloat = 36
-    static let version: CGFloat = 86
+    static let voice: CGFloat = 84
+    static let tone: CGFloat = 92
+    static let pause: CGFloat = 44
+    static let like: CGFloat = 60
+    static let human: CGFloat = 52
+    static let words: CGFloat = 52
+    static let jev: CGFloat = 40
+    static let version: CGFloat = 84
     static let gutter: CGFloat = 30
 }
 
@@ -202,28 +202,30 @@ struct ScriptPane: View {
                     .buttonStyle(.outline(height: 28))
                     .disabled(renderable.isEmpty || projects.progress != nil)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 58)
-            Theme.line.frame(height: 1).padding(.horizontal, 8)
-            header
-            Theme.line.frame(height: 1).padding(.horizontal, 8)
+            .frame(height: 34)
+            .padding(.bottom, 14)
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
-                        LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
-                                onCompare: { comparing = [line.id] })
-                        Theme.line.frame(height: 1).padding(.horizontal, 8)
+                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
+                            LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
+                                    onCompare: { comparing = [line.id] })
+                            Theme.rule.frame(height: 1)
+                        }
+                        footer
+                    } header: {
+                        VStack(spacing: 0) {
+                            header
+                            Theme.rule.frame(height: 1)
+                        }
+                        .background(Theme.content)
                     }
-                    footer
                 }
             }
             .scrollIndicators(.automatic)
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .background(Color.white.opacity(0.015))
-        .clipShape(.rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.line))
-        .padding(.leading, 8)
-        .padding(.vertical, 8)
         .sheet(isPresented: Binding(present: $splitText)) {
             SplitSheet(text: splitText ?? "") { lines in projects.addLines(lines, to: project.id, voices: voices) }
         }
@@ -259,10 +261,11 @@ struct ScriptPane: View {
             Text("Version").padding(.horizontal, 8).frame(width: Column.version, alignment: .leading)
             Color.clear.frame(width: Column.gutter)
         }
-        .font(.system(size: 12, weight: .semibold))
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(Theme.secondary)
         .lineLimit(1)
         .padding(.horizontal, 6)
-        .frame(height: 40)
+        .frame(height: 34)
     }
 
     private var footer: some View {
@@ -272,7 +275,8 @@ struct ScriptPane: View {
             Button("Import…") { importing = true }
         }
         .buttonStyle(.outline(height: 28))
-        .padding(16)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -318,10 +322,9 @@ struct LineRow: View {
             versionControl.frame(width: Column.version - decision)
             Group {
                 if line.proposal != nil {
-                    HStack(spacing: 2) {
-                        decisionButton("checkmark", help: "Accept", label: "Accept change to line \(number)") { projects.accept([line.id], in: projectID) }
-                        decisionButton("xmark", help: "Reject", label: "Reject change to line \(number)") { projects.reject([line.id], in: projectID) }
-                    }
+                    DecisionButtons(label: "change to line \(number)",
+                                    onAccept: { projects.accept([line.id], in: projectID) },
+                                    onReject: { projects.reject([line.id], in: projectID) })
                 } else {
                     rerenderButton
                 }
@@ -443,19 +446,6 @@ struct LineRow: View {
         (["v\(index + 1)", version.tone] + (version.direction ? ["direction"] : [])).joined(separator: " · ")
     }
 
-    private func decisionButton(_ icon: String, help: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 24, height: 28)
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-                .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(label)
-    }
-
     @ViewBuilder private var rerenderButton: some View {
         if projects.renderingLine == line.id {
             ProgressView().controlSize(.small)
@@ -472,6 +462,33 @@ struct LineRow: View {
             .help("Render again")
             .accessibilityLabel("Render line \(number) again")
         }
+    }
+}
+
+/// ✓ and ✕ for a change an agent proposed.
+struct DecisionButtons: View {
+    /// What is decided, for VoiceOver: "Accept change to line 3".
+    let label: String
+    let onAccept: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            button("checkmark", help: "Accept", action: onAccept).accessibilityLabel("Accept \(label)")
+            button("xmark", help: "Reject", action: onReject).accessibilityLabel("Reject \(label)")
+        }
+    }
+
+    private func button(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 24, height: 28)
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 

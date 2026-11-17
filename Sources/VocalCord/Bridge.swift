@@ -95,7 +95,8 @@ final class BridgeServer: Sendable {
     }
 }
 
-/// Answers the agents' MCP JSON-RPC: the VocalCord tools, acting on the project open in Generate.
+/// Answers the agents' MCP JSON-RPC: the VocalCord tools, acting on the project open in Generate and the voice
+/// selected in Clone.
 @MainActor
 final class ToolBridge {
     let projects: ProjectStore
@@ -103,15 +104,23 @@ final class ToolBridge {
     let jev: Jev
     /// The project open in Generate.
     let projectID: @MainActor () -> String?
+    /// The voice selected in Clone.
+    let voiceID: @MainActor () -> String?
 
-    init(projects: ProjectStore, voices: VoiceStore, jev: Jev, projectID: @escaping @MainActor () -> String?) {
+    init(projects: ProjectStore, voices: VoiceStore, jev: Jev, projectID: @escaping @MainActor () -> String?,
+         voiceID: @escaping @MainActor () -> String? = { nil }) {
         self.projects = projects
         self.voices = voices
         self.jev = jev
         self.projectID = projectID
+        self.voiceID = voiceID
     }
 
-    static let tools: [[String: Any]] = [
+    /// check_script is listed only while the Jev plugin is added. An agent session started before Jev was added sees
+    /// it after a restart.
+    var tools: [[String: Any]] { Self.scriptTools + (jev.added ? [Self.checkTool] : []) + Self.takeTools }
+
+    static let scriptTools: [[String: Any]] = [
         tool("get_voices", "Every voice with its takes per tone and its pronunciations. A tone with no takes still renders, from a written direction."),
         tool("get_script", "The script of the project open in VocalCord: each line's number, text, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change."),
         tool("update_script", "Propose changes to lines. Nothing is applied: each changed line waits in the script for the user to accept or reject it. Fields left out keep their pending or current value.",
@@ -128,9 +137,39 @@ final class ToolBridge {
              properties: lineProperty, required: ["line"]),
         tool("get_scores", "Every version of a line with its scores: like_you (speaker similarity, %), human (naturalness, 1 to 5), words (% of words right) and heard (what Whisper heard), plus flags for low scores.",
              properties: lineProperty, required: ["line"]),
-        tool("check_script", "Jev checks of each line: spoken (reads like something a person would say aloud), fits_tone (suits its tone) and, "
-             + "after an agent rewrite, keeps_meaning (keeps the original's meaning). Each is yes, no or unsettled. A line with a pending "
-             + "change is checked as proposed. Unchanged lines reuse their last result. Needs the Jev plugin."),
+    ]
+
+    static let checkTool = tool("check_script", "Jev checks of each line: spoken (reads like something a person would say aloud), fits_tone (suits its tone) and, "
+        + "after an agent rewrite, keeps_meaning (keeps the original's meaning). Each is yes, no or unsettled. A line with a pending "
+        + "change is checked as proposed. Unchanged lines reuse their last result.")
+
+    static let takeTools: [[String: Any]] = [
+        tool("get_takes", "The takes of the voice selected in Clone: each take's number, tone, transcript, length in seconds, like_you "
+             + "(its last audition score, %), whether it is its tone's main take, warnings and any pending change; plus the voice's "
+             + "pronunciations and pending ones."),
+        tool("propose_take_changes", "Propose transcript fixes, tone labels, main takes and pronunciations for the voice selected in Clone. "
+             + "Nothing is applied: each change waits in the takes table for the user to accept or reject it. Fields left out keep their "
+             + "pending or current value.",
+             properties: [
+                 "changes": [
+                     "type": "array",
+                     "items": ["type": "object", "required": ["take"], "properties": [
+                         "take": ["type": "integer", "description": "Take number, from 1"],
+                         "transcript": ["type": "string", "description": "The words spoken in the take, exactly"],
+                         "tone": ["type": "string", "enum": Tone.all],
+                         "main": ["type": "boolean", "enum": [true], "description": "Make this the main take of its tone"],
+                     ]],
+                 ],
+                 "pronunciations": [
+                     "type": "array",
+                     "items": ["type": "object", "required": ["word", "say_as"], "properties": [
+                         "word": ["type": "string"],
+                         "say_as": ["type": "string", "description": "A respelling the voice says correctly, such as Koo-ber"],
+                     ]],
+                 ],
+             ]),
+        tool("audition", "Render a test line from up to 5 candidate takes per tone of the voice selected in Clone, score each, and propose "
+             + "the best as its tone's main take; can take several minutes. Scores are saved; the main takes wait for the user to accept."),
     ]
 
     private static let lineProperty: [String: Any] = ["line": ["type": "integer", "description": "Line number, from 1"]]
@@ -156,7 +195,7 @@ final class ToolBridge {
         case "ping":
             response["result"] = [String: Any]()
         case "tools/list":
-            response["result"] = ["tools": Self.tools]
+            response["result"] = ["tools": tools]
         case "tools/call":
             let result = await call(params["name"] as? String ?? "", params["arguments"] as? [String: Any] ?? [:])
             response["result"] = ["content": [["type": "text", "text": result.text]], "isError": result.isError]
@@ -179,6 +218,9 @@ final class ToolBridge {
             case "check_script":
                 guard jev.added else { return ("Jev plugin not added", false) }
                 return (try json(await check(currentProject())), false)
+            case "get_takes": return (try json(takes(currentVoice())), false)
+            case "propose_take_changes": return (try json(proposeTakes(arguments, for: currentVoice())), false)
+            case "audition": return (try json(await audition(currentVoice())), false)
             default: throw AppError("Unknown tool \(name).")
             }
         } catch {
@@ -243,6 +285,50 @@ final class ToolBridge {
         var keepsMeaning: Verdict?
         var notes: [String]?
         var error: String?
+    }
+
+    private struct TakeInfo: Encodable {
+        var take: Int
+        var tone: String
+        var transcript: String
+        var seconds: Double
+        var likeYou: Int?
+        var main: Bool
+        var warnings: [String]
+        var pendingChange: TakeProposal?
+    }
+
+    private struct TakesInfo: Encodable {
+        var voice: String
+        var tones: [String]
+        var takes: [TakeInfo]
+        var pronunciations: [String: String]
+        var pendingPronunciations: [String: String]
+    }
+
+    private struct TakeChangesResult: Encodable {
+        var proposed: [Int] = []
+        var unchanged: [Int] = []
+        var pronunciationsProposed: [String] = []
+        var pronunciationsUnchanged: [String] = []
+        var errors: [String] = []
+        var note = "The user accepts or rejects each change in the takes table and the pronunciations list."
+    }
+
+    private struct AuditionResult: Encodable {
+        struct Best: Encodable {
+            var tone: String
+            var take: Int
+            var likeYou: Int?
+        }
+        var best: [Best]
+        var proposed: [Int]
+        var note = "Each tone's best take waits in the takes table as a proposed main take for the user to accept or reject."
+    }
+
+    private func currentVoice() throws -> Voice {
+        guard let voice = voices.voice(voiceID()) else { throw AppError("Select a voice in Clone first.") }
+        return voice
     }
 
     private func currentProject() throws -> Project {
@@ -327,8 +413,8 @@ final class ToolBridge {
 
     private func render(_ arguments: [String: Any], in project: Project) async throws -> VersionInfo {
         let (number, line) = try line(arguments, in: project)
-        guard projects.progress == nil, let task = projects.renderLine(line.id, in: project.id, voices: voices) else {
-            throw AppError("A render is running. Try again when it finishes.")
+        guard projects.progress == nil, voices.auditioning == nil, let task = projects.renderLine(line.id, in: project.id, voices: voices) else {
+            throw AppError("A render or audition is running. Try again when it finishes.")
         }
         do { try await task.value } catch is CancellationError { throw AppError("The render was cancelled.") }
         guard let updated = projects.project(project.id)?.lines.first(where: { $0.id == line.id }), let version = updated.versions.last else {
@@ -364,5 +450,91 @@ final class ToolBridge {
     private func scores(_ arguments: [String: Any], in project: Project) throws -> ScoresResult {
         let (number, line) = try line(arguments, in: project)
         return ScoresResult(line: number, versions: line.versions.map { versionInfo($0, in: line) })
+    }
+
+    // MARK: Takes
+
+    private func percent(_ score: Double?) -> Int? { score.map { Int(($0 * 100).rounded()) } }
+
+    private func takes(_ voice: Voice) -> TakesInfo {
+        TakesInfo(voice: voice.name, tones: Tone.all, takes: voice.takes.enumerated().map { index, take in
+            TakeInfo(take: index + 1, tone: take.tone, transcript: take.transcript, seconds: (take.duration * 100).rounded() / 100,
+                     likeYou: percent(take.score), main: voice.mainTake(take.tone)?.id == take.id,
+                     warnings: take.issues.map(\.label) + (take.duration < 3 ? ["Too short"] : take.duration > 20 ? ["Too long"] : []),
+                     pendingChange: take.proposal)
+        }, pronunciations: voice.pronunciationMap,
+           pendingPronunciations: Dictionary((voice.proposedPronunciations ?? []).map { ($0.word, $0.respelling) }) { first, _ in first })
+    }
+
+    private func proposeTakes(_ arguments: [String: Any], for voice: Voice) throws -> TakeChangesResult {
+        let changes = arguments["changes"] as? [[String: Any]] ?? []
+        let words = arguments["pronunciations"] as? [[String: Any]] ?? []
+        guard !changes.isEmpty || !words.isEmpty else {
+            throw AppError("Give changes as a list of {take, transcript, tone, main}, pronunciations as a list of {word, say_as}, or both.")
+        }
+        var result = TakeChangesResult()
+        for change in changes {
+            guard let number = (change["take"] as? NSNumber)?.intValue, voice.takes.indices.contains(number - 1) else {
+                result.errors.append("No take \(change["take"].map { "\($0)" } ?? "given").")
+                continue
+            }
+            var proposal = TakeProposal()
+            if let value = change["transcript"] {
+                guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                    result.errors.append("Take \(number): transcript can't be empty.")
+                    continue
+                }
+                proposal.transcript = text
+            }
+            if let value = change["tone"] {
+                guard let tone = Tone.all.first(where: { $0.caseInsensitiveCompare(value as? String ?? "") == .orderedSame }) else {
+                    result.errors.append("Take \(number): tone must be one of \(Tone.all.joined(separator: ", ")).")
+                    continue
+                }
+                proposal.tone = tone
+            }
+            if let value = change["main"] {
+                guard value as? Bool == true else {
+                    result.errors.append("Take \(number): main can only be true.")
+                    continue
+                }
+                proposal.main = true
+            }
+            if voices.propose(proposal, take: voice.takes[number - 1].id, voiceID: voice.id) {
+                result.proposed.append(number)
+            } else {
+                result.unchanged.append(number)
+            }
+        }
+        for item in words {
+            guard let word = (item["word"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !word.isEmpty,
+                  let respelling = (item["say_as"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !respelling.isEmpty else {
+                result.errors.append("Each pronunciation needs a word and say_as.")
+                continue
+            }
+            if voices.proposePronunciation(word: word, respelling: respelling, voiceID: voice.id) {
+                result.pronunciationsProposed.append(word)
+            } else {
+                result.pronunciationsUnchanged.append(word)
+            }
+        }
+        return result
+    }
+
+    private func audition(_ voice: Voice) async throws -> AuditionResult {
+        guard !voice.takes.isEmpty else { throw AppError("\u{201C}\(voice.name)\u{201D} has no takes. Add one in Clone.") }
+        guard voices.auditioning == nil, projects.progress == nil else {
+            throw AppError("A render or audition is running. Try again when it finishes.")
+        }
+        let best: [String: String]
+        do { best = try await voices.audition(voice.id, proposing: true) { _ in } } catch is CancellationError {
+            throw AppError("The audition was cancelled.")
+        }
+        guard let updated = voices.voice(voice.id) else { throw AppError("\u{201C}\(voice.name)\u{201D} is gone.") }
+        let rows = Tone.all.compactMap { tone -> AuditionResult.Best? in
+            guard let id = best[tone], let index = updated.takes.firstIndex(where: { $0.id == id }) else { return nil }
+            return AuditionResult.Best(tone: tone, take: index + 1, likeYou: percent(updated.takes[index].score))
+        }
+        return AuditionResult(best: rows, proposed: rows.map(\.take).filter { updated.takes[$0 - 1].proposal?.main == true })
     }
 }

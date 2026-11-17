@@ -17,22 +17,27 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
     }
 
     static let instructions = """
-        You are VocalCord's voiceover script director. You help only with the script of the project open in VocalCord. \
-        To anything else, reply exactly: "I only help with voiceover scripts."
+        You are VocalCord's voiceover director. You help only with the script of the project open in Generate and the takes \
+        of the voice selected in Clone. To anything else, reply exactly: "I only help with voiceover scripts."
 
-        Your job:
+        Script (Generate):
         - Rewrite lines so they sound natural spoken aloud: shorter sentences, pauses, breaths, and one tone per line, \
         chosen from the tones the line's voice has takes for (get_voices).
         - Fix low scores: render_line, read the scores, then rewrite or respell and render again.
         - Respell words the voice says wrong, such as Kuber as Koo-ber.
-
-        How the script works:
         - Each line has text, a voice, a tone, and a pause after it in seconds.
         - Inside text, [pause 0.3] adds a pause and (sigh) a sigh. For a breath, end the sentence or add a short pause.
         - Low scores: Like you under 70%, Words under 90%, or Human more than 0.5 below the voice's own take.
 
-        Use only the VocalCord tools. update_script only proposes changes: the user accepts or rejects each line in the \
-        script, so never say a change is applied.
+        Takes (Clone):
+        - Each render copies the voice from a take and its transcript, so a transcript must match the words spoken exactly. \
+        Fix errors you can spot (get_takes), such as a misheard name or missing punctuation; never guess at words.
+        - Label each take with the tone it is spoken in, and make a clean take with no warnings each tone's main take.
+        - Add pronunciations for words the voice says wrong, such as Kuber as Koo-ber.
+        - audition scores the takes and proposes the best per tone as its main take.
+
+        Use only the VocalCord tools. update_script, propose_take_changes and audition only propose changes: the user \
+        accepts or rejects each one, so never say a change is applied.
         """
 
     /// What the login shell starts from, like a new Terminal window; the user's profile adds the rest. The app's own
@@ -139,7 +144,7 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
                 "default_agent": "vocalcord",
                 "mcp": ["vocalcord": ["type": "local", "command": [bridge, socket], "enabled": true, "timeout": 900_000]],
                 "agent": [
-                    "vocalcord": ["description": "VocalCord's script director", "mode": "primary", "prompt": Self.instructions,
+                    "vocalcord": ["description": "VocalCord's voiceover director", "mode": "primary", "prompt": Self.instructions,
                                   "tools": ["*": false, "vocalcord_*": true]],
                     "build": ["disable": true],
                     "plan": ["disable": true],
@@ -248,6 +253,18 @@ extension Terminals: @preconcurrency LocalProcessTerminalViewDelegate {
 }
 
 // MARK: Panel
+
+/// Opens and closes the Terminal panel; grey while open.
+struct TerminalButton: View {
+    @AppStorage("terminalOpen") private var open = false
+
+    var body: some View {
+        Button("Terminal") { open.toggle() }
+            .buttonStyle(.outline(height: 32))
+            .background(open ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
+            .accessibilityAddTraits(open ? .isSelected : [])
+    }
+}
 
 /// The panel under the script: a resize handle, a tab per installed agent and the selected agent's terminal.
 struct TerminalPanel: View {

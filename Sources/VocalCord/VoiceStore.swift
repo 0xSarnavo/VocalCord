@@ -20,6 +20,16 @@ struct Take: Codable, Identifiable, Hashable, Sendable {
     var createdAt: Date
     /// The take's own Human score, the bar its renders are compared with in Generate.
     var human: Double?
+    /// A change a terminal agent proposed, waiting for the user to accept or reject it.
+    var proposal: TakeProposal?
+}
+
+/// The fields an agent proposes to change on a take; nil fields stay as they are.
+struct TakeProposal: Codable, Hashable, Sendable {
+    var transcript: String?
+    var tone: String?
+    /// Makes the take the main take of its tone.
+    var main: Bool?
 }
 
 /// A clip cut from a dropped file, reviewed before its voice exists.
@@ -64,6 +74,8 @@ struct Voice: Codable, Identifiable, Hashable, Sendable {
     var mains: [String: String] = [:]
     var pronunciations: [Pronunciation] = []
     var session: Session?
+    /// Pronunciations a terminal agent proposed, each waiting for the user to accept or reject it.
+    var proposedPronunciations: [Pronunciation]?
 
     func takes(_ tone: String) -> [Take] { takes.filter { $0.tone == tone } }
     func mainTake(_ tone: String) -> Take? {
@@ -89,6 +101,8 @@ final class VoiceStore {
 
     private(set) var voices: [Voice] = []
     var error: String?
+    /// The voice an audition is running for.
+    private(set) var auditioning: String?
     let root: URL
     let engine: any Engine
     /// Set when voices.json exists but cannot be read, so a save never overwrites it.
@@ -349,12 +363,104 @@ final class VoiceStore {
         update(voiceID) { $0.pronunciations.removeAll { $0.id == id } }
     }
 
+    // MARK: Proposals
+
+    /// Merges an agent's change into the take's pending one. Fields that match the take as it is are dropped, and a main
+    /// take proposed for a tone replaces any other pending there. Returns whether a change is pending.
+    @discardableResult
+    func propose(_ change: TakeProposal, take takeID: String, voiceID: String) -> Bool {
+        var pending = false
+        update(voiceID) { voice in
+            guard let index = voice.takes.firstIndex(where: { $0.id == takeID }) else { return }
+            let take = voice.takes[index]
+            var merged = take.proposal ?? TakeProposal()
+            merged.transcript = change.transcript ?? merged.transcript
+            merged.tone = change.tone ?? merged.tone
+            merged.main = change.main ?? merged.main
+            if merged.transcript == take.transcript { merged.transcript = nil }
+            if merged.tone == take.tone { merged.tone = nil }
+            if merged.main != true || (merged.tone == nil && voice.mainTake(take.tone)?.id == take.id) { merged.main = nil }
+            pending = merged != TakeProposal()
+            voice.takes[index].proposal = pending ? merged : nil
+            guard merged.main == true else { return }
+            let tone = merged.tone ?? take.tone
+            for other in voice.takes.indices where other != index && voice.takes[other].proposal?.main == true
+                && (voice.takes[other].proposal?.tone ?? voice.takes[other].tone) == tone {
+                voice.takes[other].proposal?.main = nil
+                if voice.takes[other].proposal == TakeProposal() { voice.takes[other].proposal = nil }
+            }
+        }
+        return pending
+    }
+
+    func acceptTakes(_ takeIDs: [String], voiceID: String) {
+        update(voiceID) { voice in
+            for index in voice.takes.indices where takeIDs.contains(voice.takes[index].id) {
+                guard let proposal = voice.takes[index].proposal else { continue }
+                let id = voice.takes[index].id
+                if let transcript = proposal.transcript { voice.takes[index].transcript = transcript }
+                if let tone = proposal.tone {
+                    if voice.mains[voice.takes[index].tone] == id { voice.mains[voice.takes[index].tone] = nil }
+                    voice.takes[index].tone = tone
+                }
+                if proposal.main == true { voice.mains[voice.takes[index].tone] = id }
+                voice.takes[index].proposal = nil
+            }
+        }
+    }
+
+    func rejectTakes(_ takeIDs: [String], voiceID: String) {
+        update(voiceID) { voice in
+            for index in voice.takes.indices where takeIDs.contains(voice.takes[index].id) { voice.takes[index].proposal = nil }
+        }
+    }
+
+    /// Replaces any pending pronunciation of the same word. One the voice already has isn't pending. Returns whether it is.
+    @discardableResult
+    func proposePronunciation(word: String, respelling: String, voiceID: String) -> Bool {
+        let word = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        let respelling = respelling.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty, !respelling.isEmpty else { return false }
+        var pending = false
+        update(voiceID) { voice in
+            var proposals = (voice.proposedPronunciations ?? []).filter { $0.word.caseInsensitiveCompare(word) != .orderedSame }
+            pending = !voice.pronunciations.contains { $0.word.caseInsensitiveCompare(word) == .orderedSame && $0.respelling == respelling }
+            if pending { proposals.append(Pronunciation(word: word, respelling: respelling)) }
+            voice.proposedPronunciations = proposals.isEmpty ? nil : proposals
+        }
+        return pending
+    }
+
+    /// An accepted pronunciation replaces the voice's own for the same word.
+    func acceptPronunciations(_ ids: [String], voiceID: String) {
+        update(voiceID) { voice in
+            for proposal in voice.proposedPronunciations ?? [] where ids.contains(proposal.id) {
+                voice.pronunciations.removeAll { $0.word.caseInsensitiveCompare(proposal.word) == .orderedSame }
+                voice.pronunciations.append(proposal)
+            }
+            voice.proposedPronunciations = voice.proposedPronunciations?.filter { !ids.contains($0.id) }
+            if voice.proposedPronunciations?.isEmpty == true { voice.proposedPronunciations = nil }
+        }
+    }
+
+    func rejectPronunciations(_ ids: [String], voiceID: String) {
+        update(voiceID) { voice in
+            voice.proposedPronunciations = voice.proposedPronunciations?.filter { !ids.contains($0.id) }
+            if voice.proposedPronunciations?.isEmpty == true { voice.proposedPronunciations = nil }
+        }
+    }
+
     // MARK: Audition
 
-    /// Renders the audition line from up to 5 candidates per tone, scores each, and makes the best the main take.
-    /// All renders come before all scores, so the engine swaps models once.
-    func audition(_ voiceID: String, progress: @escaping @Sendable (Double) -> Void) async throws {
-        guard let voice = voice(voiceID) else { return }
+    /// Renders the audition line from up to 5 candidates per tone, scores each, and makes the best the main take, or with
+    /// `proposing` proposes it as the main take instead. All renders come before all scores, so the engine swaps models once.
+    /// Returns the best take's ID per tone.
+    @discardableResult
+    func audition(_ voiceID: String, proposing: Bool = false, progress: @escaping @Sendable (Double) -> Void) async throws -> [String: String] {
+        guard auditioning == nil else { throw AppError("An audition is running. Try again when it finishes.") }
+        guard let voice = voice(voiceID) else { return [:] }
+        auditioning = voiceID
+        defer { auditioning = nil }
         let candidates = Tone.all.flatMap { tone in
             voice.takes(tone)
                 .sorted { ($0.issues.count, abs($0.duration - 10)) < ($1.issues.count, abs($1.duration - 10)) }
@@ -376,13 +482,17 @@ final class VoiceStore {
             scores[take.id] = Double(result.likeYou) / 100
             progress(0.8 + Double(index + 1) / total * 0.2)
         }
+        var best: [String: String] = [:]
         update(voiceID) { voice in
             for index in voice.takes.indices { if let score = scores[voice.takes[index].id] { voice.takes[index].score = score } }
             for tone in Tone.all {
-                if let best = voice.takes(tone).filter({ scores[$0.id] != nil }).max(by: { scores[$0.id]! < scores[$1.id]! }) {
-                    voice.mains[tone] = best.id
+                if let take = voice.takes(tone).filter({ scores[$0.id] != nil }).max(by: { scores[$0.id]! < scores[$1.id]! }) {
+                    best[tone] = take.id
+                    if !proposing { voice.mains[tone] = take.id }
                 }
             }
         }
+        if proposing { for id in best.values { propose(TakeProposal(main: true), take: id, voiceID: voiceID) } }
+        return best
     }
 }

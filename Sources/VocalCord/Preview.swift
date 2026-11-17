@@ -409,23 +409,22 @@ struct OutputsPane: View {
             if outputs.isEmpty {
                 Text("No outputs").font(.system(size: 13)).foregroundStyle(Theme.secondary)
             }
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(outputs) { output in
-                        row(output, badge: pair.count == 2 ? (pair[0].id == output.id ? "A" : pair[1].id == output.id ? "B" : nil) : nil)
-                    }
-                }
+            let rows = ForEach(outputs) { output in
+                row(output, badge: pair.count == 2 ? (pair[0].id == output.id ? "A" : pair[1].id == output.id ? "B" : nil) : nil)
             }
-            .scrollIndicators(.never)
+            // The list's own height while it fits, so the panel hugs it; scrolling once it doesn't.
+            ViewThatFits(in: .vertical) {
+                VStack(spacing: 0) { rows }
+                ScrollView { LazyVStack(spacing: 0) { rows } }.scrollIndicators(.never)
+            }
         }
         .padding(16)
-        .frame(maxHeight: .infinity, alignment: .top)
         .glassEffect(.regular, in: .rect(cornerRadius: 18))
     }
 
     private func row(_ output: Output, badge: String?) -> some View {
         let selected = picked.contains(output.id), playing = player.playing == output.url
-        return HStack(spacing: 8) {
+        return HStack(spacing: 6) {
             Button { player.toggle(output.url) } label: {
                 Image(systemName: playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 11))
@@ -437,9 +436,10 @@ struct OutputsPane: View {
             .accessibilityLabel("\(playing ? "Pause" : "Play") \(output.name)")
             if let badge { Text(badge).fontWeight(.bold).foregroundStyle(Theme.secondary) }
             Text(output.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
-            Text(output.format).frame(width: 32, alignment: .leading)
+            Text(output.format).frame(width: 30, alignment: .leading)
             Text(formatTime(output.duration)).frame(width: 34, alignment: .trailing)
-            Text(output.date, format: .dateTime.day().month(.abbreviated).year()).lineLimit(1).frame(width: 80, alignment: .trailing)
+            // Numeric, so the year fits the narrow panel.
+            Text(output.date, format: .dateTime.day().month(.twoDigits).year(.twoDigits)).lineLimit(1).frame(width: 60, alignment: .trailing)
         }
         .font(.system(size: 13).monospacedDigit())
         .padding(.horizontal, 6)

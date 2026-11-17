@@ -15,7 +15,8 @@ enum Flow: Hashable {
 
 struct CloneView: View {
     @Environment(VoiceStore.self) private var store
-    @State private var selection: String?
+    /// Stored, so the agents' tools know the voice selected here.
+    @AppStorage("voice") private var selection: String?
     @State private var flow: Flow?
     @State private var showNew = false
     @State private var renaming: String?
@@ -23,17 +24,21 @@ struct CloneView: View {
     @State private var deleting: String?
 
     var body: some View {
-        NavigationSplitView {
+        SidebarLayout {
             Sidebar(selection: $selection, newIsPrimary: flow == nil, onNew: { showNew = true },
                     onRename: startRename, onDelete: { deleting = $0 })
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
-                .toolbar(removing: .sidebarToggle)
         } detail: {
             detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.content)
         }
-        .onAppear { if selection == nil { selection = store.voices.first?.id } }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                // The panel opens under the voice page, so not during a clone.
+                TerminalButton().disabled(flow != nil || store.voice(selection) == nil)
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .primaryAction) { SettingsButton() }
+        }
+        .onAppear { if store.voice(selection) == nil { selection = store.voices.first?.id } }
         .onChange(of: selection) { if flow?.voiceID != selection { flow = nil } }
         .sheet(isPresented: $showNew) {
             NewVoiceSheet { name, kind in
@@ -163,30 +168,39 @@ struct VoicePage: View {
     @State private var pickTone = "Neutral"
     @State private var importing = Progress()
     @State private var importingTone: String?
+    @AppStorage("terminalOpen") private var terminalOpen = false
+    @AppStorage("terminalHeight") private var terminalHeight = 300.0
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(spacing: 12) {
-                    Text(voice.name)
-                        .font(.system(size: 30, weight: .bold))
-                        .lineLimit(1)
-                        .contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
-                    Spacer()
-                    if voice.session != nil {
-                        Button("Resume session", action: onResume).buttonStyle(.primary)
+            GeometryReader { proxy in
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack(spacing: 12) {
+                        Text(voice.name)
+                            .font(.system(size: 30, weight: .bold))
+                            .lineLimit(1)
+                            .contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
+                        Spacer()
+                        decideAll
+                        if voice.session != nil {
+                            Button("Resume session", action: onResume).buttonStyle(.primary)
+                        }
+                        auditionButton
                     }
-                    auditionButton
+                    TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
+                               onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
+                    if terminalOpen {
+                        // The table keeps room for its header and a few takes.
+                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 230)
+                    }
                 }
-                TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
-                           onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
+                // Columns stop stretching on wide windows.
+                .frame(maxWidth: 1160, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+                .padding(.bottom, terminalOpen ? 8 : 24)
             }
-            // Columns stop stretching on wide windows.
-            .frame(maxWidth: 1160, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.top, 22)
-            .padding(.bottom, 24)
             PronunciationsPanel(voice: voice, open: $inspectorOpen)
         }
         .sheet(isPresented: Binding(present: $recordTone)) {
@@ -206,6 +220,25 @@ struct VoicePage: View {
         }
     }
 
+    /// Accept all and Reject all, once an agent has proposed two or more changes.
+    @ViewBuilder private var decideAll: some View {
+        let takes = voice.takes.filter { $0.proposal != nil }.map(\.id)
+        let words = (voice.proposedPronunciations ?? []).map(\.id)
+        if takes.count + words.count > 1 {
+            Button("Accept all") {
+                store.acceptTakes(takes, voiceID: voice.id)
+                store.acceptPronunciations(words, voiceID: voice.id)
+            }
+            .buttonStyle(.outline(height: 34))
+            Button("Reject all") {
+                store.rejectTakes(takes, voiceID: voice.id)
+                store.rejectPronunciations(words, voiceID: voice.id)
+            }
+            .buttonStyle(.outline(height: 34))
+        }
+    }
+
+    /// Also shows an audition an agent started.
     private var auditionButton: some View {
         Button {
             Task {
@@ -215,9 +248,9 @@ struct VoicePage: View {
                 catch { store.error = error.localizedDescription }
             }
         } label: {
-            if auditioning.active {
+            if auditioning.active || store.auditioning == voice.id {
                 HStack(spacing: 8) {
-                    ProgressView(value: auditioning.value).frame(width: 70)
+                    ProgressView(value: auditioning.active ? auditioning.value : nil).frame(width: 70)
                     Text("Audition")
                 }
             } else {
@@ -225,7 +258,7 @@ struct VoicePage: View {
             }
         }
         .buttonStyle(.outline(height: 34))
-        .disabled(auditioning.active || voice.takes.isEmpty)
+        .disabled(auditioning.active || store.auditioning != nil || voice.takes.isEmpty)
     }
 
     private func importUpload(_ url: URL, tone: String) async {
@@ -250,9 +283,6 @@ private enum Column {
     static let fixed = tone + length + like + main + gutter
 }
 
-/// Row separator: fainter than Theme.line so the table reads as rows, not a grid.
-private let rule = Color(hex: 0x1E2023)
-
 struct TakesTable: View {
     let voice: Voice
     let importingTone: String?
@@ -264,33 +294,38 @@ struct TakesTable: View {
     @State private var takeWidth: CGFloat = 300
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                cell("Tone", width: Column.tone, alignment: .leading)
-                cell("Take", width: takeWidth, alignment: .leading)
-                cell("Length", width: Column.length)
-                cell("Like you", width: Column.like)
-                cell("Main", width: Column.main)
-                Color.clear.frame(width: Column.gutter)
-            }
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(Theme.secondary)
-            .frame(height: 34)
-            rule.frame(height: 1)
-            ScrollView {
-                VStack(spacing: 0) {
+        ScrollView {
+            // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
+            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Section {
                     ForEach(Tone.all, id: \.self) { tone in
                         group(tone)
-                        rule.frame(height: 1)
+                        Theme.rule.frame(height: 1)
                     }
+                } header: {
+                    VStack(spacing: 0) {
+                        HStack(spacing: 0) {
+                            cell("Tone", width: Column.tone, alignment: .leading)
+                            cell("Take", width: takeWidth, alignment: .leading)
+                            cell("Length", width: Column.length)
+                            cell("Like you", width: Column.like)
+                            cell("Main", width: Column.main)
+                            Color.clear.frame(width: Column.gutter)
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.secondary)
+                        .frame(height: 34)
+                        Theme.rule.frame(height: 1)
+                    }
+                    .background(Theme.content)
                 }
             }
-            .scrollIndicators(.automatic)
-            .scrollBounceBehavior(.basedOnSize)
+            // Measures the width the rows get, not their own, so the columns can shrink again.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { takeWidth = max(120, $0 - Column.fixed) }
         }
-        // Measures the space offered, not the rows' own width, so the columns can shrink again.
-        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { takeWidth = max(120, $0 - Column.fixed) }
+        .scrollIndicators(.automatic)
+        .scrollBounceBehavior(.basedOnSize)
     }
 
     private func cell(_ title: String, width: CGFloat, alignment: Alignment = .center) -> some View {
@@ -302,7 +337,8 @@ struct TakesTable: View {
 
     private func group(_ tone: String) -> some View {
         let takes = voice.takes(tone)
-        let isCollapsed = collapsed.contains(tone)
+        // A pending change stays in view.
+        let isCollapsed = collapsed.contains(tone) && !takes.contains { $0.proposal != nil }
         let collapsible = takes.count > 1
         let height = takes.isEmpty ? Column.emptyRow : Column.row
         let label = HStack(spacing: 6) {
@@ -340,7 +376,7 @@ struct TakesTable: View {
                 } else {
                     ForEach(Array(takes.enumerated()), id: \.element.id) { index, take in
                         TakeRow(take: take, voice: voice, showsMain: takes.count > 1, takeWidth: takeWidth)
-                            .overlay(alignment: .top) { if index > 0 { rule.frame(height: 1) } }
+                            .overlay(alignment: .top) { if index > 0 { Theme.rule.frame(height: 1) } }
                     }
                 }
             }
@@ -426,13 +462,20 @@ struct TakeRow: View {
             HStack(spacing: 10) {
                 PlayButton(url: url)
                 SmallWaveform(url: url).frame(width: 54, height: 18)
-                TextField("Transcript", text: $text, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(editing ? nil : 2)
-                    .help(take.transcript)
-                    .focused($editing)
-                    .onSubmit(commit)
-                    .onChange(of: editing) { if !editing { commit() } }
+                if let proposal = take.proposal {
+                    TakeProposalText(take: take, proposal: proposal).frame(maxWidth: .infinity, alignment: .leading)
+                    DecisionButtons(label: "change to this take",
+                                    onAccept: { store.acceptTakes([take.id], voiceID: voice.id) },
+                                    onReject: { store.rejectTakes([take.id], voiceID: voice.id) })
+                } else {
+                    TextField("Transcript", text: $text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(editing ? nil : 2)
+                        .help(take.transcript)
+                        .focused($editing)
+                        .onSubmit(commit)
+                        .onChange(of: editing) { if !editing { commit() } }
+                }
                 if !take.issues.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(Theme.amber)
@@ -483,6 +526,30 @@ struct TakeRow: View {
     private func commit() {
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { text = take.transcript; return }
         store.setTranscript(text, take: take, voiceID: voice.id)
+    }
+}
+
+/// A take's pending change: the old transcript struck through above the new, and any tone or main take change.
+private struct TakeProposalText: View {
+    let take: Take
+    let proposal: TakeProposal
+
+    var body: some View {
+        let changes = [proposal.tone.map { "\(take.tone) → \($0)" }, proposal.main == true ? "Set as main take" : nil].compactMap(\.self)
+        VStack(alignment: .leading, spacing: 3) {
+            if let transcript = proposal.transcript {
+                Text(take.transcript).strikethrough().foregroundStyle(Theme.secondary)
+                Text(transcript)
+            } else {
+                Text(take.transcript)
+            }
+            if !changes.isEmpty {
+                Text(changes.joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(([proposal.transcript.map { "Proposed: \($0), was: \(take.transcript)" } ?? take.transcript] + changes)
+            .joined(separator: ", "))
     }
 }
 
@@ -547,7 +614,7 @@ struct PronunciationsPanel: View {
                     }
                     .padding(.horizontal, 18)
                     .frame(height: 64)
-                    rule.frame(height: 1).padding(.horizontal, 12)
+                    Theme.rule.frame(height: 1).padding(.horizontal, 12)
                     ForEach(voice.pronunciations) { item in
                         HStack(spacing: 10) {
                             Text(item.word)
@@ -561,6 +628,28 @@ struct PronunciationsPanel: View {
                         .contextMenu {
                             Button("Delete", role: .destructive) { store.removePronunciation(item.id, voiceID: voice.id) }
                         }
+                    }
+                    // Two lines, so the word and its respelling don't break mid-word beside the buttons.
+                    ForEach(voice.proposedPronunciations ?? []) { item in
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.word)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                                    Text(item.respelling)
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
+                            Spacer(minLength: 4)
+                            DecisionButtons(label: "pronunciation of \(item.word)",
+                                            onAccept: { store.acceptPronunciations([item.id], voiceID: voice.id) },
+                                            onReject: { store.rejectPronunciations([item.id], voiceID: voice.id) })
+                        }
+                        .font(.system(size: 14))
+                        .padding(.leading, 18)
+                        .padding(.trailing, 12)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                     }
                     Button { adding = true } label: { Label("Add", systemImage: "plus") }
                         .buttonStyle(.outline(height: 32))
@@ -581,6 +670,7 @@ struct PronunciationsPanel: View {
         .padding(8)
         // Hugs its content, so an empty list isn't a tall empty box.
         .frame(maxHeight: .infinity, alignment: .top)
+        .onChange(of: voice.proposedPronunciations?.count ?? 0, initial: true) { _, count in if count > 0 { open = true } }
     }
 
     private var addForm: some View {
@@ -708,21 +798,23 @@ struct FileCloneView: View {
         }
     }
 
-    /// Full clone's layout: a large prompt, its controls, and one button at the bottom.
+    /// Full clone's layout: a large prompt, its controls and one button below them, in a centred column.
     private func screen<Content: View>(_ title: String, bottom: String, action: @escaping () -> Void,
                                        @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 0) {
-            Spacer()
+            Spacer(minLength: 24)
             Text(title)
                 .font(.system(size: 34, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Spacer().frame(height: 52)
             content()
-            Spacer()
-            Button(bottom, action: action).buttonStyle(.outline(height: 44)).padding(.bottom, 44)
+            Spacer(minLength: 32).frame(maxHeight: 72)
+            Button(bottom, action: action).buttonStyle(.outline(height: 44))
+            Spacer(minLength: 24)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: 880)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var pickView: some View {
@@ -768,28 +860,33 @@ struct FileCloneView: View {
                 Button("Cancel") { onDone(nil) }.buttonStyle(.outline(height: 34))
                 Button("Create voice", action: create).buttonStyle(.primary).disabled(!ready)
             }
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
-                    Color.clear.frame(width: FileColumn.issues)
-                    Text("Length").frame(width: FileColumn.length)
-                    Text("Tone").frame(width: FileColumn.tone, alignment: .leading)
-                }
-                .font(.system(size: 13, weight: .medium).monospacedDigit())
-                .foregroundStyle(Theme.secondary)
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                rule.frame(height: 1)
-                ScrollView {
-                    LazyVStack(spacing: 0) {
+            ScrollView {
+                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
                         ForEach($clips) { $clip in
                             FileClipRow(clip: $clip)
-                            rule.frame(height: 1)
+                            Theme.rule.frame(height: 1)
                         }
+                    } header: {
+                        VStack(spacing: 0) {
+                            HStack(spacing: 12) {
+                                Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
+                                Color.clear.frame(width: FileColumn.issues)
+                                Text("Length").frame(width: FileColumn.length)
+                                Text("Tone").frame(width: FileColumn.tone, alignment: .leading)
+                            }
+                            .font(.system(size: 13, weight: .medium).monospacedDigit())
+                            .foregroundStyle(Theme.secondary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 34)
+                            Theme.rule.frame(height: 1)
+                        }
+                        .background(Theme.content)
                     }
                 }
-                .scrollBounceBehavior(.basedOnSize)
             }
+            .scrollBounceBehavior(.basedOnSize)
         }
         .frame(maxWidth: 1160, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

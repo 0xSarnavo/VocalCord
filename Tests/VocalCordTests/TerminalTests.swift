@@ -97,8 +97,13 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     let initialize = try #require(try await rpc(bridge, "initialize", ["protocolVersion": "2025-06-18"]))
     #expect((initialize["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-06-18")
     #expect(try await rpc(bridge, "notifications/initialized", id: nil) == nil)
+    // check_script is listed only once Jev is added.
     let tools = try #require((try await rpc(bridge, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
-    #expect(tools.compactMap { $0["name"] as? String } == ["get_voices", "get_script", "update_script", "render_line", "get_scores", "check_script"])
+    #expect(tools.compactMap { $0["name"] as? String }
+        == ["get_voices", "get_script", "update_script", "render_line", "get_scores", "get_takes", "propose_take_changes", "audition"])
+    let withJev = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys("k"), send: FakeTypeSafe([:]).send)) { open }
+    let jevTools = try #require((try await rpc(withJev, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+    #expect(jevTools.compactMap { $0["name"] as? String }.contains("check_script"))
     #expect((try await rpc(bridge, "resources/list")?["error"] as? [String: Any])?["code"] as? Int == -32601)
 
     #expect(try await callTool(bridge, "get_script") == ("Open a project in Generate first.", true))
@@ -134,6 +139,112 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     let scores = try await callTool(bridge, "get_scores", ["line": 2])
     #expect(scores.text.contains("\"heard\":\"Now, let us take a closer look together.\""))
     #expect(try await callTool(bridge, "get_scores", ["line": 0]).isError)
+}
+
+// MARK: Take tools
+
+/// A voice with two Neutral takes, one Happy take and a pronunciation.
+@MainActor private func voiceFixture(delay: Duration = .zero) throws -> (VoiceStore, String) {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: delay))
+    let id = voices.createVoice(name: "Sarnavo", fullClone: false)
+    for (tone, text, seconds) in [("Neutral", "I'll send the file in a minute.", 4.0), ("Neutral", "The meeting starts at ten.", 2.0),
+                                  ("Happy", "That's great news!", 4.0)] {
+        let wav = try tempFolder().appending(path: "take.wav")
+        try writeWAV(speechLike(seconds: seconds, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+        try voices.addTake(id, file: wav, tone: tone, transcript: text, issues: [])
+    }
+    voices.addPronunciation(word: "Kuber", respelling: "Koo-ber", voiceID: id)
+    return (voices, id)
+}
+
+@MainActor @Test func takeToolsProposeChangesForTheSelectedVoice() async throws {
+    let (voices, id) = try voiceFixture()
+    var selected: String? = nil
+    let bridge = ToolBridge(projects: ProjectStore(root: try tempFolder()), voices: voices,
+                            jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send), projectID: { nil }, voiceID: { selected })
+    #expect(try await callTool(bridge, "get_takes") == ("Select a voice in Clone first.", true))
+    selected = id
+
+    let takes = try #require(try JSONSerialization.jsonObject(with: Data(try await callTool(bridge, "get_takes").text.utf8)) as? [String: Any])
+    #expect(takes["voice"] as? String == "Sarnavo" && takes["pronunciations"] as? [String: String] == ["Kuber": "Koo-ber"])
+    let rows = try #require(takes["takes"] as? [[String: Any]])
+    #expect(rows.map { $0["take"] as? Int } == [1, 2, 3] && rows.map { $0["main"] as? Bool } == [true, false, true])
+    #expect(rows[1]["warnings"] as? [String] == ["Too short"] && rows[0]["seconds"] as? Double == 4)
+
+    let result = try await callTool(bridge, "propose_take_changes", [
+        "changes": [
+            ["take": 1, "transcript": " I'll send the file in a minute, OK? "],
+            ["take": 2, "tone": "happy", "main": true],
+            ["take": 3, "transcript": "That's great news!"],
+            ["take": 9, "tone": "Sad"],
+            ["take": 1, "tone": "Furious"],
+            ["take": 3, "main": false],
+        ],
+        "pronunciations": [["word": "Avalanche", "say_as": "Av-uh-lanch"], ["word": "kuber", "say_as": "Koo-ber"], ["word": "Nope"]],
+    ])
+    #expect(!result.isError)
+    let json = try #require(try JSONSerialization.jsonObject(with: Data(result.text.utf8)) as? [String: Any])
+    #expect(json["proposed"] as? [Int] == [1, 2] && json["unchanged"] as? [Int] == [3])
+    #expect(json["pronunciations_proposed"] as? [String] == ["Avalanche"] && json["pronunciations_unchanged"] as? [String] == ["kuber"])
+    #expect(json["errors"] as? [String] == ["No take 9.", "Take 1: tone must be one of Neutral, Confident, Happy, Sad, Angry, Soft, Slow, Hesitant.",
+                                            "Take 3: main can only be true.", "Each pronunciation needs a word and say_as."])
+
+    // Proposed only: the takes are unchanged until the user accepts.
+    var voice = try #require(voices.voice(id))
+    #expect(voice.takes[0].transcript == "I'll send the file in a minute." && voice.takes[1].tone == "Neutral" && voice.mains.isEmpty)
+    #expect(voice.takes[0].proposal == TakeProposal(transcript: "I'll send the file in a minute, OK?"))
+    #expect(voice.takes[1].proposal == TakeProposal(tone: "Happy", main: true) && voice.takes[2].proposal == nil)
+    #expect(voice.proposedPronunciations?.map(\.word) == ["Avalanche"])
+    #expect(try await callTool(bridge, "get_takes").text.contains("\"pending_change\":{\"main\":true,\"tone\":\"Happy\"}"))
+
+    // A main take proposed for a tone replaces any other pending there; one already main isn't a change.
+    #expect(voices.propose(TakeProposal(main: true), take: voice.takes[2].id, voiceID: id) == false)
+    #expect(voices.propose(TakeProposal(tone: "Happy", main: true), take: voice.takes[0].id, voiceID: id))
+    voice = try #require(voices.voice(id))
+    #expect(voice.takes[0].proposal == TakeProposal(transcript: "I'll send the file in a minute, OK?", tone: "Happy", main: true))
+    #expect(voice.takes[1].proposal == TakeProposal(tone: "Happy"))
+
+    voices.rejectTakes([voice.takes[0].id], voiceID: id)
+    voices.acceptTakes([voice.takes[1].id], voiceID: id)
+    voices.acceptPronunciations(voice.proposedPronunciations?.map(\.id) ?? [], voiceID: id)
+    voice = try #require(voices.voice(id))
+    #expect(voice.takes[0].proposal == nil && voice.takes[0].transcript == "I'll send the file in a minute.")
+    #expect(voice.takes[1].tone == "Happy" && voice.takes[1].proposal == nil && voice.takes("Happy").count == 2)
+    #expect(voice.pronunciationMap == ["Kuber": "Koo-ber", "Avalanche": "Av-uh-lanch"] && voice.proposedPronunciations == nil)
+    // An accepted pronunciation replaces the voice's own for that word.
+    voices.proposePronunciation(word: "KUBER", respelling: "Koo-burr", voiceID: id)
+    voices.acceptPronunciations(voices.voice(id)?.proposedPronunciations?.map(\.id) ?? [], voiceID: id)
+    #expect(voices.voice(id)?.pronunciationMap == ["Avalanche": "Av-uh-lanch", "KUBER": "Koo-burr"])
+    // Saved with the voice.
+    #expect(VoiceStore(root: voices.root, engine: FakeEngine()).voices == voices.voices)
+}
+
+@MainActor @Test func auditionToolProposesTheBestTakePerTone() async throws {
+    let (voices, id) = try voiceFixture(delay: .milliseconds(80))
+    let projects = ProjectStore(root: try tempFolder())
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send),
+                            projectID: { nil }, voiceID: { id })
+    let result = try await callTool(bridge, "audition")
+    #expect(!result.isError, "\(result.text)")
+    let voice = try #require(voices.voice(id))
+    // Scores are saved; the main takes are only proposed.
+    #expect(voice.takes.allSatisfy { $0.score != nil } && voice.mains.isEmpty)
+    let neutral = voice.takes("Neutral")
+    let best = try #require(neutral.max { $0.score! < $1.score! })
+    let bestNumber = try #require(voice.takes.firstIndex(of: best)) + 1
+    let json = try #require(try JSONSerialization.jsonObject(with: Data(result.text.utf8)) as? [String: Any])
+    let rows = try #require(json["best"] as? [[String: Any]])
+    #expect(rows.map { $0["tone"] as? String } == ["Neutral", "Happy"] && rows[0]["take"] as? Int == bestNumber)
+    // The first take is already Neutral's main, and the only Happy take is Happy's.
+    #expect(json["proposed"] as? [Int] == (bestNumber == 1 ? [] : [bestNumber]))
+    #expect(best.proposal == (bestNumber == 1 ? nil : TakeProposal(main: true)) && voice.takes[2].proposal == nil)
+
+    // One audition at a time, and none while a render runs.
+    let first = Task { try await voices.audition(id) { _ in } }
+    while voices.auditioning == nil { await Task.yield() }
+    await #expect(throws: AppError.self) { try await voices.audition(id) { _ in } }
+    #expect(try await callTool(bridge, "audition") == ("A render or audition is running. Try again when it finishes.", true))
+    _ = try await first.value
 }
 
 // MARK: Proposals
