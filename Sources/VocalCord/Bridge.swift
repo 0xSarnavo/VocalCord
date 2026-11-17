@@ -100,12 +100,14 @@ final class BridgeServer: Sendable {
 final class ToolBridge {
     let projects: ProjectStore
     let voices: VoiceStore
+    let jev: Jev
     /// The project open in Generate.
     let projectID: @MainActor () -> String?
 
-    init(projects: ProjectStore, voices: VoiceStore, projectID: @escaping @MainActor () -> String?) {
+    init(projects: ProjectStore, voices: VoiceStore, jev: Jev, projectID: @escaping @MainActor () -> String?) {
         self.projects = projects
         self.voices = voices
+        self.jev = jev
         self.projectID = projectID
     }
 
@@ -126,7 +128,9 @@ final class ToolBridge {
              properties: lineProperty, required: ["line"]),
         tool("get_scores", "Every version of a line with its scores: like_you (speaker similarity, %), human (naturalness, 1 to 5), words (% of words right) and heard (what Whisper heard), plus flags for low scores.",
              properties: lineProperty, required: ["line"]),
-        tool("check_script", "Jev checks of the script. Needs the Jev plugin."),
+        tool("check_script", "Jev checks of each line: spoken (reads like something a person would say aloud), fits_tone (suits its tone) and, "
+             + "after an agent rewrite, keeps_meaning (keeps the original's meaning). Each is yes, no or unsettled. A line with a pending "
+             + "change is checked as proposed. Unchanged lines reuse their last result. Needs the Jev plugin."),
     ]
 
     private static let lineProperty: [String: Any] = ["line": ["type": "integer", "description": "Line number, from 1"]]
@@ -172,7 +176,9 @@ final class ToolBridge {
             case "update_script": return (try json(propose(arguments, in: currentProject())), false)
             case "render_line": return (try json(await render(arguments, in: currentProject())), false)
             case "get_scores": return (try json(scores(arguments, in: currentProject())), false)
-            case "check_script": return ("Jev plugin not added", false)
+            case "check_script":
+                guard jev.added else { return ("Jev plugin not added", false) }
+                return (try json(await check(currentProject())), false)
             default: throw AppError("Unknown tool \(name).")
             }
         } catch {
@@ -225,6 +231,18 @@ final class ToolBridge {
     private struct ScoresResult: Encodable {
         var line: Int
         var versions: [VersionInfo]
+    }
+
+    private struct CheckInfo: Encodable {
+        var line: Int
+        /// pass, fail, unsettled or error.
+        var result: String
+        var pendingChange: Bool?
+        var spoken: Verdict?
+        var fitsTone: Verdict?
+        var keepsMeaning: Verdict?
+        var notes: [String]?
+        var error: String?
     }
 
     private func currentProject() throws -> Project {
@@ -317,6 +335,30 @@ final class ToolBridge {
             throw AppError("Line \(number) is gone.")
         }
         return versionInfo(version, in: updated)
+    }
+
+    /// Runs Jev on every line with text; empty lines are left out.
+    private func check(_ project: Project) async throws -> [CheckInfo] {
+        let subjects = project.lines.map(JevSubject.init)
+        await jev.check(subjects)
+        let lines = zip(project.lines, subjects).enumerated().compactMap { index, pair -> CheckInfo? in
+            let (line, subject) = pair
+            guard !subject.text.isEmpty else { return nil }
+            var info = CheckInfo(line: index + 1, result: "error", pendingChange: line.proposal == nil ? nil : true)
+            if let result = jev.results[subject] {
+                info.result = switch result.status { case .yes: "pass"; case .no: "fail"; case .unsettled: "unsettled" }
+                let verdicts = result.answers.mapValues(JevQuestions.verdict)
+                info.spoken = verdicts[.spoken]
+                info.fitsTone = verdicts[.fitsTone]
+                info.keepsMeaning = verdicts[.keepsMeaning]
+                info.notes = result.status == .yes ? nil : result.notes(tone: subject.tone)
+            } else {
+                info.error = jev.failures[subject] ?? "Not checked."
+            }
+            return info
+        }
+        if !lines.isEmpty, lines.allSatisfy({ $0.error != nil }) { throw AppError("Jev check failed. \(lines[0].error ?? "")") }
+        return lines
     }
 
     private func scores(_ arguments: [String: Any], in project: Project) throws -> ScoresResult {

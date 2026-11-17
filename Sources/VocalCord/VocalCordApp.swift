@@ -8,17 +8,20 @@ struct VocalCordApp: App {
     @State private var preview: Preview
     @State private var waveforms = Waveforms()
     @State private var terminals: Terminals
+    @State private var jev: Jev
 
     init() {
         let store = VoiceStore(engine: EngineClient())
         let projects = ProjectStore()
         let player = Player()
+        let jev = Jev()
         _store = State(initialValue: store)
         _projects = State(initialValue: projects)
         _player = State(initialValue: player)
         _preview = State(initialValue: Preview(player: player))
+        _jev = State(initialValue: jev)
         // The agents' tools act on the project open in Generate.
-        let tools = ToolBridge(projects: projects, voices: store) { UserDefaults.standard.string(forKey: "project") }
+        let tools = ToolBridge(projects: projects, voices: store, jev: jev) { UserDefaults.standard.string(forKey: "project") }
         _terminals = State(initialValue: Terminals(tools: tools))
     }
 
@@ -31,11 +34,12 @@ struct VocalCordApp: App {
                 .environment(preview)
                 .environment(waveforms)
                 .environment(terminals)
+                .environment(jev)
         }
         .defaultSize(width: 1280, height: 800)
 
         Settings {
-            SettingsView().preferredColorScheme(.dark)
+            SettingsView().environment(jev).preferredColorScheme(.dark)
         }
     }
 }
@@ -88,15 +92,91 @@ struct SettingsView: View {
     @AppStorage(EngineSettings.modelKey) private var model = EngineSettings.defaultModel
 
     var body: some View {
-        Form {
-            Picker("Model", selection: $model) {
-                Text("Best quality (8-bit)").tag("8bit")
-                Text("Fast (4-bit)").tag("4bit")
+        TabView {
+            Tab("General", systemImage: "gearshape") {
+                Form {
+                    Picker("Model", selection: $model) {
+                        Text("Best quality (8-bit)").tag("8bit")
+                        Text("Fast (4-bit)").tag("4bit")
+                    }
+                    .pickerStyle(.radioGroup)
+                }
+                .padding(24)
+                .frame(width: 440)
             }
-            .pickerStyle(.radioGroup)
+            Tab("Plugins", systemImage: "puzzlepiece.extension") { PluginSettings() }
         }
+    }
+}
+
+/// Add Jev: the API key is checked with TypeSafe, then kept in the Keychain.
+struct PluginSettings: View {
+    @Environment(Jev.self) private var jev
+    @State private var adding = false
+    @State private var key = ""
+    @State private var validating = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Jev").font(.system(size: 15, weight: .semibold))
+                    Text("Checks that each line reads as speech, fits its tone, and keeps its meaning after a rewrite. "
+                        + "Only line text and tones are sent to TypeSafe.")
+                        .foregroundStyle(Theme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                if jev.added {
+                    Text("Added").foregroundStyle(Theme.secondary).frame(height: 30)
+                    Button("Remove") {
+                        do { try jev.remove() } catch { self.error = error.localizedDescription }
+                    }
+                    .buttonStyle(.outline)
+                } else if !adding {
+                    Button("Add Jev") { adding = true }.buttonStyle(.outline)
+                }
+            }
+            if adding, !jev.added {
+                SecureField("TypeSafe API key", text: $key)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(add)
+                HStack(spacing: 10) {
+                    Spacer()
+                    Button("Cancel") {
+                        adding = false
+                        key = ""
+                        error = nil
+                    }
+                    .buttonStyle(.outline)
+                    .disabled(validating)
+                    Button(validating ? "Checking key…" : "Add", action: add)
+                        .buttonStyle(.primary(height: 30))
+                        .disabled(validating || key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            if let error { Warning(text: error) }
+        }
+        .font(.system(size: 13))
         .padding(24)
-        .frame(width: 340)
+        .frame(width: 440, alignment: .topLeading)
+    }
+
+    private func add() {
+        guard !validating else { return }
+        validating = true
+        error = nil
+        Task {
+            defer { validating = false }
+            do {
+                try await jev.add(key: key)
+                key = ""
+                adding = false
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 

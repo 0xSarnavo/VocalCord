@@ -166,6 +166,7 @@ private enum Column {
     static let like: CGFloat = 56
     static let human: CGFloat = 48
     static let words: CGFloat = 44
+    static let jev: CGFloat = 36
     static let version: CGFloat = 86
     static let gutter: CGFloat = 30
 }
@@ -173,6 +174,7 @@ private enum Column {
 struct ScriptPane: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
+    @Environment(Jev.self) private var jev
     let project: Project
     @State private var splitText: String?
     @State private var importing = false
@@ -187,6 +189,14 @@ struct ScriptPane: View {
                 if pending.count > 1 {
                     Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline(height: 28))
                     Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline(height: 28))
+                }
+                if jev.added {
+                    Button(jev.isChecking ? "Checking…" : "Check script") {
+                        let subjects = project.lines.map(JevSubject.init)
+                        Task { await jev.check(subjects) }
+                    }
+                    .buttonStyle(.outline(height: 28))
+                    .disabled(jev.isChecking || renderable.isEmpty)
                 }
                 Button("Compare styles…") { comparing = renderable.map(\.id) }
                     .buttonStyle(.outline(height: 28))
@@ -245,6 +255,7 @@ struct ScriptPane: View {
             Text("Like you").frame(width: Column.like)
             Text("Human").frame(width: Column.human)
             Text("Words").frame(width: Column.words)
+            if jev.added { Text("Jev").frame(width: Column.jev) }
             Text("Version").padding(.horizontal, 8).frame(width: Column.version, alignment: .leading)
             Color.clear.frame(width: Column.gutter)
         }
@@ -269,6 +280,7 @@ struct ScriptPane: View {
 struct LineRow: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
+    @Environment(Jev.self) private var jev
     @Environment(Player.self) private var player
     @Environment(Preview.self) private var preview
     let projectID: String
@@ -302,6 +314,7 @@ struct LineRow: View {
             ScoreCell(value: scores.map { String(format: "%.1f", $0.human) }, flag: version?.humanFlag).frame(width: Column.human)
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
+            if jev.added { JevCell(subject: JevSubject(line)).frame(width: Column.jev) }
             versionControl.frame(width: Column.version - decision)
             Group {
                 if line.proposal != nil {
@@ -529,6 +542,43 @@ private struct ScoreCell: View {
         .help(flag ?? help ?? "")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([value ?? "None", flag ?? (dim ? help : nil)].compactMap(\.self).joined(separator: ", "))
+    }
+}
+
+/// A line's Jev checks: quiet when they pass, the amber triangle when one fails, a neutral mark when one is unsettled.
+/// A failed call is shown as an error, never as a failed check. The reasons show on hover.
+private struct JevCell: View {
+    @Environment(Jev.self) private var jev
+    let subject: JevSubject
+
+    var body: some View {
+        let result = jev.results[subject], error = jev.failures[subject]
+        let help = error.map { "Check failed. \($0)" } ?? result?.notes(tone: subject.tone).joined(separator: "\n")
+            ?? (subject.text.isEmpty ? "" : "Not checked")
+        Group {
+            if jev.checking.contains(subject) {
+                ProgressView().controlSize(.mini)
+            } else if error != nil {
+                mark("exclamationmark.icloud", Theme.secondary)
+            } else if let result {
+                switch result.status {
+                case .no: mark("exclamationmark.triangle.fill", Theme.amber)
+                case .unsettled: mark("questionmark.circle", Theme.secondary)
+                case .yes: mark("checkmark", Theme.secondary)
+                }
+            } else {
+                Text("–").foregroundStyle(Theme.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(.rect)
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(help.isEmpty ? "Jev: not checked" : "Jev: " + help.replacing("\n", with: ", "))
+    }
+
+    private func mark(_ icon: String, _ color: Color) -> some View {
+        Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(color)
     }
 }
 

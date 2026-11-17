@@ -49,6 +49,8 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     var chosen: String?
     /// A change a terminal agent proposed, waiting for the user to accept or reject it.
     var proposal: Proposal?
+    /// The text before the first accepted agent rewrite, for Jev's meaning check. Cleared when the user edits the text.
+    var original: String?
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
 
@@ -232,7 +234,13 @@ final class ProjectStore {
         update(projectID) { $0.lines += texts.map { Line(text: $0, voiceID: voiceID) } }
     }
 
-    func setText(_ text: String, line: String, in projectID: String) { updateLine(projectID, line) { $0.text = text } }
+    func setText(_ text: String, line: String, in projectID: String) {
+        updateLine(projectID, line) { line in
+            guard line.text != text else { return }
+            line.text = text
+            line.original = nil
+        }
+    }
     func setVoice(_ voiceID: String, line: String, in projectID: String) { updateLine(projectID, line) { $0.voiceID = voiceID } }
     func setTone(_ tone: String, line: String, in projectID: String) { updateLine(projectID, line) { $0.tone = tone } }
     func setPause(_ seconds: Double, line: String, in projectID: String) {
@@ -273,6 +281,7 @@ final class ProjectStore {
             for index in project.lines.indices where lineIDs.contains(project.lines[index].id) {
                 guard let proposal = project.lines[index].proposal else { continue }
                 var line = project.lines[index]
+                if proposal.text != line.text { line.original = line.original ?? line.text }
                 line.text = proposal.text
                 line.tone = proposal.tone
                 line.pauseAfter = proposal.pauseAfter

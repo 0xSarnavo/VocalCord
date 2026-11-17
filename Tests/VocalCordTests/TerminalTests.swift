@@ -92,7 +92,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
 @MainActor @Test func toolBridgeSpeaksMCPAndProposesChanges() async throws {
     let (projects, voices, id) = try scriptFixture()
     var open: String? = nil
-    let bridge = ToolBridge(projects: projects, voices: voices) { open }
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { open }
 
     let initialize = try #require(try await rpc(bridge, "initialize", ["protocolVersion": "2025-06-18"]))
     #expect((initialize["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-06-18")
