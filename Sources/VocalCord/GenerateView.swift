@@ -12,6 +12,9 @@ struct GenerateView: View {
     @State private var exporting = false
     @AppStorage("terminalOpen") private var terminalOpen = false
     @AppStorage("terminalHeight") private var terminalHeight = 300.0
+    /// Preview and Outputs; folding them gives the script the room. Preview keeps its state and playback while folded.
+    @AppStorage("generateSideOpen") private var sideOpen = true
+    @State private var width = 1036.0
 
     /// The New project and Rename alerts share one text field.
     private enum NameRequest: Identifiable {
@@ -28,37 +31,34 @@ struct GenerateView: View {
             Group {
                 if let project = projects.project(selection) {
                     let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
-                    HStack(spacing: 0) {
+                    HStack(spacing: 8) {
                         GeometryReader { proxy in
-                            VStack(alignment: .leading, spacing: 12) {
+                            VStack(spacing: 8) {
                                 ScriptPane(project: project).id(project.id)
+                                    .frame(maxHeight: .infinity)
+                                    .panel()
                                 if terminalOpen {
                                     // The script keeps room for its header and a few lines.
-                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 230)
+                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
                                 }
                             }
-                            // Columns stop stretching on wide windows.
-                            .frame(maxWidth: 1160, maxHeight: .infinity, alignment: .topLeading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            // Less on the right, where the panels add their own margin.
-                            .padding(.leading, 24)
-                            .padding(.trailing, 8)
-                            .padding(.top, 22)
-                            .padding(.bottom, 8)
                         }
-                        VStack(spacing: 8) {
-                            PreviewPane(project: project)
-                            OutputsPane(project: project).id(project.id)
+                        if sideOpen {
+                            VStack(spacing: 8) {
+                                PreviewPane(project: project) { sideOpen = false }
+                                OutputsPane(project: project).id(project.id)
+                            }
+                            // Narrow windows give the script the room; wide ones a larger preview.
+                            .frame(width: min(320, max(264, 264 + (width - 1036) * 0.15)))
+                        } else {
+                            FoldedSidePanel(title: "Preview") { sideOpen = true }
                         }
-                        .frame(width: 300)
-                        .padding(8)
-                        // The panels fit their content rather than fill the column.
-                        .frame(maxHeight: .infinity, alignment: .top)
                     }
+                    .onGeometryChange(for: Double.self) { $0.size.width } action: { width = $0 }
                     .task(id: timeline) { await preview.load(timeline) }
                     .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
                 } else {
-                    Text("No projects").foregroundStyle(Theme.secondary)
+                    Text("No projects").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
                 }
             }
             .onDisappear { preview.pause() }
@@ -86,30 +86,30 @@ struct GenerateView: View {
         }
     }
 
+    /// Native toolbar glass: Terminal, Render, then Export as the one off-white action, then the gear.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) { TerminalButton() }
-            .sharedBackgroundVisibility(.hidden)
+        ToolbarSpacer(.fixed, placement: .primaryAction)
         ToolbarItem(placement: .primaryAction) {
             if let progress = projects.progress {
-                HStack(spacing: 10) {
-                    ProgressView(value: progress).frame(width: 90)
-                    Button("Cancel") { projects.cancel() }.buttonStyle(.outline(height: 32))
+                HStack(spacing: 8) {
+                    ProgressView(value: progress).frame(width: 90).padding(.leading, 10)
+                    Button("Cancel") { projects.cancel() }
                 }
             } else {
                 Button { projects.renderNeeded(selection, voices: voices) } label: { Label("Render", systemImage: "play.fill") }
                     .labelStyle(.titleAndIcon)
-                    .buttonStyle(.outline(height: 32))
                     .disabled(!(projects.project(selection)?.lines.contains(where: \.needsRender) ?? false))
             }
         }
-        .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .primaryAction) {
             Button { exporting = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
                 .labelStyle(.titleAndIcon)
-                .buttonStyle(.primary(height: 32))
+                .buttonStyle(.toolbarPrimary)
                 .disabled(!(projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false))
         }
         .sharedBackgroundVisibility(.hidden)
+        ToolbarSpacer(.fixed, placement: .primaryAction)
         ToolbarItem(placement: .primaryAction) { SettingsButton() }
     }
 }
@@ -157,18 +157,22 @@ struct ProjectsSidebar: View {
 
 // MARK: Script
 
-/// Fixed widths; Text takes the rest.
+/// Fixed widths; Text takes the rest. Voice fits a name of about 12 characters; a score column fits its heading and a
+/// flagged two-digit value.
 private enum Column {
+    static let text: CGFloat = 140
     static let number: CGFloat = 22
-    static let voice: CGFloat = 84
-    static let tone: CGFloat = 92
+    static let voice: CGFloat = 112
+    static let tone: CGFloat = 90
     static let pause: CGFloat = 44
     static let like: CGFloat = 60
-    static let human: CGFloat = 52
-    static let words: CGFloat = 52
-    static let jev: CGFloat = 40
-    static let version: CGFloat = 84
-    static let gutter: CGFloat = 30
+    static let human: CGFloat = 50
+    static let words: CGFloat = 58
+    static let jev: CGFloat = 36
+    static let version: CGFloat = 80
+    static let gutter: CGFloat = 32
+    /// Between a number and its column's right edge, and a boxed control's text and its column's left edge.
+    static let inset: CGFloat = 8
 }
 
 struct ScriptPane: View {
@@ -182,31 +186,28 @@ struct ScriptPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Script").font(.system(size: 22, weight: .bold))
-                Spacer()
+            PanelHeader("Script") {
                 let pending = project.lines.filter { $0.proposal != nil }.map(\.id)
                 if pending.count > 1 {
-                    Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline(height: 28))
-                    Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline(height: 28))
+                    Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline)
+                    Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline)
                 }
                 if jev.added {
                     Button(jev.isChecking ? "Checking…" : "Check script") {
                         let subjects = project.lines.map(JevSubject.init)
                         Task { await jev.check(subjects) }
                     }
-                    .buttonStyle(.outline(height: 28))
+                    .buttonStyle(.outline)
                     .disabled(jev.isChecking || renderable.isEmpty)
                 }
                 Button("Compare styles…") { comparing = renderable.map(\.id) }
-                    .buttonStyle(.outline(height: 28))
+                    .buttonStyle(.outline)
                     .disabled(renderable.isEmpty || projects.progress != nil)
             }
-            .frame(height: 34)
-            .padding(.bottom, 14)
             ScrollView {
                 // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
-                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                // Leading, so a window too narrow for every column cuts off the last ones, never the text.
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     Section {
                         ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
                             LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
@@ -217,11 +218,12 @@ struct ScriptPane: View {
                     } header: {
                         VStack(spacing: 0) {
                             header
-                            Theme.rule.frame(height: 1)
+                            Theme.line.frame(height: 1)
                         }
                         .background(Theme.content)
                     }
                 }
+                .padding(.horizontal, 8)
             }
             .scrollIndicators(.automatic)
             .scrollBounceBehavior(.basedOnSize)
@@ -249,23 +251,23 @@ struct ScriptPane: View {
 
     private var header: some View {
         HStack(spacing: 0) {
-            Text("#").frame(width: Column.number)
-            Text("Text").padding(.horizontal, 8).frame(maxWidth: .infinity, alignment: .leading)
-            Text("Voice").padding(.horizontal, 8).frame(width: Column.voice, alignment: .leading)
-            Text("Tone").padding(.horizontal, 8).frame(width: Column.tone, alignment: .leading)
-            Text("Pause").frame(width: Column.pause)
-            Text("Like you").frame(width: Column.like)
-            Text("Human").frame(width: Column.human)
-            Text("Words").frame(width: Column.words)
+            Text("#").frame(width: Column.number, alignment: .leading)
+            Text("Text").padding(.horizontal, 6).frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
+            Text("Voice").padding(.leading, Column.inset).frame(width: Column.voice, alignment: .leading)
+            Text("Tone").padding(.leading, Column.inset).frame(width: Column.tone, alignment: .leading)
+            Text("Pause").padding(.trailing, Column.inset).frame(width: Column.pause, alignment: .trailing)
+            Text("Like you").padding(.trailing, Column.inset).frame(width: Column.like, alignment: .trailing)
+            Text("Human").padding(.trailing, Column.inset).frame(width: Column.human, alignment: .trailing)
+            Text("Words").padding(.trailing, Column.inset).frame(width: Column.words, alignment: .trailing)
             if jev.added { Text("Jev").frame(width: Column.jev) }
-            Text("Version").padding(.horizontal, 8).frame(width: Column.version, alignment: .leading)
+            Text("Version").padding(.leading, Column.inset + 4).frame(width: Column.version, alignment: .leading)
             Color.clear.frame(width: Column.gutter)
         }
         .font(.system(size: 12, weight: .medium))
         .foregroundStyle(Theme.secondary)
         .lineLimit(1)
-        .padding(.horizontal, 6)
-        .frame(height: 34)
+        .padding(.horizontal, 8)
+        .frame(height: 32)
     }
 
     private var footer: some View {
@@ -275,7 +277,7 @@ struct ScriptPane: View {
             Button("Import…") { importing = true }
         }
         .buttonStyle(.outline(height: 28))
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -292,6 +294,7 @@ struct LineRow: View {
     let number: Int
     let isLast: Bool
     let onCompare: () -> Void
+    @State private var hovered = false
 
     var body: some View {
         let version = line.chosenVersion
@@ -299,7 +302,7 @@ struct LineRow: View {
         // A pending change takes room from the version cell for its Accept and Reject buttons.
         let decision: CGFloat = line.proposal == nil ? 0 : 22
         HStack(spacing: 0) {
-            Text("\(number)").frame(width: Column.number)
+            Text("\(number)").foregroundStyle(Theme.secondary).frame(width: Column.number, alignment: .leading)
             Group {
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
@@ -308,8 +311,8 @@ struct LineRow: View {
                         .textFieldStyle(.plain)
                 }
             }
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 6)
+            .frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
             voiceMenu.frame(width: Column.voice)
             toneMenu.frame(width: Column.tone)
             pauseField.frame(width: Column.pause)
@@ -332,11 +335,16 @@ struct LineRow: View {
             .frame(width: Column.gutter + decision)
         }
         .font(.system(size: 14).monospacedDigit())
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .padding(.vertical, 9)
         .frame(minHeight: 50)
-        .background { RoundedRectangle(cornerRadius: 8).fill(preview.currentLine == line.id ? Theme.selection : .clear).padding(.horizontal, 4) }
+        .background {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(preview.currentLine == line.id ? Theme.selection : hovered ? Theme.hover : .clear)
+                .padding(.vertical, 2)
+        }
         .contentShape(.rect)
+        .onHover { hovered = $0 }
         .simultaneousGesture(TapGesture().onEnded { preview.seek(toLine: line.id) })
         .contextMenu {
             Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
@@ -360,6 +368,7 @@ struct LineRow: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .padding(.horizontal, 3)
+        .help(voices.voice(line.voiceID)?.name ?? "")
         .accessibilityLabel("Voice")
     }
 
@@ -387,6 +396,8 @@ struct LineRow: View {
                 .frame(width: 30)
             Text("s")
         }
+        .padding(.trailing, Column.inset)
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Pause after, seconds")
     }
@@ -405,7 +416,7 @@ struct LineRow: View {
                             Image(systemName: "text.bubble").font(.system(size: 10)).foregroundStyle(Theme.secondary)
                         }
                     }
-                    .padding(.leading, compact ? 6 : 8)
+                    .padding(.leading, compact ? 6 : Column.inset + 1)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     .contentShape(.rect)
                 }
@@ -424,7 +435,7 @@ struct LineRow: View {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Theme.secondary)
-                        .frame(width: compact ? 14 : 22, height: 28)
+                        .frame(width: compact ? 14 : 20, height: 28)
                         .contentShape(.rect)
                 }
                 .menuStyle(.button)
@@ -436,9 +447,10 @@ struct LineRow: View {
             .frame(height: 28)
             .background(player.playing == url ? Theme.selection : .clear, in: .rect(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-            .padding(.horizontal, compact ? 2 : 4)
+            .padding(.horizontal, compact ? 2 : 3)
         } else {
-            Text("–").foregroundStyle(Theme.secondary).padding(.horizontal, 12).frame(maxWidth: .infinity, alignment: .leading)
+            // Nothing rendered yet: an empty cell, not a dash.
+            Color.clear
         }
     }
 
@@ -458,6 +470,7 @@ struct LineRow: View {
                     .contentShape(.rect)
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil)
             .help("Render again")
             .accessibilityLabel("Render line \(number) again")
@@ -529,15 +542,16 @@ private struct MenuBox: View {
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 6)
+        .padding(.leading, Column.inset - 3)
+        .padding(.trailing, 6)
         .frame(height: 28)
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
         .contentShape(.rect)
     }
 }
 
-/// A score as a number; a low one gets the amber triangle, a bold value and its reason on hover.
-/// A dim one is shown but not judged.
+/// A score as a number, right-aligned so values line up row to row; a low one gets the amber triangle, a bold value
+/// and its reason on hover. A dim one is shown but not judged. No score leaves the cell empty.
 private struct ScoreCell: View {
     let value: String?
     let flag: String?
@@ -545,16 +559,19 @@ private struct ScoreCell: View {
     var help: String?
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             if flag != nil {
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(Theme.amber)
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Theme.amber)
             }
-            Text(value ?? "–")
-                .fontWeight(flag == nil ? .regular : .bold)
-                .foregroundStyle(value == nil || dim ? Theme.secondary : Theme.text)
+            if let value {
+                Text(value)
+                    .fontWeight(flag == nil ? .regular : .bold)
+                    .foregroundStyle(dim ? Theme.secondary : Theme.text)
+            }
         }
         .lineLimit(1)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.trailing, Column.inset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .contentShape(.rect)
         .help(flag ?? help ?? "")
         .accessibilityElement(children: .ignore)
@@ -584,7 +601,7 @@ private struct JevCell: View {
                 case .yes: mark("checkmark", Theme.secondary)
                 }
             } else {
-                Text("–").foregroundStyle(Theme.secondary)
+                Color.clear
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

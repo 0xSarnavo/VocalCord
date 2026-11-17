@@ -12,6 +12,12 @@ struct VocalCordApp: App {
     @State private var setup: Setup
 
     init() {
+        // The design is grey: a graphite accent turns focus rings, selections and checkboxes grey whatever the system
+        // accent. The argument domain outranks the user's global setting and is never saved.
+        let defaults = UserDefaults.standard
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments["AppleAccentColor"] = -1
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         // A downloaded copy marks every file as quarantined. Opening the app clears the check for the app itself,
         // not for the helpers it starts (uv, and vocalcord-mcp, which the terminal agents launch), so drop the
         // mark on those. It fails quietly when the app isn't writable, e.g. when run straight from the DMG.
@@ -71,10 +77,13 @@ struct RootView: View {
         Group {
             if setup.done { modes } else { SetupView() }
         }
-        .frame(minWidth: 1000, minHeight: 640)
+        // Wide enough for every script column beside the sidebar and an open side column.
+        .frame(minWidth: 1200, minHeight: 640)
         // The blue focus ring clashes with the grey design; text fields turn it back on.
         .focusEffectDisabled()
         .containerBackground(Theme.base, for: .window)
+        // The toolbar sits on the window's colour; the panels below give the structure.
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .preferredColorScheme(.dark)
         .foregroundStyle(Theme.text)
         .alert(store.error ?? "", isPresented: Binding(present: Bindable(store).error)) {
@@ -101,6 +110,7 @@ struct RootView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 220)
+                .focusEffectDisabled()
             }
         }
     }
@@ -115,8 +125,9 @@ struct SettingsButton: View {
     }
 }
 
-/// A mode's sidebar as one glass panel, resizable from its edge, beside the canvas. Not NavigationSplitView: its sidebar
-/// splits into two boxes in full screen and opened at 148 pt on a first launch.
+/// A mode's sidebar as one glass panel, resizable from its edge, beside the mode's own panels. Every column sits on the
+/// window's base colour with 8 pt between them. Not NavigationSplitView: its sidebar splits into two boxes in full
+/// screen and opened at 148 pt on a first launch.
 struct SidebarLayout<Sidebar: View, Detail: View>: View {
     @AppStorage("sidebarWidth") private var width = 220.0
     @State private var dragStart: Double?
@@ -135,7 +146,8 @@ struct SidebarLayout<Sidebar: View, Detail: View>: View {
                 .overlay(alignment: .trailing) { handle }
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.content)
+                .padding(.vertical, 8)
+                .padding(.trailing, 8)
         }
     }
 
@@ -271,6 +283,8 @@ enum Theme {
     static let base = Color(hex: 0x070809)
     static let content = Color(hex: 0x0E0F10)
     static let selection = Color(hex: 0x2C2F33)
+    /// A row under the pointer: fainter than `selection`.
+    static let hover = Color.white.opacity(0.035)
     static let primary = Color(hex: 0xE8E9EA)
     static let onPrimary = Color(hex: 0x0E0F10)
     static let text = Color(hex: 0xF1F3F0)
@@ -280,6 +294,75 @@ enum Theme {
     static let rule = Color(hex: 0x1E2023)
     static let outline = Color.white.opacity(0.32)
     static let amber = Color(hex: 0xF2B544)
+}
+
+extension View {
+    /// The main column: solid, so text and tables read on a flat surface.
+    func panel() -> some View {
+        background(Theme.content)
+            .clipShape(.rect(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.line))
+    }
+
+    /// A side column's glass panel; `fill` stretches it to the column's full height.
+    func sidePanel(fill: Bool = true) -> some View {
+        frame(maxHeight: fill ? .infinity : nil, alignment: .top)
+            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+    }
+}
+
+/// The chevron in a side column's header that folds the column away.
+struct FoldButton: View {
+    /// What is folded, for VoiceOver: "Hide pronunciations".
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Image(systemName: "chevron.right").padding(6).contentShape(.rect) }
+            .buttonStyle(.plain)
+            .help("Hide")
+            .accessibilityLabel("Hide \(label)")
+    }
+}
+
+/// A folded side column: a slim full-height strip whose chevron opens it again, so the column never leaves a hole.
+struct FoldedSidePanel: View {
+    /// The column's title, shown on hover and read by VoiceOver.
+    let title: String
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) { Image(systemName: "chevron.left").padding(8).contentShape(.rect) }
+            .buttonStyle(.plain)
+            .help(title)
+            .accessibilityLabel("Show \(title.lowercased())")
+            .frame(width: 44, height: 52)
+            .sidePanel()
+    }
+}
+
+/// A panel's title row, its actions on the right, and the hairline under it.
+struct PanelHeader<Title: View, Actions: View>: View {
+    @ViewBuilder let title: Title
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        HStack(spacing: 8) {
+            title.font(.system(size: 17, weight: .bold)).lineLimit(1)
+            Spacer(minLength: 8)
+            actions
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .frame(height: 52)
+        .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
+    }
+}
+
+extension PanelHeader where Title == Text {
+    init(_ title: String, @ViewBuilder actions: () -> Actions) {
+        self.init(title: { Text(title) }, actions: actions)
+    }
 }
 
 extension Color {
@@ -347,6 +430,34 @@ struct OutlineButtonStyle: ButtonStyle {
                 .contentShape(.rect)
         }
     }
+}
+
+/// The off-white action in the toolbar: a capsule at the height of the native toolbar buttons beside it. Drawn here,
+/// not as tinted glass, so it stays off-white when the window is in the background.
+struct ToolbarPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Styled(configuration: configuration)
+    }
+
+    private struct Styled: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.onPrimary)
+                .padding(.horizontal, 14)
+                .frame(height: 36)
+                .background(Theme.primary.opacity(configuration.isPressed ? 0.8 : 1), in: .capsule)
+                .opacity(isEnabled ? 1 : 0.4)
+                .contentShape(.capsule)
+        }
+    }
+}
+
+extension ButtonStyle where Self == ToolbarPrimaryButtonStyle {
+    static var toolbarPrimary: ToolbarPrimaryButtonStyle { ToolbarPrimaryButtonStyle() }
 }
 
 extension ButtonStyle where Self == PrimaryButtonStyle {

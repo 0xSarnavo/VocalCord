@@ -35,7 +35,7 @@ struct CloneView: View {
                 // The panel opens under the voice page, so not during a clone.
                 TerminalButton().disabled(flow != nil || store.voice(selection) == nil)
             }
-            .sharedBackgroundVisibility(.hidden)
+            ToolbarSpacer(.fixed, placement: .primaryAction)
             ToolbarItem(placement: .primaryAction) { SettingsButton() }
         }
         .onAppear { if store.voice(selection) == nil { selection = store.voices.first?.id } }
@@ -72,20 +72,21 @@ struct CloneView: View {
     @ViewBuilder private var detail: some View {
         switch flow {
         case .full(let id):
-            FullCloneView(voiceID: id) { flow = nil }.id(id)
+            FullCloneView(voiceID: id) { flow = nil }.id(id).panel()
         case .fast(let id):
-            FastCloneView(voiceID: id) { flow = nil }.id(id)
+            FastCloneView(voiceID: id) { flow = nil }.id(id).panel()
         case .file(let name):
             FileCloneView(name: name) { id in
                 flow = nil
                 selection = id ?? store.voices.first?.id
             }
+            .panel()
         case nil:
             if let voice = store.voice(selection) {
                 VoicePage(voice: voice, onResume: { flow = .full(voice.id) }, onRename: startRename, onDelete: { deleting = $0 })
                     .id(voice.id)
             } else {
-                Text("No voices").foregroundStyle(Theme.secondary)
+                Text("No voices").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
             }
         }
     }
@@ -172,34 +173,29 @@ struct VoicePage: View {
     @AppStorage("terminalHeight") private var terminalHeight = 300.0
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             GeometryReader { proxy in
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack(spacing: 12) {
-                        Text(voice.name)
-                            .font(.system(size: 30, weight: .bold))
-                            .lineLimit(1)
-                            .contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
-                        Spacer()
-                        decideAll
-                        if voice.session != nil {
-                            Button("Resume session", action: onResume).buttonStyle(.primary)
+                VStack(spacing: 8) {
+                    VStack(spacing: 0) {
+                        PanelHeader {
+                            Text(voice.name).contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
+                        } actions: {
+                            decideAll
+                            if voice.session != nil {
+                                Button("Resume session", action: onResume).buttonStyle(.primary(height: 30))
+                            }
+                            auditionButton
                         }
-                        auditionButton
+                        TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
+                                   onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
                     }
-                    TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
-                               onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
+                    .frame(maxHeight: .infinity)
+                    .panel()
                     if terminalOpen {
                         // The table keeps room for its header and a few takes.
-                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 230)
+                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
                     }
                 }
-                // Columns stop stretching on wide windows.
-                .frame(maxWidth: 1160, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.top, 22)
-                .padding(.bottom, terminalOpen ? 8 : 24)
             }
             PronunciationsPanel(voice: voice, open: $inspectorOpen)
         }
@@ -229,12 +225,12 @@ struct VoicePage: View {
                 store.acceptTakes(takes, voiceID: voice.id)
                 store.acceptPronunciations(words, voiceID: voice.id)
             }
-            .buttonStyle(.outline(height: 34))
+            .buttonStyle(.outline)
             Button("Reject all") {
                 store.rejectTakes(takes, voiceID: voice.id)
                 store.rejectPronunciations(words, voiceID: voice.id)
             }
-            .buttonStyle(.outline(height: 34))
+            .buttonStyle(.outline)
         }
     }
 
@@ -257,7 +253,7 @@ struct VoicePage: View {
                 Label("Audition", systemImage: "play.fill")
             }
         }
-        .buttonStyle(.outline(height: 34))
+        .buttonStyle(.outline)
         .disabled(auditioning.active || store.auditioning != nil || voice.takes.isEmpty)
     }
 
@@ -274,12 +270,14 @@ struct VoicePage: View {
 
 private enum Column {
     static let tone: CGFloat = 130
-    static let length: CGFloat = 72
-    static let like: CGFloat = 84
+    static let length: CGFloat = 64
+    static let like: CGFloat = 72
     static let main: CGFloat = 58
     static let gutter: CGFloat = 36
     static let row: CGFloat = 44
-    static let emptyRow: CGFloat = 36
+    static let emptyRow: CGFloat = 40
+    /// Between a number and its column's right edge.
+    static let inset: CGFloat = 12
     static let fixed = tone + length + like + main + gutter
 }
 
@@ -307,15 +305,15 @@ struct TakesTable: View {
                         HStack(spacing: 0) {
                             cell("Tone", width: Column.tone, alignment: .leading)
                             cell("Take", width: takeWidth, alignment: .leading)
-                            cell("Length", width: Column.length)
-                            cell("Like you", width: Column.like)
+                            cell("Length", width: Column.length, alignment: .trailing)
+                            cell("Like you", width: Column.like, alignment: .trailing)
                             cell("Main", width: Column.main)
                             Color.clear.frame(width: Column.gutter)
                         }
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Theme.secondary)
-                        .frame(height: 34)
-                        Theme.rule.frame(height: 1)
+                        .frame(height: 32)
+                        Theme.line.frame(height: 1)
                     }
                     .background(Theme.content)
                 }
@@ -323,6 +321,7 @@ struct TakesTable: View {
             // Measures the width the rows get, not their own, so the columns can shrink again.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { takeWidth = max(120, $0 - Column.fixed) }
+            .padding(.horizontal, 8)
         }
         .scrollIndicators(.automatic)
         .scrollBounceBehavior(.basedOnSize)
@@ -331,7 +330,8 @@ struct TakesTable: View {
     private func cell(_ title: String, width: CGFloat, alignment: Alignment = .center) -> some View {
         Text(title)
             .lineLimit(1)
-            .padding(.horizontal, 12)
+            .padding(.leading, alignment == .leading ? Column.inset : 0)
+            .padding(.trailing, alignment == .trailing ? Column.inset : 0)
             .frame(width: width, alignment: alignment)
     }
 
@@ -372,7 +372,8 @@ struct TakesTable: View {
 
             VStack(spacing: 0) {
                 if isCollapsed || takes.isEmpty {
-                    blankRow(takes.isEmpty ? "No take" : nil, height: height)
+                    // A tone with no take shows only its name; Record and Upload appear on hover.
+                    blankRow(height: height)
                 } else {
                     ForEach(Array(takes.enumerated()), id: \.element.id) { index, take in
                         TakeRow(take: take, voice: voice, showsMain: takes.count > 1, takeWidth: takeWidth)
@@ -391,7 +392,7 @@ struct TakesTable: View {
         .overlay(alignment: .topTrailing) {
             if takes.isEmpty { emptyActions(tone).opacity(hovered == tone || importingTone == tone ? 1 : 0) }
         }
-        .background(hovered == tone ? Theme.selection.opacity(0.45) : .clear)
+        .background(hovered == tone ? Theme.hover : .clear)
         .onHover { hovering in
             if hovering { hovered = tone } else if hovered == tone { hovered = nil }
         }
@@ -437,12 +438,8 @@ struct TakesTable: View {
         .frame(height: Column.emptyRow)
     }
 
-    private func blankRow(_ note: String?, height: CGFloat) -> some View {
-        Text(note ?? "")
-            .font(.system(size: 14))
-            .foregroundStyle(Theme.secondary)
-            .padding(.horizontal, 12)
-            .frame(width: takeWidth + Column.length + Column.like + Column.main, height: height, alignment: .leading)
+    private func blankRow(height: CGFloat) -> some View {
+        Color.clear.frame(width: takeWidth + Column.length + Column.like + Column.main, height: height)
     }
 }
 
@@ -488,11 +485,13 @@ struct TakeRow: View {
             .frame(width: takeWidth, alignment: .leading)
 
             Text(formatTime(take.duration))
-                .frame(width: Column.length)
+                .padding(.trailing, Column.inset)
+                .frame(width: Column.length, alignment: .trailing)
                 .frame(maxHeight: .infinity)
-            Text(take.score.map { "\(Int(($0 * 100).rounded()))%" } ?? "–")
-                .foregroundStyle(take.score == nil ? Theme.secondary : Theme.text)
-                .frame(width: Column.like)
+            // No score yet leaves the cell blank.
+            Text(take.score.map { "\(Int(($0 * 100).rounded()))%" } ?? "")
+                .padding(.trailing, Column.inset)
+                .frame(width: Column.like, alignment: .trailing)
                 .frame(maxHeight: .infinity)
             // ZStack, not Group: an empty Group would drop the column's fixed width.
             ZStack {
@@ -605,72 +604,65 @@ struct PronunciationsPanel: View {
         Group {
             if open {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text("Pronunciations").font(.system(size: 17, weight: .bold))
-                        Spacer()
-                        Button { open = false } label: { Image(systemName: "chevron.right").padding(6).contentShape(.rect) }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Hide pronunciations")
-                    }
-                    .padding(.horizontal, 18)
-                    .frame(height: 64)
-                    Theme.rule.frame(height: 1).padding(.horizontal, 12)
-                    ForEach(voice.pronunciations) { item in
-                        HStack(spacing: 10) {
-                            Text(item.word)
+                    PanelHeader("Pronunciations") { FoldButton(label: "pronunciations") { open = false } }
+                    ScrollView { list }.scrollBounceBehavior(.basedOnSize)
+                }
+                .frame(width: 240)
+                .sidePanel()
+            } else {
+                FoldedSidePanel(title: "Pronunciations") { open = true }
+            }
+        }
+        .onChange(of: voice.proposedPronunciations?.count ?? 0, initial: true) { _, count in if count > 0 { open = true } }
+    }
+
+    /// Each word and how to say it, then Add.
+    private var list: some View {
+        VStack(spacing: 0) {
+            ForEach(voice.pronunciations) { item in
+                HStack(spacing: 10) {
+                    Text(item.word)
+                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                    Text(item.respelling)
+                }
+                .font(.system(size: 14))
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
+                .contentShape(.rect)
+                .contextMenu {
+                    Button("Delete", role: .destructive) { store.removePronunciation(item.id, voiceID: voice.id) }
+                }
+            }
+            // Two lines, so the word and its respelling don't break mid-word beside the buttons.
+            ForEach(voice.proposedPronunciations ?? []) { item in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.word)
+                        HStack(spacing: 6) {
                             Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
                             Text(item.respelling)
                         }
-                        .font(.system(size: 14))
-                        .padding(.horizontal, 18)
-                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                        .contentShape(.rect)
-                        .contextMenu {
-                            Button("Delete", role: .destructive) { store.removePronunciation(item.id, voiceID: voice.id) }
-                        }
                     }
-                    // Two lines, so the word and its respelling don't break mid-word beside the buttons.
-                    ForEach(voice.proposedPronunciations ?? []) { item in
-                        HStack(spacing: 10) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.word)
-                                HStack(spacing: 6) {
-                                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
-                                    Text(item.respelling)
-                                }
-                            }
-                            .accessibilityElement(children: .combine)
-                            Spacer(minLength: 4)
-                            DecisionButtons(label: "pronunciation of \(item.word)",
-                                            onAccept: { store.acceptPronunciations([item.id], voiceID: voice.id) },
-                                            onReject: { store.rejectPronunciations([item.id], voiceID: voice.id) })
-                        }
-                        .font(.system(size: 14))
-                        .padding(.leading, 18)
-                        .padding(.trailing, 12)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                    }
-                    Button { adding = true } label: { Label("Add", systemImage: "plus") }
-                        .buttonStyle(.outline(height: 32))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .popover(isPresented: $adding, arrowEdge: .bottom) { addForm }
+                    .accessibilityElement(children: .combine)
+                    Spacer(minLength: 4)
+                    DecisionButtons(label: "pronunciation of \(item.word)",
+                                    onAccept: { store.acceptPronunciations([item.id], voiceID: voice.id) },
+                                    onReject: { store.rejectPronunciations([item.id], voiceID: voice.id) })
                 }
-                .frame(width: 240)
-            } else {
-                Button { open = true } label: { Image(systemName: "chevron.left").padding(8).contentShape(.rect) }
-                    .buttonStyle(.plain)
-                    .help("Pronunciations")
-                    .accessibilityLabel("Show pronunciations")
-                    .frame(width: 44, height: 64)
+                .font(.system(size: 14))
+                .padding(.leading, 16)
+                .padding(.trailing, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
             }
+            Button { adding = true } label: { Label("Add", systemImage: "plus") }
+                .buttonStyle(.outline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .popover(isPresented: $adding, arrowEdge: .bottom) { addForm }
         }
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
-        .padding(8)
-        // Hugs its content, so an empty list isn't a tall empty box.
-        .frame(maxHeight: .infinity, alignment: .top)
-        .onChange(of: voice.proposedPronunciations?.count ?? 0, initial: true) { _, count in if count > 0 { open = true } }
     }
 
     private var addForm: some View {
@@ -888,7 +880,6 @@ struct FileCloneView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(maxWidth: 1160, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.horizontal, 24)
         .padding(.top, 22)

@@ -198,14 +198,14 @@ struct PreviewPane: View {
     @Environment(Preview.self) private var preview
     @Environment(ProjectStore.self) private var projects
     let project: Project
+    /// Folds Preview and Outputs away.
+    let onFold: () -> Void
     @State private var choosing = false
     @State private var dropping = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Preview").font(.system(size: 17, weight: .bold))
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            PanelHeader("Preview") {
                 Menu {
                     Button("Choose video…") { choosing = true }
                     Button("Remove video") { projects.setVideo(nil, in: project.id) }.disabled(project.video == nil)
@@ -215,34 +215,57 @@ struct PreviewPane: View {
                 .menuStyle(.button)
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
+                .fixedSize()
                 .accessibilityLabel("Video")
+                FoldButton(label: "preview and outputs", action: onFold)
             }
-            Theme.line.frame(height: 1)
-            videoArea
-            Waveform().frame(height: 64)
-            HStack(spacing: 12) {
-                Button { preview.toggle() } label: {
-                    Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 13))
-                        .frame(width: 34, height: 34)
-                        .background(Color.white.opacity(0.08), in: .circle)
-                        .contentShape(.circle)
-                }
-                .buttonStyle(.plain)
-                .disabled(preview.timeline.duration == 0)
-                .accessibilityLabel(preview.isPlaying ? "Pause" : "Play")
-                PlayTime()
-                Spacer()
-                if project.video != nil { offsetField }
+            VStack(spacing: 12) {
+                videoArea
+                Waveform().frame(height: 56)
+                transport
             }
+            .padding(14)
         }
-        .padding(16)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .sidePanel(fill: false)
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.movie]) { result in
             if case .success(let url) = result { projects.setVideo(Video(path: url.path), in: project.id) }
         }
     }
 
+    /// Play and the time, with the video's offset beside them, or under them when the column is too narrow.
+    private var transport: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                playButton
+                PlayTime()
+                Spacer(minLength: 8)
+                if project.video != nil { offsetField }
+            }
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack(spacing: 12) {
+                    playButton
+                    PlayTime()
+                    Spacer(minLength: 0)
+                }
+                if project.video != nil { offsetField }
+            }
+        }
+    }
+
+    private var playButton: some View {
+        Button { preview.toggle() } label: {
+            Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 13))
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.08), in: .circle)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .disabled(preview.timeline.duration == 0)
+        .accessibilityLabel(preview.isPlaying ? "Pause" : "Play")
+    }
+
+    /// A 16:9 frame: the video once one is set, else the place to drop or choose one.
     @ViewBuilder private var videoArea: some View {
         if let video = project.video {
             ZStack {
@@ -262,18 +285,20 @@ struct PreviewPane: View {
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropping ? Theme.outline : Theme.line))
             .dropDestination(for: URL.self) { urls, _ in attach(urls) } isTargeted: { dropping = $0 }
         } else {
-            HStack(spacing: 10) {
-                Image(systemName: "film").foregroundStyle(Theme.secondary)
-                Text("Drop a video").foregroundStyle(Theme.secondary)
-                Spacer()
-                Button("Choose…") { choosing = true }.buttonStyle(.outline(height: 28))
-            }
-            .font(.system(size: 13))
-            .padding(.horizontal, 12)
-            .frame(height: 52)
-            .background(dropping ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.line, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-            .dropDestination(for: URL.self) { urls, _ in attach(urls) } isTargeted: { dropping = $0 }
+            Color.clear
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .overlay {
+                    VStack(spacing: 10) {
+                        Image(systemName: "film").font(.system(size: 20)).foregroundStyle(Theme.secondary)
+                        Text("Drop a video").foregroundStyle(Theme.secondary)
+                        Button("Choose…") { choosing = true }.buttonStyle(.outline(height: 28))
+                    }
+                    .font(.system(size: 13))
+                }
+                .background(dropping ? Theme.selection : Color.black.opacity(0.25), in: .rect(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropping ? Theme.outline : Theme.line,
+                                                                         style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                .dropDestination(for: URL.self) { urls, _ in attach(urls) } isTargeted: { dropping = $0 }
         }
     }
 
@@ -312,6 +337,8 @@ private struct PlayTime: View {
     var body: some View {
         Text("\(formatTime(preview.position.rounded(.down))) / \(formatTime(preview.timeline.duration))")
             .font(.system(size: 13).monospacedDigit())
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 
@@ -386,14 +413,13 @@ struct OutputsPane: View {
     /// Up to two rows, in the order picked: A, then B.
     @State private var picked: [String] = []
     @State private var side = 0
+    @State private var hovered: String?
 
     var body: some View {
         let outputs = projects.outputs(project.id)
         let pair = picked.compactMap { id in outputs.first { $0.id == id } }
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Outputs").font(.system(size: 17, weight: .bold))
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            PanelHeader("Outputs") {
                 if pair.count == 2 {
                     Picker("Compare", selection: Binding(get: { side }, set: { side = $0; compare(pair) })) {
                         Text("A").tag(0)
@@ -404,22 +430,23 @@ struct OutputsPane: View {
                     .frame(width: 80)
                 }
             }
-            .frame(height: 28)
-            Theme.line.frame(height: 1)
             if outputs.isEmpty {
                 Text("No outputs").font(.system(size: 13)).foregroundStyle(Theme.secondary)
-            }
-            let rows = ForEach(outputs) { output in
-                row(output, badge: pair.count == 2 ? (pair[0].id == output.id ? "A" : pair[1].id == output.id ? "B" : nil) : nil)
-            }
-            // The list's own height while it fits, so the panel hugs it; scrolling once it doesn't.
-            ViewThatFits(in: .vertical) {
-                VStack(spacing: 0) { rows }
-                ScrollView { LazyVStack(spacing: 0) { rows } }.scrollIndicators(.never)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Fills the rest of the column and scrolls.
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(outputs) { output in
+                            row(output, badge: pair.count == 2 ? (pair[0].id == output.id ? "A" : pair[1].id == output.id ? "B" : nil) : nil)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+                .scrollBounceBehavior(.basedOnSize)
             }
         }
-        .padding(16)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .sidePanel()
     }
 
     private func row(_ output: Output, badge: String?) -> some View {
@@ -428,7 +455,7 @@ struct OutputsPane: View {
             Button { player.toggle(output.url) } label: {
                 Image(systemName: playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 11))
-                    .frame(width: 28, height: 28)
+                    .frame(width: 26, height: 26)
                     .background(Color.white.opacity(0.08), in: .circle)
                     .contentShape(.circle)
             }
@@ -436,16 +463,18 @@ struct OutputsPane: View {
             .accessibilityLabel("\(playing ? "Pause" : "Play") \(output.name)")
             if let badge { Text(badge).fontWeight(.bold).foregroundStyle(Theme.secondary) }
             Text(output.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
-            Text(output.format).frame(width: 30, alignment: .leading)
-            Text(formatTime(output.duration)).frame(width: 34, alignment: .trailing)
+            Text(output.format).foregroundStyle(Theme.secondary).frame(width: 30, alignment: .leading)
+            Text(formatTime(output.duration)).frame(width: 30, alignment: .trailing)
             // Numeric, so the year fits the narrow panel.
-            Text(output.date, format: .dateTime.day().month(.twoDigits).year(.twoDigits)).lineLimit(1).frame(width: 60, alignment: .trailing)
+            Text(output.date, format: .dateTime.day().month(.twoDigits).year(.twoDigits)).foregroundStyle(Theme.secondary)
+                .lineLimit(1).fixedSize().frame(width: 58, alignment: .trailing)
         }
         .font(.system(size: 13).monospacedDigit())
         .padding(.horizontal, 6)
-        .frame(height: 46)
-        .background(selected ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
+        .frame(height: 44)
+        .background(selected ? Theme.selection : hovered == output.id ? Theme.hover : .clear, in: .rect(cornerRadius: 8))
         .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+        .onHover { if $0 { hovered = output.id } else if hovered == output.id { hovered = nil } }
         .contentShape(.rect)
         .onTapGesture { pick(output.id) }
         .accessibilityAddTraits(selected ? .isSelected : [])

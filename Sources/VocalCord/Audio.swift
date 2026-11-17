@@ -78,6 +78,18 @@ nonisolated func loadSamples(_ url: URL, rate: Double = 24000) async throws -> [
     guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
         throw AppError("This file has no audio.")
     }
+    // The reader blocks while it decodes. On Swift's few shared threads, a voice's takes loading at once took every
+    // one of them and the decoder, waiting for one, never finished; a dispatch queue adds threads instead.
+    // The track goes to that queue alone and is never shared.
+    nonisolated(unsafe) let handedOff = track
+    return try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(with: Result { try readSamples(asset, track: handedOff, rate: rate) })
+        }
+    }
+}
+
+nonisolated private func readSamples(_ asset: AVURLAsset, track: AVAssetTrack, rate: Double) throws -> [Float] {
     let reader = try AVAssetReader(asset: asset)
     let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
         AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMIsFloatKey: true, AVLinearPCMBitDepthKey: 32,

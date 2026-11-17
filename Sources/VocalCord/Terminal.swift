@@ -254,15 +254,12 @@ extension Terminals: @preconcurrency LocalProcessTerminalViewDelegate {
 
 // MARK: Panel
 
-/// Opens and closes the Terminal panel; grey while open.
+/// Opens and closes the Terminal panel: native toolbar glass, filled grey while open.
 struct TerminalButton: View {
     @AppStorage("terminalOpen") private var open = false
 
     var body: some View {
-        Button("Terminal") { open.toggle() }
-            .buttonStyle(.outline(height: 32))
-            .background(open ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
-            .accessibilityAddTraits(open ? .isSelected : [])
+        Toggle("Terminal", isOn: $open).toggleStyle(.button)
     }
 }
 
@@ -323,9 +320,7 @@ struct TerminalPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: clamp(height))
-        .background(Theme.content)
-        .clipShape(.rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.line))
+        .panel()
         .task { await terminals.detect() }
     }
 

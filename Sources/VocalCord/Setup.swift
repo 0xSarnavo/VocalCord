@@ -287,7 +287,8 @@ struct SetupView: View {
         }
         .frame(width: 460)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.content)
+        .panel()
+        .padding(8)
         .onAppear { setup.check() }
     }
 
