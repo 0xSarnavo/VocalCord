@@ -178,14 +178,14 @@ struct SegmentedTabs<Option: Hashable>: View {
         let width: Double
         let size: VCSize
         let action: () -> Void
-        @Environment(\.appearsActive) private var active
         @State private var hovered = false
 
         var body: some View {
             Button(action: action) {
                 Text(title)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
-                    .foregroundStyle(selected && active || hovered ? Theme.text : Theme.secondary)
+                    // The selected label stays bright in a background window too, so the mode still reads at a glance.
+                    .foregroundStyle(selected || hovered ? Theme.text : Theme.secondary)
                     .lineLimit(1)
                     .frame(width: width, height: size.height - 4)
                     .background(selected ? Theme.selection : hovered ? Theme.hover : .clear,
@@ -236,8 +236,10 @@ struct InlinePopupLabel: View {
     @State private var hovered = false
 
     var body: some View {
+        // The chevron right after the value, so it reads as this pop-up's and not the next column's; the label still
+        // fills the cell, so the whole cell opens the menu.
         HStack(spacing: 4) {
-            Text(title).lineLimit(1).foregroundStyle(dim ? Theme.secondary : Theme.text).frame(maxWidth: .infinity, alignment: .leading)
+            Text(title).lineLimit(1).foregroundStyle(dim ? Theme.secondary : Theme.text)
             Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(hovered ? Theme.secondary : Theme.tertiary)
         }
@@ -245,6 +247,7 @@ struct InlinePopupLabel: View {
         .padding(.horizontal, 6)
         .frame(height: VCSize.s.height)
         .background(hovered ? Theme.hover : .clear, in: .rect(cornerRadius: VCSize.s.radius))
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(.rect)
         .onHover { hovered = $0 }
     }

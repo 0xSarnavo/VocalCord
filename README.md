@@ -4,7 +4,7 @@
 
 VocalCord clones your voice and turns scripts into voiceovers, rendering everything on your Mac.
 
-![The Generate tab: a script with a voice, tone and scores for each line, and Claude Code in the terminal panel](docs/screenshots/generate.png)
+![The Generate tab: a script with a voice, tone and scores for each line, with Preview and Outputs beside it](docs/screenshots/generate.png)
 
 ## Features
 
@@ -18,8 +18,9 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 - **Preview against your video**, then export WAV or M4A, with captions and per-line or per-voice files.
 - **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script, word timings and pace, and proposes edits that you accept or reject. Review pace asks it to direct the rhythm for you.
 - **Jev plugin** (optional): checks that each line reads as speech and fits its tone.
+- **Keyboard first:** ⌘1, ⌘2 and ⌘3 switch between Clone, Generate and Timeline; ⌃` shows the Terminal, ⌥⌘0 the side panel, ⌘R renders and ⇧⌘E exports.
 
-![The Clone tab: takes by tone, pronunciations, and an agent proposing changes](docs/screenshots/clone.png)
+![The Clone tab: takes by tone, with Record and Upload on every tone that has none yet](docs/screenshots/clone.png)
 
 ![Full clone: a guided recording session](docs/screenshots/full-clone.png)
 
@@ -32,7 +33,7 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 
 ## Install
 
-1. Download `VocalCord-1.1.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
+1. Download `VocalCord-1.2.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
 2. VocalCord is not signed by Apple, so macOS blocks the first launch. Right-click VocalCord in Applications and choose **Open**. Or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 3. On first launch, VocalCord installs its voice engine and downloads the models, about 4.6 GB. This happens once.
 
@@ -51,7 +52,7 @@ Needs Xcode 26. In a clone of this repo:
 
 ```sh
 ./build.sh                # VocalCord.app, in this folder
-scripts/make-dmg.sh       # dist/VocalCord-1.1.0.dmg
+scripts/make-dmg.sh       # dist/VocalCord-1.2.0.dmg
 swift test
 ```
 

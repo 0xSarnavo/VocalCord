@@ -581,6 +581,7 @@ struct LineRow: View {
     @State private var versionHovered = false
     /// Applying marks takes a moment; a spinner shows only when it takes longer, so the usual case doesn't flash.
     @State private var slowApply = false
+    @State private var confirmingDelete = false
 
     /// The bar beside a line's number: nothing while its render is current, grey while it has none or its text changed
     /// since, amber when the chosen version failed a check.
@@ -697,7 +698,14 @@ struct LineRow: View {
             Button("Move up") { projects.moveLine(line.id, by: -1, in: projectID) }.disabled(number == 1)
             Button("Move down") { projects.moveLine(line.id, by: 1, in: projectID) }.disabled(isLast)
             Divider()
+            renderAgainItem
+            Divider()
+            Button("Delete line…", role: .destructive) { confirmingDelete = true }
+        }
+        .confirmationDialog("Delete line \(number)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete line", role: .destructive) { projects.deleteLine(line.id, in: projectID) }
+        } message: {
+            Text("Its clips leave the timeline. Its renders stay on disk.")
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.accessibilityLabel(line, number: number))
@@ -786,6 +794,8 @@ struct LineRow: View {
                             if player.playing != url { player.toggle(url) }
                         }
                     }
+                    Divider()
+                    renderAgainItem
                 } label: {
                     // Tertiary at rest like the other pop-ups' chevrons, but never on the selection grey.
                     Image(systemName: "chevron.up.chevron.down")
@@ -849,6 +859,13 @@ struct LineRow: View {
             // Kept as is while marks apply, so the usual quick apply doesn't flash a new state.
             rerenderButton(apply: status != .render)
         }
+    }
+
+    /// Render again, in the row's and the version's menus: the gutter's button waits for the pointer, so this is how
+    /// the keyboard and VoiceOver find it.
+    private var renderAgainItem: some View {
+        Button("Render again") { projects.rerender(line.id, in: projectID, voices: voices) }
+            .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil || voices.busy != nil)
     }
 
     /// Bright and always there while the line needs a render or its marks applied; otherwise rendering again is a
@@ -1002,8 +1019,8 @@ private struct PaceNoteView: View {
         HStack(spacing: 6) {
             Text("\(Text(note.key).foregroundStyle(Theme.amber)) \(note.detail)")
                 .foregroundStyle(Theme.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .lineLimit(2)
+                .truncationMode(.tail)
             if let fix = note.fix, let range = note.range {
                 Text("·").foregroundStyle(Theme.secondary).accessibilityHidden(true)
                 Button(fix.title) { onFix(range) }

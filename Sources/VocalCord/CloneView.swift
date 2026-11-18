@@ -359,7 +359,7 @@ struct TakesTable: View {
             if takes.isEmpty {
                 HStack(spacing: 0) {
                     toneCell(tone, takes: takes, collapsed: false)
-                    emptyActions(tone).opacity(actionOpacity)
+                    emptyActions(tone, dim: actionOpacity)
                     Spacer(minLength: 0)
                 }
                 .frame(height: Column.emptyRow)
@@ -457,17 +457,18 @@ struct TakesTable: View {
         }
     }
 
-    /// Record and Upload for a tone with no take, where its first take will go.
-    private func emptyActions(_ tone: String) -> some View {
+    /// Record and Upload for a tone with no take, where its first take will go. `dim` quiets the labels at rest; the
+    /// Record dot stays full red, so it keeps its 3:1.
+    private func emptyActions(_ tone: String, dim: Double) -> some View {
         HStack(spacing: 8) {
             if importingTone == tone {
                 ProgressView(value: importProgress).frame(width: 120)
             } else {
                 Button { onRecord(tone) } label: {
-                    HStack(spacing: 6) { RecordDot(size: 8); Text("Record") }
+                    HStack(spacing: 6) { RecordDot(size: 8); Text("Record").opacity(dim) }
                 }
                 .accessibilityLabel("Record a \(tone) take")
-                Button("Upload") { onUpload(tone) }
+                Button { onUpload(tone) } label: { Text("Upload").opacity(dim) }
                     .accessibilityLabel("Upload a \(tone) take")
             }
         }
@@ -503,6 +504,7 @@ struct TakeRow: View {
     @State private var text = ""
     /// The transcript reads as text, cut with an ellipsis, until clicked; then it's a field.
     @State private var editing = false
+    @State private var confirmingDelete = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -565,7 +567,12 @@ struct TakeRow: View {
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(.rect)
         .contextMenu {
+            Button("Delete take…", role: .destructive) { confirmingDelete = true }
+        }
+        .confirmationDialog("Delete this \(take.tone) take?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete take", role: .destructive) { store.removeTakes([take.id], from: voice.id) }
+        } message: {
+            Text("The voice stops using it. The recording stays in the voice's folder.")
         }
         .onAppear { text = take.transcript }
         .onChange(of: take.transcript) { text = take.transcript }
@@ -687,20 +694,27 @@ struct PronunciationsPanel: View {
         Group {
             if open {
                 VStack(spacing: 0) {
+                    let empty = voice.pronunciations.isEmpty && (voice.proposedPronunciations ?? []).isEmpty
                     PanelHeader("Pronunciations") {
-                        Button { adding = .header } label: { Image(systemName: "plus") }
-                            .buttonStyle(.icon(.s))
-                            .help("Add a pronunciation")
-                            .accessibilityLabel("Add pronunciation")
-                            .popover(isPresented: presenting(.header), arrowEdge: .bottom) { addForm }
+                        // While the list is empty its own Add button is the one way in, so the header doesn't repeat it.
+                        if !empty {
+                            Button { adding = .header } label: { Image(systemName: "plus") }
+                                .buttonStyle(.icon(.s))
+                                .help("Add a pronunciation")
+                                .accessibilityLabel("Add pronunciation")
+                                .popover(isPresented: presenting(.header), arrowEdge: .bottom) { addForm }
+                        }
                         FoldButton(label: "pronunciations") { open = false }
                     }
-                    if voice.pronunciations.isEmpty && (voice.proposedPronunciations ?? []).isEmpty {
+                    if empty {
+                        // At the top of the column, like the Timeline Inspector's, not floating mid-column.
                         EmptyState(title: "No pronunciations", message: "Add a word the voice says wrong and how it should sound.") {
                             Button("Add") { adding = .empty }
                                 .buttonStyle(.vc(.secondary, .s))
                                 .popover(isPresented: presenting(.empty), arrowEdge: .bottom) { addForm }
                         }
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 16)
                     } else {
                         ScrollView { list }.scrollBounceBehavior(.basedOnSize)
                     }
