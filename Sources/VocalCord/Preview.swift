@@ -13,6 +13,18 @@ struct Timeline: Equatable {
         var duration: Double
         /// The timeline clip this plays, when built from a project's edit.
         var clipID: String? = nil
+        /// The version whose audio this plays; nil for a line without a render.
+        var versionID: String? = nil
+        /// Where it starts in the version's own file, in seconds, and how fast it plays it: a timeline clip's trim and tempo.
+        var renderStart = 0.0
+        var tempo = 1.0
+
+        /// Seconds into the version's own file (where its word times are) at `time` on the timeline; nil outside the
+        /// segment or without a render.
+        func renderTime(at time: Double) -> Double? {
+            guard versionID != nil, time >= start - 0.001, time <= start + duration + 0.001 else { return nil }
+            return renderStart + (min(max(time, start), start + duration) - start) * tempo
+        }
     }
 
     var projectID = ""
@@ -29,14 +41,17 @@ struct Timeline: Equatable {
             guard version != nil || !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             // shortcut: about 15 characters a second; a real estimate would need the voice's pace.
             let length = version?.duration ?? max(1, (Double(line.text.count) / 15).rounded())
-            segments.append(Segment(lineID: line.id, audio: version.map(audioURL), start: time, duration: length))
+            segments.append(Segment(lineID: line.id, audio: version.map(audioURL), start: time, duration: length, versionID: version?.id))
             duration = time + length
             time = duration + line.pauseAfter
         }
     }
 
     /// The line playing at `time`, its pause included.
-    func line(at time: Double) -> String? { segments.last { $0.start <= time + 0.001 }?.lineID }
+    func line(at time: Double) -> String? { segment(at: time)?.lineID }
+
+    /// The segment playing at `time`, the pause after it included.
+    func segment(at time: Double) -> Segment? { segments.last { $0.start <= time + 0.001 } }
 }
 
 /// Plays the voiceover through the shared Player, with the project's video muted and in step.

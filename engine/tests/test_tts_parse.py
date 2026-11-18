@@ -102,3 +102,35 @@ def test_cancel_during_the_last_line_writes_nothing(tmp_path):
     result = tts.render(_Model(), job)
     assert Path(result["path"]).is_file() and Path(result["timing_path"]).is_file()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["out.json", "out.wav", "ref.wav"]
+
+
+def test_emphasis_joins_the_words_naturally():
+    assert tts.emphasis([]) == ""
+    assert tts.emphasis(["free"]) == ' Put natural emphasis on "free".'
+    assert tts.emphasis(["free", "now"]) == ' Put natural emphasis on "free" and "now".'
+    assert tts.emphasis(["free", "now", "today"]) == ' Put natural emphasis on "free", "now" and "today".'
+    # Words come from the script split on spaces, so punctuation around them is dropped.
+    assert tts.emphasis(["“free,", "now.", "—"]) == ' Put natural emphasis on "free" and "now".'
+
+
+def test_stress_is_added_to_every_spoken_part(tmp_path):
+    job = tts.prepare(_request(tmp_path, text="Kuber is free. [pause 0.2] [Whisper it] Join now", tone="soft",
+                               stress=["Kuber", "free", "now"]))
+    extra = ' Put natural emphasis on "Koo-ber", "free" and "now".'
+    assert job["lines"][0]["items"] == [
+        ("speech", "Koo-ber is free.", tts.STYLES["soft"] + extra),
+        ("pause", 0.2, ""),
+        ("speech", "Join now", "Whisper it." + extra),        # a free direction gets its full stop first
+    ]
+
+
+def test_no_stress_leaves_the_directions_alone(tmp_path):
+    for stress in (None, []):
+        job = tts.prepare(_request(tmp_path, stress=stress))
+        assert job["lines"][0]["items"][0] == ("speech", "Koo-ber works.", tts.STYLES["neutral"])
+
+
+@pytest.mark.parametrize("stress", ["free", [""], ["  "], [1], {"free": 1}])
+def test_stress_must_be_a_list_of_words(tmp_path, stress):
+    with pytest.raises(ValueError, match="Line 1: stress must be a list of words"):
+        tts.prepare(_request(tmp_path, stress=stress))

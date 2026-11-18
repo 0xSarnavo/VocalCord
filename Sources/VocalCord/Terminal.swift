@@ -29,18 +29,35 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         the word to stress at the end of its sentence. Use contractions. Write numbers, symbols and abbreviations as \
         spoken words.
         - Pauses come from punctuation: a comma is short, a full stop longer, a colon sets up what follows, and an \
-        ellipsis adds weight (use it rarely). Use the pause after a line for longer gaps. Inside text, [pause 0.3] \
-        splits the line into parts rendered separately, so use it rarely; (sigh) adds a sigh.
+        ellipsis adds weight (use it rarely). Use the pause after a line for longer gaps, and tags (below) for a beat \
+        inside a line; (sigh) adds a sigh.
         - Give each line the tone its words call for, and let the words carry the emotion too. Tones the voice has \
         takes for (get_voices) sound most like it; any other tone renders from a written direction, so suggest \
         recording a take in that tone in Clone.
-        - Fix every warning that update_script, add_lines and get_script return.
+        - Fix every warning and error that update_script, add_lines and get_script return.
         - Fix low scores: render_line renders once, so read the scores, then rewrite or respell and render again. Low \
         is Like you under 70%, Words under 90%, Human more than 0.5 below the voice's own take, or a flag for pitch, \
         pace or a gap that drifts from the take. Each render comes out a little different, so rendering again can fix \
         a bad one; Render in Generate already retries each line up to five times. A pitch flag in a tone with no take \
         means the voice needs a take in that tone.
-        - Respell words the voice says wrong, such as Kuber as Koo-ber.
+
+        Directing delivery:
+        - Tags in a line's text: [pause 0.5] is that many seconds of silence (0.05 to 10); [breath] a short pause; \
+        [speed 80%]words[/speed] plays them slower or faster (50 to 200%); [stress]word[/stress] emphasizes it; \
+        [say Koo-ber]Kuber[/say] respells a word for this line only. Any other [label], such as [softly], is a tone \
+        direction from there on and starts a fresh take, so use it rarely.
+        - Pauses, breaths and speeds are applied after the render: changing them is instant, with no new render, and \
+        they don't split the take. [say] and [stress] need a new render, as does any change to the words.
+        - Punctuation is still the most natural tool; use tags where it can't do the job. A pause gives a beat after a \
+        key idea. Slow a phrase that should land; speed up a throwaway. Stress sparingly, about one word a line. Use \
+        [say] only for a word the voice gets wrong; a word it gets wrong in every line needs a pronunciation \
+        (propose_take_changes).
+        - get_pacing gives each rendered line's words with times, its words a minute against the target (the take's \
+        pace, or set_pace_target's), and rushed or dragging stretches and long gaps by word number. Slow a rushed \
+        stretch or give it a beat, and speed up a dragging one. Keep a normal pace and pause after new ideas; don't \
+        slow everything down.
+        - For a brief such as "calm intro, punchy ending", read get_script and get_pacing first, then propose tagged \
+        lines with update_script. Keep the wording unless asked to change it, and explain each change briefly.
 
         Timeline:
         - The Timeline tab edits the project's audio on one track, each clip a piece of one line's render. Read it with \
@@ -63,8 +80,14 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         - audition scores the takes and proposes the best per tone as its main take.
 
         Use only the VocalCord tools. update_script, add_lines, propose_timeline_edits, propose_take_changes and audition \
-        only propose changes: the user accepts or rejects them, so never say a change is applied.
+        only propose changes: the user accepts or rejects them, so never say a change is applied. set_pace_target is the \
+        exception: it changes the project's pace target at once.
         """
+
+    /// What the Generate tab's pace review asks the agent.
+    static let reviewPacePrompt = "Review the pace and rhythm of the project open in VocalCord. Read it with get_script and "
+        + "get_pacing, then propose changes with update_script: pauses, speeds, stress and the pause after each line, keeping "
+        + "the wording unless something reads badly aloud. Then sum up what you proposed and why in a few lines."
 
     /// What the login shell starts from, like a new Terminal window; the user's profile adds the rest. The app's own
     /// environment could carry a parent agent's session markers when VocalCord was opened from a terminal.
@@ -127,8 +150,10 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// The shell command that runs this CLI restricted to the VocalCord tools, and its working folder.
-    /// Writes the configs it needs under `support`.
-    func launch(path: String, bridge: String, socket: String, support: URL, codexConfig: URL = Agent.codexConfig) throws -> (command: String, folder: URL) {
+    /// Writes the configs it needs under `support`. `prompt` is sent as the session's first message once the CLI is
+    /// ready: Claude Code and Codex take it as their positional prompt, OpenCode as `--prompt`.
+    func launch(path: String, bridge: String, socket: String, support: URL, codexConfig: URL = Agent.codexConfig,
+                prompt: String? = nil) throws -> (command: String, folder: URL) {
         let files = FileManager.default
         // Empty, and outside the home folder so no CLAUDE.md or AGENTS.md above it is picked up.
         let folder = files.temporaryDirectory.appending(path: "VocalCord/\(rawValue)", directoryHint: .isDirectory)
@@ -139,7 +164,7 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
             try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: url)
             return url
         }
-        let arguments: [String]
+        var arguments: [String]
         switch self {
         case .claude:
             let config = try json(["mcpServers": ["vocalcord": ["command": bridge, "args": [socket]]]], "claude-mcp.json")
@@ -182,6 +207,11 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
             arguments = ["env", "XDG_CONFIG_HOME=\(configHome.path)", "OPENCODE_CONFIG=\(config.path)", "OPENCODE_DISABLE_CLAUDE_CODE=1",
                          "OPENCODE_DISABLE_PROJECT_CONFIG=1", "OPENCODE_DISABLE_EXTERNAL_SKILLS=1", path, "--pure"]
         }
+        if let prompt, !prompt.isEmpty {
+            // OpenCode's positional is a folder; in the joined form a prompt starting with "-" stays a value. The other two
+            // end their options with "--", so the prompt is never read as one.
+            arguments += self == .opencode ? ["--prompt=\(prompt)"] : ["--", prompt]
+        }
         return ("exec " + arguments.map(shellQuoted).joined(separator: " "), folder)
     }
 }
@@ -205,8 +235,11 @@ final class Terminals {
     var selected: Agent?
     private(set) var ended: Set<Agent> = []
     private(set) var bridgeError: String?
-    @ObservationIgnored private var sessions: [Agent: LocalProcessTerminalView] = [:]
+    @ObservationIgnored private var sessions: [Agent: AgentTerminalView] = [:]
     @ObservationIgnored private var server: BridgeServer?
+    @ObservationIgnored private var looking: Task<Void, Never>?
+    /// A prompt `ask` holds while the agents are looked for; the first session started takes it as its first prompt.
+    @ObservationIgnored private var waiting: String?
     private let socket: String
 
     init(tools: ToolBridge, support: URL = Terminals.support) {
@@ -227,18 +260,93 @@ final class Terminals {
         }
     }
 
-    /// Looks for the CLIs again while none are found.
+    /// Looks for the CLIs again while none are found. Calls during a look wait for it.
     func detect() async {
+        if let looking { return await looking.value }
         guard installed?.isEmpty ?? true else { return }
-        let found = await Agent.detect()
-        installed = found
-        if selected.map({ found[$0] == nil }) ?? true { selected = Agent.allCases.first { found[$0] != nil } }
+        let look = Task {
+            let found = await Agent.detect()
+            installed = found
+            selected = Self.target(selected: selected, installed: found)
+        }
+        looking = look
+        await look.value
+        looking = nil
     }
 
-    /// The agent's terminal, started on first use.
+    /// The agent `ask` sends to: the selected one if it's installed, else the first installed.
+    nonisolated static func target(selected: Agent?, installed: [Agent: String]) -> Agent? {
+        if let selected, installed[selected] != nil { return selected }
+        return Agent.allCases.first { installed[$0] != nil }
+    }
+
+    /// Sends `prompt` to the selected agent, else the first installed one, and selects it, as if the user typed it and
+    /// pressed Return. A session this starts, or restarts after it ended, gets it as the CLI's first prompt; a running
+    /// one gets it typed once the CLI can read it. Does nothing when no agent is installed.
+    func ask(_ prompt: String) {
+        guard installed?.isEmpty == false else {
+            // Not looked for yet, or none found last time: look, then send. The panel may start the session meanwhile.
+            waiting = prompt
+            Task {
+                await detect()
+                guard let prompt = waiting else { return }
+                waiting = nil
+                send(prompt)
+            }
+            return
+        }
+        send(prompt)
+    }
+
+    private func send(_ prompt: String) {
+        guard let agent = Self.target(selected: selected, installed: installed ?? [:]) else { return }
+        selected = agent
+        if ended.contains(agent) { restart(agent) }
+        if let view = sessions[agent] {
+            Task { await type(prompt, into: view, agent: agent) }
+        } else {
+            _ = start(agent, prompt: prompt)
+        }
+    }
+
+    /// Seconds after a CLI's first output before typing into it: before then it may still be starting, and drop input.
+    static let startupSeconds = 2.5
+
+    /// Types into a running session. A CLI that's still starting drops what's typed, so this waits for its first
+    /// output and a moment more. Return goes separately, after a pause, so it isn't taken as part of a paste.
+    private func type(_ prompt: String, into view: AgentTerminalView, agent: Agent) async {
+        for _ in 0..<300 where view.firstOutput == nil { try? await Task.sleep(for: .milliseconds(100)) }
+        guard let first = view.firstOutput else { return }
+        let wait = Self.startupSeconds - Date.now.timeIntervalSince(first)
+        if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+        func live() -> Bool { sessions[agent] === view && !ended.contains(agent) }
+        guard live() else { return }
+        view.send(txt: Self.typed(prompt, bracketed: view.getTerminal().bracketedPasteMode))
+        try? await Task.sleep(for: .milliseconds(300))
+        guard live() else { return }
+        view.send(txt: "\r")
+    }
+
+    /// The text to type for a prompt, without Return. With bracketed paste on, it goes as one paste, line breaks
+    /// and all; without it a line break would send early, so line breaks become spaces.
+    nonisolated static func typed(_ prompt: String, bracketed: Bool) -> String {
+        if bracketed { return "\u{1B}[200~" + prompt.replacing("\u{1B}", with: "") + "\u{1B}[201~" }
+        return prompt.split(whereSeparator: \.isNewline).joined(separator: " ")
+    }
+
+    /// The agent's terminal, started on first use. A prompt `ask` is holding goes to it as its first prompt.
     func session(_ agent: Agent) -> LocalProcessTerminalView {
         if let view = sessions[agent] { return view }
-        let view = LocalProcessTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 300))
+        var prompt: String?
+        if installed?[agent] != nil, Self.target(selected: selected, installed: installed ?? [:]) == agent {
+            prompt = waiting
+            waiting = nil
+        }
+        return start(agent, prompt: prompt)
+    }
+
+    private func start(_ agent: Agent, prompt: String?) -> AgentTerminalView {
+        let view = AgentTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 300))
         view.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         view.nativeBackgroundColor = NSColor(Theme.content)
         view.nativeForegroundColor = NSColor(Theme.text)
@@ -250,7 +358,7 @@ final class Terminals {
         do {
             let bridge = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "vocalcord-mcp").path
             let launch = try agent.launch(path: path, bridge: bridge, socket: socket,
-                                          support: Self.support.appending(path: "Agents", directoryHint: .isDirectory))
+                                          support: Self.support.appending(path: "Agents", directoryHint: .isDirectory), prompt: prompt)
             // Through the login shell, so the CLI finds its own config and sign-in.
             view.startProcess(executable: "/bin/zsh", args: ["-ilc", launch.command], environment: Agent.shellEnvironment.map { "\($0)=\($1)" },
                               currentDirectory: launch.folder.path)
@@ -265,6 +373,16 @@ final class Terminals {
         ended.remove(agent)
     }
 
+}
+
+/// An agent's terminal, which notes when its process first prints, so a prompt typed in can wait until the CLI reads input.
+final class AgentTerminalView: LocalProcessTerminalView {
+    private(set) var firstOutput: Date?
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        if firstOutput == nil { firstOutput = .now }
+        super.dataReceived(slice: slice)
+    }
 }
 
 /// SwiftTerm calls its delegate on the main queue.

@@ -20,7 +20,9 @@ The in-app agent can't load this skill: its short version of these rules is `Age
   a direction can move the voice: "brighter, slightly quicker" for Happy raised the pitch by up to 6 semitones in a
   test. Directions must not ask for pitch or speed changes; a real take in that tone beats any direction.
 - Every `generate` call is a fresh take. Within one call the voice keeps its flow; across calls mood, pace and
-  intonation restart. `[pause]` splits a line into separate calls, and so does text over 600 characters.
+  intonation restart. Text over 600 characters and a mid-line tone direction (`[confident]`) split a line into separate
+  calls. Script commands don't: the app renders the line whole, times each word with Whisper, then inserts
+  `[pause 0.5]`/`[breath]`, stretches `[speed 80%]…[/speed]` and lifts `[stress]…[/stress]` (`engine/vocalcord_engine/marks.py`).
 - Limits: 12.5 sound frames a second, at most 750 per call, so 60 s is the hard cap of one call (it cuts off mid-word).
   About 600 characters (35-40 s) is the practical line length; keep slow lines to 300-400 characters.
 - Speed on an 8 GB M1: 4-bit renders a short line in roughly 10-70 s, 8-bit about 3-4 times slower.
@@ -43,12 +45,16 @@ The in-app agent can't load this skill: its short version of these rules is `Age
 - One paragraph per line, up to 600 characters; a new line at a change of scene or tone.
 - Short sentences, one idea each, under 25 words, with a very short one now and then ("It shouldn't.").
 - Pauses come from punctuation: comma short, full stop longer, colon sets up, ellipsis adds weight (rarely),
-  question mark rises. Longer gaps go in the line's pause after. Use `[pause]` rarely.
+  question mark rises. Longer gaps go in the line's pause after. Add `[pause]` for a beat after a key idea, not as
+  a replacement for punctuation; it goes in after rendering, so it no longer breaks the take.
+- Pace a phrase with `[speed 85%]…[/speed]` (instant, no new render); past about 70-130% it sounds stretched. Stress
+  one word a line at most; the model follows `[stress]` loosely, so the app adds a small lift too.
 - Put the stressed word at the end of its sentence; English stresses the last content word.
 - Contractions ("don't"). Numbers, symbols and abbreviations as spoken words ("four ninety-nine", "Doctor").
 - Let the words carry the emotion, and give the line the tone they call for.
 - About 150 words is a minute. Keep a normal pace and pause after new ideas; don't slow everything down.
-- Respell words the voice says wrong (pronunciations, such as Kuber as Koo-ber).
+- Respell words the voice says wrong: for every line in the voice's pronunciations (Kuber as Koo-ber), for one line
+  with `[say Koo-ber]Kuber[/say]` (needs a new render).
 
 ## Judging a render
 
@@ -62,8 +68,11 @@ The in-app agent can't load this skill: its short version of these rules is `Age
   loop over ten test lines and shows its time estimate first, from `RenderSpeed` (measured seconds of rendering per
   second of audio).
 - Each render comes out a little different: render again before rewriting. Listen on a phone speaker too.
-- Choppy or cut pauses: check for `[pause]` splits and for a take that is cut off; renders fade at part edges and
-  drop a stray pop after dead air (`audio.fade`, `audio.trim_outer_silence`).
+- Choppy or cut pauses: check for mid-line directions (they split the take) and for a take that is cut off; renders
+  fade at part edges and drop a stray pop after dead air (`audio.fade`, `audio.trim_outer_silence`). An inserted
+  pause or speed join that clicks means Whisper's word times were off there (low `matched` in `get_pacing`).
+- Pace check (`Pace.report` in `Marks.swift`): words a minute against the take's pace or the project's target, with
+  rushed and dragging phrases; the script's own pauses don't count.
 
 ## Testing a change
 

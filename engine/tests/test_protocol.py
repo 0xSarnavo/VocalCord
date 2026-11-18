@@ -43,6 +43,12 @@ class FakeEngine:
     def edit_clip(self, request, job):
         return {"path": request["out"], "duration": 1.0}
 
+    def apply_marks(self, request, job):
+        return {"path": request["out"], "duration": 1.5, "word_times": request["word_times"]}
+
+    def time_words(self, request, job):
+        return {"word_times": [[0.0, 0.4]], "heard": "hello", "matched": 1.0}
+
     def split(self, request, job):
         return {"clips": []}
 
@@ -164,3 +170,19 @@ def test_edit_clip_answers_while_a_render_runs():
     assert s.read() == {"id": "e", "event": "result", "path": "e.wav", "duration": 1.0}
     engine.release.set()
     assert s.until("r", "result")["path"] == "out.wav"
+
+
+def test_apply_marks_answers_while_a_render_runs_and_time_words_waits():
+    assert "apply_marks" in worker.SIDE_COMMANDS and "time_words" in worker.JOB_COMMANDS
+    assert not worker.SIDE_COMMANDS & worker.JOB_COMMANDS
+    engine = FakeEngine()
+    s = Session(engine)
+    s.send(id="r", cmd="render", output="out.wav", lines=[{}])
+    s.until("r", "progress")
+    s.send(id="w", cmd="time_words", audio="a.wav", tokens=["hello"])
+    s.send(id="m", cmd="apply_marks", audio="a.wav", out="m.wav", word_times=[[0.0, 0.4]], marks={})
+    # apply_marks replies while the render is still held; time_words is queued behind it.
+    assert s.read() == {"id": "m", "event": "result", "path": "m.wav", "duration": 1.5, "word_times": [[0.0, 0.4]]}
+    engine.release.set()
+    assert s.read() == {"id": "r", "event": "result", "path": "out.wav"}
+    assert s.read() == {"id": "w", "event": "result", "word_times": [[0.0, 0.4]], "heard": "hello", "matched": 1.0}

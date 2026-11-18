@@ -297,10 +297,9 @@ final class ScoreCounter: Sendable {
     #expect(Script.warnings("Every voice app wanted the same thing. My money, and my voice.") == [])
     // Tags don't count: one pause is fine, and (sigh) is speech.
     #expect(Script.warnings("Weeks went by. [pause 0.3] Nothing worked. (sigh)") == [])
+    // Pauses are added after the render, so several are fine.
     let warnings = Script.warnings("It costs $4.99 [pause 0.2] and [pause 0.3] takes 10 minutes.")
-    #expect(warnings.count == 2)
-    #expect(warnings[0].hasPrefix("2 [pause] tags"))
-    #expect(warnings[1] == "Write numbers and symbols as spoken words: \u{201C}$4.99\u{201D}, \u{201C}10\u{201D}.")
+    #expect(warnings == ["Write numbers and symbols as spoken words: \u{201C}$4.99\u{201D}, \u{201C}10\u{201D}."])
     let long = Array(repeating: "word", count: 30).joined(separator: " ") + "."
     #expect(Script.warnings(long) == ["A 30-word sentence. Break it up; keep sentences under 25 words."])
     let paragraph = Array(repeating: "A short sentence here.", count: 30).joined(separator: " ")

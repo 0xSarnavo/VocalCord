@@ -21,19 +21,19 @@ Every reply carries the request's `id` and an `event`:
 A line that is not a JSON object gets `{"id": null, "event": "error", "code": "invalid", ...}`.
 
 **Ordering.** `ping`, `status`, `cancel` and `shutdown` are answered at once.
-`check_audio`, `edit_clip` and `prepare` run immediately, each on its own thread. `transcribe`, `render`,
-`score`, `split`, `group_speakers`, `mix` and `unload` queue and run one at a
+`check_audio`, `edit_clip`, `apply_marks` and `prepare` run immediately, each on its own thread. `transcribe`,
+`render`, `score`, `time_words`, `split`, `group_speakers`, `mix` and `unload` queue and run one at a
 time in arrival order, so replies for different ids can interleave.
 
 **Memory.** Only one large model is loaded at a time: Breeze (for `render`) or
-Whisper (for `transcribe`, `split`, `score`). A command that needs the other one
+Whisper (for `transcribe`, `split`, `score`, `time_words`). A command that needs the other one
 unloads the current one first (Breeze 8-bit loads in 3–8 s, 4-bit in about
 3 s, Whisper in 1–2 s). Render a batch of lines, then score the batch, to swap
 once. The large model unloads after 120 s without a job. The two scoring models
 (about 450 MB) stay loaded between scores and are freed before Breeze loads.
 
-**Paths** are absolute (or start with `~`). Inputs for `transcribe`, `split`,
-`check_audio` and `edit_clip` can be any file ffmpeg reads, audio or video (wav, m4a, mp3, mp4,
+**Paths** are absolute (or start with `~`). Inputs for `transcribe`, `split`, `time_words`,
+`check_audio`, `edit_clip` and `apply_marks` can be any file ffmpeg reads, audio or video (wav, m4a, mp3, mp4,
 mov...); the first audio stream is used.
 
 ## Commands
@@ -116,6 +116,53 @@ and volume, written as a file the app plays and passes to `mix` as a line. Loads
   runs no ffmpeg for a 24 kHz WAV source; otherwise one ffmpeg pass.
 - `invalid` errors: a missing or out-of-range field, an unreadable source, or
   nothing left after trimming (`start` at or past the end of the source).
+
+### apply_marks
+
+A line's script marks, applied to its render after rendering: pauses, a part played slower or faster, and stress.
+Marks point at tokens (the script line's words as the app splits them on whitespace) through the render's word
+times from `score` or `time_words`. Loads no model.
+
+```json
+{"id": 16, "cmd": "apply_marks", "audio": "/Users/me/Projects/p1/renders/v1.wav",
+ "out": "/Users/me/Projects/p1/renders/v2.wav",
+ "word_times": [[0.05, 0.31], [0.36, 0.8], [0.84, 1.12], [1.12, 1.62], [1.7, 2.05]],
+ "marks": {"pauses": [{"after": 1, "seconds": 0.5}], "speeds": [{"first": 2, "last": 3, "rate": 0.8}],
+           "stresses": [{"first": 2, "last": 2}]}}
+{"id": 16, "event": "result", "path": "/Users/me/Projects/p1/renders/v2.wav", "duration": 2.857,
+ "word_times": [[0.05, 0.31], [0.36, 0.8], [1.343, 1.692], [1.692, 2.317], [2.408, 2.757]]}
+```
+
+| field | range | meaning |
+|---|---|---|
+| `audio` | required | the render, usually a 24 kHz WAV |
+| `out` | required | the WAV to write; its folder is created, an existing file replaced |
+| `word_times` | required | one `[start, end]` per token in seconds, at least one, never going backwards |
+| `marks` | optional | any of `pauses`, `speeds`, `stresses`, each a list (missing means none) |
+| `pauses[]` | `after` −1 to n−1, `seconds` 0.05–10 | silence after token `after`; −1 is before the first token, n−1 the end of the audio. Several at one place add up |
+| `speeds[]` | `first` ≤ `last`, 0 to n−1; `rate` 0.5–2 | those tokens played at `rate`, keeping the pitch. Speed spans must not overlap |
+| `stresses[]` | `first` ≤ `last`, 0 to n−1 | those tokens a little louder and higher, the same length |
+
+- Cut points: between tokens i and i+1, the middle of the quietest stretch of 20 ms frames (frames within 6 dB of
+  the quietest) from 0.05 s before token i ends to 0.05 s after token i+1 starts, clamped to the audio. Before the
+  first token it is the start of the audio, after the last its end.
+- A pause is silence inserted at its cut, with 5 ms fades either side.
+- A speed span runs from the cut before `first` to the cut after `last`, through ffmpeg `atempo`, exactly
+  `round(length / rate)` samples long, joined with 10 ms equal-power crossfades.
+- A stress span covers the same range: +2 dB with 30 ms raised-cosine ramps inside its ends, and the pitch 0.3
+  semitones up with the length unchanged (`asetrate`, `aresample`, `atempo`), crossfaded in and out over 10 ms.
+  Stress spans may overlap and may sit inside a speed span; stress is applied first.
+- Order: stress, speed, pauses, then clip to full scale. The result is mono 32-bit float WAV at the source's sample
+  rate (24 kHz for a file only ffmpeg can read), written to a temporary file in the same folder and renamed.
+- The result's `word_times` has one pair per token, moved with the audio: later by the silence inserted before
+  it, scaled inside a speed span. A token never crosses a pause: one whose time runs past the cut stops at the
+  pause, and the next starts after it. Rounded to 3 decimals and clamped to the audio, like `score`'s.
+- `duration` is the written file's length in seconds.
+- No marks (or only speeds of 1): the audio is written unchanged and the times come back as given, with no ffmpeg
+  for a WAV source. Otherwise one ffmpeg pass for all the stress and one per speed span; a 15 s line with several
+  marks takes about 0.1 s.
+- `invalid` errors: a missing or out-of-range field, an index past the last token, `last` before `first`,
+  overlapping speed spans, an unknown mark kind, `word_times` going backwards, or an unreadable source.
 
 ### transcribe
 
@@ -207,7 +254,14 @@ in a file with several. Uses the speaker model from `score`; loads no large mode
   to the spoken text only), optional `voice.breath` (0.05–2 s inhale, needed for
   `[breath]`), `tone` (a key: neutral, confident, sad, happy, angry, soft, slow,
   hesitant; or any free direction; default neutral), `pause_after` seconds 0–10
-  (default 0; ignored on the last line), `seed` (default 7 + line index).
+  (default 0; ignored on the last line), `seed` (default 7 + line index), and
+  optional `stress`, a list of words from `text` to emphasise.
+- `stress`: when not empty, every spoken part of the line gets
+  ` Put natural emphasis on "free" and "now".` after its direction: one word alone,
+  two joined with "and", three or more with commas and a final "and". Words are
+  respelled with `voice.pronunciations` like the text, and punctuation around them
+  is dropped; a free direction without a full stop gets one first. Each word must
+  be a non-empty string.
 - Inline tags inside `text`: `[pause 0.30]`, `[breath]`, and `[tone]` or
   `[free direction]` to change tone mid-line; `(sigh)` is passed to Breeze.
 - Each spoken part has its outer silence trimmed; the whole render is loudness
@@ -244,6 +298,44 @@ in a file with several. Uses the speaker model from `score`; loads no large mode
   The app flags a render more than 1.5 semitones off its take.
 - `longest_pause`: the longest gap inside the render (20 ms frames 40 dB under
   its speech level, ends excluded), in seconds.
+- `tokens` (optional): the script line's spoken words in order, as the app splits
+  `text` on whitespace, such as `["Save", "150", "dollars."]`. With it, Whisper
+  also gives word timestamps, and the result adds:
+  - `word_times`: one `[start, end]` per token, in seconds of the scored audio
+    (after the `start`/`end` crop), rounded to 3 decimals, never going backwards,
+    within 0 and the audio's length.
+  - `matched` 0–1: the share of tokens with spoken words that lined up with a
+    word Whisper heard. Low means most times were estimated, not heard.
+
+**Word times.** Each token and each word Whisper heard is normalised as for `words`
+(so `150` is three words and `—` none; a heard word that becomes several shares its
+time evenly). The two word lists are matched with Python's `difflib`, and a token
+runs from its first matched word's start to its last's end. Script words with no
+match (misheard, respelled) share the gap between their matched neighbours by
+character count; before the first match the gap starts at Whisper's first word,
+after the last it ends at Whisper's last. With nothing matched the tokens share
+Whisper's first-to-last span, and with nothing heard the whole audio. Where two
+neighbouring tokens touch (within 20 ms) or overlap, their boundary moves to the
+quietest 10 ms (averaged over 50 ms) within 0.12 s of it, since Whisper's
+boundaries are often 0.1–0.2 s off. A token with no spoken words gets a
+zero-length time halfway between its neighbours.
+
+### time_words
+
+Word times for a render made before `score` returned them: the same transcription
+and alignment as `score` with `tokens`, without the scores. Uses Whisper, so it is
+queued.
+
+```json
+{"id": 15, "cmd": "time_words", "audio": "/Users/me/Projects/p1/renders/v1.wav",
+ "tokens": ["Kuber", "keeps", "every", "savings", "circle", "honest."], "hints": ["Kuber"]}
+{"id": 15, "event": "result", "word_times": [[0.06, 0.42], [0.42, 0.7], [0.7, 0.98], [0.98, 1.44],
+ [1.44, 1.86], [1.86, 2.4]], "heard": "Kuber keeps every saving circle honest.", "matched": 0.833}
+```
+
+- `tokens` (required, at least one): as in `score`. `hints`, `start` and `end`
+  (optional): as in `score`.
+- `heard` is what Whisper heard; `word_times` and `matched` are as in `score`.
 
 ### mix
 
@@ -331,7 +423,8 @@ dropped when it reaches the front; a running `render` stops before its next line
 (a line in progress finishes first, up to about 30 s) and writes nothing,
 `transcribe` and `split` before their next chunk, `group_speakers` before its
 next clip, `mix` before its next file, `prepare` before its next 1 MB,
-`edit_clip` before its ffmpeg pass and before it writes.
+`edit_clip` before its ffmpeg pass and before it writes, `apply_marks` before each
+ffmpeg pass and before it writes. A running `score` or `time_words` finishes.
 
 ### unload
 

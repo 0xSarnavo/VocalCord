@@ -34,6 +34,8 @@ MODELS = {
     "4bit": ("~/voice/models/Breeze-TTS-2-mlx-4bit", "mlx-community/Breeze-TTS-2-mlx-4bit"),
 }
 DEFAULT_SEED = 7
+# Stripped from the ends of a stressed word, which the app takes from the script split on spaces ("now." or "“free").
+STRESS_TRIM = ".,;:!?\"'“”‘’()[]—–…-"
 
 
 def resolve_model(name: str) -> str:
@@ -88,6 +90,23 @@ def parse_line(text: str, tone: str | None = None) -> list[tuple[str, object, st
     return items
 
 
+def emphasis(words: list[str]) -> str:
+    """The sentence added to a line's directions for its stressed words, or "" for none:
+    ' Put natural emphasis on "free" and "now".' Punctuation around a word is dropped."""
+    quoted = [f'"{word}"' for word in (word.strip().strip(STRESS_TRIM) for word in words) if word]
+    if not quoted:
+        return ""
+    listed = quoted[0] if len(quoted) == 1 else f"{', '.join(quoted[:-1])} and {quoted[-1]}"
+    return f" Put natural emphasis on {listed}."
+
+
+def _direct(instruction: str, extra: str) -> str:
+    """A direction with the emphasis sentence after it; a free direction without a full stop gets one first."""
+    if not extra:
+        return instruction
+    return instruction + ("" if instruction.rstrip().endswith((".", "!", "?")) else ".") + extra
+
+
 def _number(value, name: str, low: float, high: float) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not low <= value <= high:
         raise ValueError(f"{name} must be a number from {low:g} to {high:g}")
@@ -122,8 +141,14 @@ def prepare(request: dict) -> dict:
                 if not breath or not Path(breath).expanduser().is_file():
                     raise ValueError("[breath] needs voice.breath, a short recording of an inhale")
             pronunciations = voice.get("pronunciations") or {}
-            items = [(kind, apply_pronunciations(value, pronunciations) if kind == "speech" else value, instruction)
-                     for kind, value, instruction in items]
+            stress = line.get("stress")
+            stress = [] if stress is None else stress
+            if not isinstance(stress, list) or not all(isinstance(word, str) and word.strip() for word in stress):
+                raise ValueError("stress must be a list of words")
+            # Respelled like the text, so the direction names the words Breeze is given.
+            extra = emphasis([apply_pronunciations(word, pronunciations) for word in stress])
+            items = [(kind, apply_pronunciations(value, pronunciations), _direct(instruction, extra))
+                     if kind == "speech" else (kind, value, instruction) for kind, value, instruction in items]
             seed = line.get("seed")
             if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
                 raise ValueError("seed must be an integer")

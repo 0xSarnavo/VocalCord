@@ -100,8 +100,8 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     // check_script is listed only once Jev is added.
     let tools = try #require((try await rpc(bridge, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(tools.compactMap { $0["name"] as? String }
-        == ["get_voices", "get_script", "update_script", "add_lines", "render_line", "get_scores", "get_timeline", "propose_timeline_edits",
-            "get_takes", "propose_take_changes", "audition"])
+        == ["get_voices", "get_script", "update_script", "add_lines", "render_line", "get_scores", "get_pacing", "set_pace_target",
+            "get_timeline", "propose_timeline_edits", "get_takes", "propose_take_changes", "audition"])
     let withJev = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys("k"), send: FakeTypeSafe([:]).send)) { open }
     let jevTools = try #require((try await rpc(withJev, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(jevTools.compactMap { $0["name"] as? String }.contains("check_script"))
@@ -313,6 +313,146 @@ private func object(_ text: String) throws -> [String: Any] {
     #expect(try await callTool(bridge, "propose_timeline_edits").isError)
 }
 
+// MARK: Pace tools
+
+/// Waits for renders and mark runs to finish.
+@MainActor private func settle(_ projects: ProjectStore) async throws {
+    for _ in 0..<1000 {
+        if projects.progress == nil && projects.applying.isEmpty && projects.queued.isEmpty { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("Still rendering")
+}
+
+/// The script fixture's voice, whose take is one word in 2 s (30 words a minute), with a project of a plain line and a
+/// line with marks, both rendered, and a third line added after.
+@MainActor private func pacingFixture() async throws -> (ProjectStore, VoiceStore, String) {
+    let (projects, voices, _) = try scriptFixture()
+    let id = projects.create(name: "Pace")
+    projects.addLines(["One two three four five six seven eight.", "Wait [pause 0.5] for it, [speed 80%]right now[/speed]."], to: id, voices: voices)
+    projects.renderNeeded(id, voices: voices)
+    try await settle(projects)
+    projects.addLines(["Not rendered."], to: id, voices: voices)
+    return (projects, voices, id)
+}
+
+@MainActor @Test func getPacingReadsEachLinesWordTimesAndPace() async throws {
+    let (projects, voices, id) = try await pacingFixture()
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
+    var pacing = try object(try await callTool(bridge, "get_pacing").text)
+    #expect(pacing["project"] as? String == "Pace" && pacing["pace_target"] == nil)
+    var lines = try #require(pacing["lines"] as? [[String: Any]])
+    #expect(lines.map { $0["line"] as? Int } == [1, 2, 3])
+
+    // The fake render is the 2 s take with the words spread evenly: 8 words in 2 s against the take's 30 a minute.
+    var plain = lines[0]
+    #expect(plain["timed"] as? Bool == true && plain["matched"] as? Double == 1 && plain["note"] == nil)
+    let words = try #require(plain["words"] as? [[String: Any]])
+    #expect(words.count == 8 && words[0]["word"] as? String == "One" && words[1]["start"] as? Double == 0.25 && words[1]["end"] as? Double == 0.5)
+    #expect(plain["words_per_minute"] as? Int == 240 && plain["target"] as? Int == 30 && plain["target_from"] as? String == "take")
+    #expect(plain["verdict"] as? String == "240 words a minute, 700% faster than your usual 30.")
+    let rushed = try #require(plain["rushed"] as? [[String: Any]])
+    #expect(rushed.count == 1 && rushed[0]["from_word"] as? Int == 1 && rushed[0]["to_word"] as? Int == 8)
+    #expect(rushed[0]["text"] as? String == "One two three four five six seven eight.")
+    #expect(plain["dragging"] as? [Any] != nil && (plain["dragging"] as? [Any])?.isEmpty == true && (plain["gaps"] as? [Any])?.isEmpty == true)
+
+    // Times are the played version's: the pause and the slower words are in them, and the asked-for pause isn't a gap
+    // or speaking time (5 words in 2.7 s, less the 0.5 s pause).
+    let marked = lines[1]
+    #expect(marked["text"] as? String == "Wait [pause 0.5] for it, [speed 80%]right now[/speed]." && marked["plain"] as? String == "Wait for it, right now.")
+    let markedWords = try #require(marked["words"] as? [[String: Any]])
+    #expect(markedWords.map { $0["word"] as? String } == ["Wait", "for", "it,", "right", "now."])
+    #expect(markedWords[1]["start"] as? Double == 0.9 && markedWords[4]["end"] as? Double == 2.7)
+    #expect(marked["words_per_minute"] as? Int == 136 && (marked["gaps"] as? [Any])?.isEmpty == true && marked["problems"] as? [String] == [])
+
+    #expect(lines[2]["timed"] as? Bool == false && lines[2]["note"] as? String == "Not rendered yet." && lines[2]["words"] == nil)
+
+    // Raw renders stay hidden: line 2's raw source and its marked version count as one version.
+    #expect(projects.project(id)?.lines[1].versions.count == 2)
+    let scores = try object(try await callTool(bridge, "get_scores", ["line": 2]).text)
+    let versions = try #require(scores["versions"] as? [[String: Any]])
+    #expect(versions.count == 1 && versions[0]["version"] as? Int == 1 && versions[0]["of"] as? Int == 1 && versions[0]["chosen"] as? Bool == true)
+    let script = try #require(try object(try await callTool(bridge, "get_script").text)["lines"] as? [[String: Any]])
+    #expect((script[1]["chosen_version"] as? [String: Any])?["of"] as? Int == 1)
+    // The timeline shows the words spoken, without tags.
+    let clips = try #require(try object(try await callTool(bridge, "get_timeline").text)["clips"] as? [[String: Any]])
+    #expect(clips[1]["text"] as? String == "Wait for it, right now.")
+
+    // A project target replaces the take's, at once.
+    let set = try object(try await callTool(bridge, "set_pace_target", ["words_per_minute": 240]).text)
+    #expect(set["pace_target"] as? Double == 240 && projects.project(id)?.paceTarget == 240)
+    pacing = try object(try await callTool(bridge, "get_pacing").text)
+    lines = try #require(pacing["lines"] as? [[String: Any]])
+    plain = lines[0]
+    #expect(pacing["pace_target"] as? Double == 240 && plain["target"] as? Int == 240 && plain["target_from"] as? String == "project")
+    #expect(plain["verdict"] as? String == "On pace." && (plain["rushed"] as? [Any])?.isEmpty == true)
+    #expect(try await callTool(bridge, "set_pace_target", ["words_per_minute": 400])
+        == ("words_per_minute must be a number from 80 to 260, or null.", true))
+    #expect(try await callTool(bridge, "set_pace_target", ["words_per_minute": true]).isError && projects.project(id)?.paceTarget == 240)
+    let cleared = try object(try await callTool(bridge, "set_pace_target", ["words_per_minute": NSNull()]).text)
+    #expect(cleared["pace_target"] == nil && projects.project(id)?.paceTarget == nil)
+    projects.setPaceTarget(150, in: id)
+    _ = try await callTool(bridge, "set_pace_target")
+    #expect(projects.project(id)?.paceTarget == nil)
+
+    // A line's tag problems show with its pace.
+    projects.setText("Say it [speed 80%]slowly.", line: try #require(projects.project(id)?.lines[2].id), in: id)
+    lines = try #require(try object(try await callTool(bridge, "get_pacing").text)["lines"] as? [[String: Any]])
+    #expect(lines[2]["problems"] as? [String] == ["A [speed] isn't closed."] && lines[2]["plain"] as? String == "Say it slowly.")
+}
+
+@MainActor @Test func getPacingTimesUntimedLinesForTheNextCall() async throws {
+    let root = try tempFolder()
+    let folder = root.appending(path: "old")
+    try FileManager.default.createDirectory(at: folder.appending(path: "renders"), withIntermediateDirectories: true)
+    try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: folder.appending(path: "renders/v1.wav"))
+    // Rendered before word times existed, and unscored, so its take's pace isn't known.
+    try Data(#"""
+        {"createdAt": 700000000, "id": "old", "name": "Old film", "lines": [
+          {"id": "l1", "text": "Hello there my friend.", "voiceID": "me", "tone": "Neutral", "pauseAfter": 0.5, "chosen": "v1",
+           "versions": [{"id": "v1", "text": "Hello there my friend.", "voiceID": "me", "tone": "Neutral", "direction": false,
+                         "seed": 7, "duration": 2, "createdAt": 700000000}]}]}
+        """#.utf8).write(to: folder.appending(path: "project.json"))
+    let projects = ProjectStore(root: root)
+    let bridge = ToolBridge(projects: projects, voices: VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero)),
+                            jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { "old" }
+
+    var line = try #require(try object(try await callTool(bridge, "get_pacing").text)["lines"] as? [[String: Any]]).first
+    #expect(line?["timed"] as? Bool == false && (line?["note"] as? String)?.hasPrefix("Its words aren't timed yet.") == true)
+    for _ in 0..<500 where projects.project("old")?.lines[0].chosenVersion?.words == nil { try await Task.sleep(for: .milliseconds(10)) }
+
+    line = try #require(try object(try await callTool(bridge, "get_pacing").text)["lines"] as? [[String: Any]]).first
+    #expect(line?["timed"] as? Bool == true && (line?["words"] as? [Any])?.count == 4 && line?["words_per_minute"] == nil)
+    #expect(line?["note"] as? String == "No pace target: its take's pace isn't known. Set one with set_pace_target.")
+    _ = try await callTool(bridge, "set_pace_target", ["words_per_minute": 120])
+    line = try #require(try object(try await callTool(bridge, "get_pacing").text)["lines"] as? [[String: Any]]).first
+    #expect(line?["words_per_minute"] as? Int == 120 && line?["verdict"] as? String == "On pace." && line?["note"] == nil)
+}
+
+@MainActor @Test func proposalsWithTagProblemsComeBackAsErrors() async throws {
+    let (projects, voices, id) = try scriptFixture()
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
+
+    let update = try object(try await callTool(bridge, "update_script", ["changes": [
+        ["line": 1, "text": "Meet the [speed 80%]next chapter.", "tone": "Happy"],
+        ["line": 2, "text": "Let's take [pause 0.4] a [stress]closer[/stress] look."],
+    ]]).text)
+    #expect(update["proposed"] as? [Int] == [2] && update["warnings"] as? [String] == [])
+    #expect(update["errors"] as? [String] == ["Line 1 not proposed: A [speed] isn't closed. Fix the tags and send it again."])
+    let lines = try #require(projects.project(id)?.lines)
+    #expect(lines[0].proposal == nil && lines[1].proposal?.text == "Let's take [pause 0.4] a [stress]closer[/stress] look.")
+
+    let added = try object(try await callTool(bridge, "add_lines", ["lines": [
+        ["text": "Go [pause twenty] now."], ["text": "Fine [breath] then."], ["text": "[/say] Odd."],
+    ]]).text)
+    #expect(added["proposed"] as? [Int] == [3])
+    #expect(added["errors"] as? [String] == [
+        "New line 1 not added: Write a pause in seconds, as [pause 0.5]. Fix the tags and send it again.",
+        "New line 3 not added: A [/say] has no [say] before it. Fix the tags and send it again.",
+    ])
+    #expect(projects.project(id)?.lines.map { $0.proposal?.text } == [nil, "Let's take [pause 0.4] a [stress]closer[/stress] look.", "Fine [breath] then."])
+}
+
 // MARK: Take tools
 
 /// A voice with two Neutral takes, one Happy take and a pronunciation.
@@ -514,4 +654,37 @@ private func object(_ text: String) throws -> [String: Any] {
     let agents = try #require(config["agent"] as? [String: [String: Any]])
     #expect(agents["vocalcord"]?["tools"] as? [String: Bool] == ["*": false, "vocalcord_*": true])
     #expect(agents["build"]?["disable"] as? Bool == true && config["default_agent"] as? String == "vocalcord")
+}
+
+@Test func instructionsTeachTheScriptCommandsAndPacing() {
+    let instructions = Agent.instructions
+    for text in ["[pause 0.5]", "[breath]", "[speed 80%]words[/speed]", "[stress]word[/stress]", "[say Koo-ber]Kuber[/say]",
+                 "no new render", "need a new render", "propose_take_changes", "get_pacing", "set_pace_target", "calm intro, punchy ending"] {
+        #expect(instructions.contains(text), "\(text)")
+    }
+    // Pauses are applied after the render now, so they no longer split the take.
+    #expect(!instructions.contains("splits the line into parts") && instructions.contains("don't split the take"))
+    for tool in ["get_script", "get_pacing", "update_script"] { #expect(Agent.reviewPacePrompt.contains(tool)) }
+}
+
+@Test func askSendsToTheSelectedAgentElseTheFirstInstalled() throws {
+    #expect(Terminals.target(selected: .codex, installed: [.claude: "/c", .codex: "/x"]) == .codex)
+    #expect(Terminals.target(selected: .codex, installed: [.opencode: "/o", .claude: "/c"]) == .claude)
+    #expect(Terminals.target(selected: nil, installed: [.opencode: "/o"]) == .opencode)
+    #expect(Terminals.target(selected: .claude, installed: [:]) == nil)
+
+    // Typed into a running session: one paste when the CLI has bracketed paste on, else one line; Return goes after.
+    #expect(Terminals.typed("Review\nthe pace.\n", bracketed: false) == "Review the pace.")
+    #expect(Terminals.typed("Review\nthe \u{1B}pace.", bracketed: true) == "\u{1B}[200~Review\nthe pace.\u{1B}[201~")
+
+    // A session started for the prompt gets it as the CLI's first prompt, never read as an option.
+    let support = try tempFolder(), prompt = Agent.reviewPacePrompt
+    func command(_ agent: Agent, _ prompt: String? = nil) throws -> String {
+        try agent.launch(path: "/bin/\(agent.rawValue)", bridge: "/App/vocalcord-mcp", socket: "/s.sock", support: support,
+                         codexConfig: support.appending(path: "none.toml"), prompt: prompt).command
+    }
+    #expect(try command(.claude, prompt) == (try command(.claude)) + " '--' " + shellQuoted(prompt))
+    #expect(try command(.codex, prompt) == (try command(.codex)) + " '--' " + shellQuoted(prompt))
+    #expect(try command(.opencode, "-v") == (try command(.opencode)) + " '--prompt=-v'")
+    #expect(try command(.claude, "") == (try command(.claude)))
 }

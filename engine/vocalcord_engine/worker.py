@@ -1,7 +1,7 @@
 """JSON-lines worker on stdin/stdout. See PROTOCOL.md.
 
 The reader thread answers ping, status, cancel and shutdown at once, runs
-check_audio, edit_clip and prepare on their own threads, and queues every other command for a single job
+check_audio, edit_clip, apply_marks and prepare on their own threads, and queues every other command for a single job
 thread, which owns all MLX work. Only one large model (Breeze or Whisper) is in
 memory at a time; it is unloaded after IDLE_S seconds without use.
 """
@@ -27,10 +27,10 @@ IDLE_S = 120.0
 # MLX keeps freed buffers for reuse; uncapped that cache reached 2.2 GB with Breeze
 # 4-bit and made renders twice as slow on 8 GB through swapping (README).
 MLX_CACHE_LIMIT = 256 * 2**20
-JOB_COMMANDS = {"transcribe", "render", "score", "split", "group_speakers", "mix", "unload"}
-# Run at once on their own threads: none touches MLX, a timeline edit must not wait for a render, and a long
-# download must not hold up renders.
-SIDE_COMMANDS = {"check_audio", "edit_clip", "prepare"}
+JOB_COMMANDS = {"transcribe", "render", "score", "time_words", "split", "group_speakers", "mix", "unload"}
+# Run at once on their own threads: none touches MLX, a timeline edit or a script mark must not wait for a render,
+# and a long download must not hold up renders.
+SIDE_COMMANDS = {"check_audio", "edit_clip", "apply_marks", "prepare"}
 
 
 class Cancelled(Exception):
@@ -55,7 +55,7 @@ def memory() -> dict:
 
 
 class Engine:
-    """The real backend. Every method except status, check_audio, edit_clip and prepare runs on the job thread."""
+    """The real backend. Every method except status and the SIDE_COMMANDS runs on the job thread."""
 
     def __init__(self):
         import mlx.core as mx
@@ -126,6 +126,10 @@ class Engine:
     def edit_clip(self, request, job) -> dict:
         from . import edit
         return edit.edit_clip(request, job.check)
+
+    def apply_marks(self, request, job) -> dict:
+        from . import marks
+        return marks.apply_marks(request, job.check)
 
     def prepare(self, request, job) -> dict:
         from . import models
@@ -207,31 +211,52 @@ class Engine:
         return mix.mix(request, job.progress, job.check)
 
     def score(self, request, job) -> dict:
-        from . import scoring, stt
+        from . import align, scoring, stt
         text = request.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text (the script line) is required")
-        hints = request.get("hints") or []
-        if not isinstance(hints, list) or not all(isinstance(hint, str) for hint in hints):
-            raise ValueError("hints must be a list of words")
+        hints = _hints(request)
+        tokens = None if request.get("tokens") is None else align.parse_tokens(request["tokens"])
         start, end = request.get("start"), request.get("end")
         render = audio.read_mono(_path(request, "audio"), scoring.RATE, start, end)
         reference = audio.read_mono(_path(request, "reference"), scoring.RATE)
         if len(render) < scoring.RATE // 2:
             raise ValueError("The audio to score is shorter than half a second")
         model = self._stt(job.progress)
-        heard = stt.transcribe_array(model, render, words=False, prompt=stt.hint_prompt(hints))["text"]
+        heard = stt.transcribe_array(model, render, words=tokens is not None, prompt=stt.hint_prompt(hints))
         similarity = self.scorer.similarity(render, reference)
-        return {
+        result = {
             "like_you": scoring.like_you(similarity),
             "human": self.scorer.naturalness(render),
-            "words": scoring.words_right(text, heard),
-            "heard": heard,
+            "words": scoring.words_right(text, heard["text"]),
+            "heard": heard["text"],
             "similarity": round(similarity, 4),
             "pitch_hz": scoring.pitch(render),
             "reference_pitch_hz": scoring.pitch(reference),
             "longest_pause": scoring.longest_pause(render),
         }
+        if tokens is not None:
+            result.update(align.align(tokens, heard["words"], render, scoring.RATE))
+        return result
+
+    def time_words(self, request, job) -> dict:
+        """Word times for a render made before score returned them: score's transcript and alignment, no scores."""
+        from . import align, scoring, stt
+        tokens = align.parse_tokens(request.get("tokens"))
+        if not tokens:
+            raise ValueError("tokens (the script's words) is required")
+        hints = _hints(request)
+        samples = audio.read_mono(_path(request, "audio"), scoring.RATE, request.get("start"), request.get("end"))
+        model = self._stt(job.progress)
+        heard = stt.transcribe_array(model, samples, words=True, prompt=stt.hint_prompt(hints))
+        return {"heard": heard["text"], **align.align(tokens, heard["words"], samples, scoring.RATE)}
+
+
+def _hints(request: dict) -> list[str]:
+    hints = request.get("hints") or []
+    if not isinstance(hints, list) or not all(isinstance(hint, str) for hint in hints):
+        raise ValueError("hints must be a list of words")
+    return hints
 
 
 def _path(request: dict, key: str) -> str:

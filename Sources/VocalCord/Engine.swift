@@ -20,9 +20,11 @@ struct RenderLine: Sendable {
     var referenceText: String
     var pronunciations: [String: String]
     var seed: Int?
+    /// Words from `text` to emphasise: `ParsedLine.stressWords`.
+    var stress: [String] = []
 }
 
-/// The engine's `score` result.
+/// The engine's `score` result. Word times come back beside it (`ScoreResult`) and are kept on the version, not here.
 struct Scores: Codable, Hashable, Sendable {
     /// Speaker similarity, 0–100.
     var likeYou: Int
@@ -44,17 +46,27 @@ struct Scores: Codable, Hashable, Sendable {
 }
 
 extension Scores {
-    /// With the pace check's inputs: words a second in the render (its [pause] seconds left out) and in its take.
-    func paced(text: String, duration: Double, take: Take) -> Scores {
+    /// With the pace check's inputs: words a second in the render and in its take. The script's pauses and breaths are
+    /// left out of the render's seconds, unless it's `raw`: model output whose marks aren't in the audio yet.
+    func paced(text: String, duration: Double, take: Take, raw: Bool = false) -> Scores {
         func words(_ text: String) -> Double {
-            Double(text.replacing(/\[[^\]]*\]|\([^)]*\)/, with: " ").split(whereSeparator: \.isWhitespace).count)
+            Double(Marks.plain(text).replacing(/\([^)]*\)/, with: " ").split(whereSeparator: \.isWhitespace).count)
         }
-        let pauses = text.matches(of: /\[\s*pause\s+(\d+(?:\.\d+)?)\s*\]/.ignoresCase()).reduce(0.0) { $0 + (Double($1.output.1) ?? 0) }
+        let pauses = raw ? 0 : Marks.parse(text).marks.pauses.reduce(0.0) { $0 + $1.seconds }
         var scores = self
         scores.pace = duration - pauses > 0.5 ? words(text) / (duration - pauses) : nil
         scores.referencePace = take.duration > 0 ? words(take.transcript) / take.duration : nil
         return scores
     }
+}
+
+/// `score` with `tokens`: the scores, and when each token is spoken in the scored audio.
+struct ScoreResult: Sendable {
+    var scores: Scores
+    /// One per token; nil when no tokens were sent.
+    var words: [WordTime]?
+    /// 0–1: the share of tokens lined up with a word Whisper heard.
+    var matched: Double?
 }
 
 /// Seconds of rendering per second of audio on this Mac, per model, learned from recent renders. For time estimates.
@@ -127,12 +139,25 @@ protocol Engine: Sendable {
     func groupSpeakers(_ clips: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> [[URL]]
     /// `render` with one line. Returns the duration in seconds.
     func render(_ line: RenderLine, to output: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Double
-    /// `score`: the three line scores. `hints` are words Whisper should expect, such as respelled names.
-    func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores
+    /// `score`: the three line scores. `hints` are words Whisper should expect, such as respelled names. With `tokens`
+    /// (`ParsedLine.spokenTokens`), also each token's time in the render.
+    func score(_ render: URL, reference: URL, text: String, hints: [String], tokens: [String]?) async throws -> ScoreResult
+    /// `time_words`: each token's time in a render scored before `score` returned them. Queued: it uses Whisper.
+    func timeWords(_ audio: URL, tokens: [String], hints: [String]) async throws -> (words: [WordTime], heard: String, matched: Double)
+    /// `apply_marks`: pauses, speeds and stress applied to a render, written to `output`. Runs while a render is busy.
+    /// Returns the new file's duration and the tokens' times in it.
+    func applyMarks(_ audio: URL, words: [WordTime], marks: ScriptMarks, to output: URL) async throws -> (duration: Double, words: [WordTime])
     /// `mix`: the export.
     func mix(_ request: MixRequest) async throws -> MixResult
     /// `edit_clip`: writes one timeline clip's audio. Runs while a render is busy. Returns the duration in seconds.
     func editClip(_ request: ClipRequest, to output: URL) async throws -> Double
+}
+
+extension Engine {
+    /// `score` without word times.
+    func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
+        try await score(render, reference: reference, text: text, hints: hints, tokens: nil).scores
+    }
 }
 
 enum EngineSettings {
@@ -249,6 +274,7 @@ actor EngineClient: Engine {
             "voice": ["audio": line.reference.path, "text": line.referenceText, "pronunciations": line.pronunciations],
         ]
         item["seed"] = line.seed
+        if !line.stress.isEmpty { item["stress"] = line.stress }
         let result = try await call("render", ["model": EngineSettings.model, "output": output.path, "lines": [item]],
                                     as: Result.self) { reply in
             if reply.stage == "load" { progress(0.1) }
@@ -257,8 +283,36 @@ actor EngineClient: Engine {
         return result.duration
     }
 
-    func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
-        try await call("score", ["audio": render.path, "reference": reference.path, "text": text, "hints": hints], as: Scores.self)
+    func score(_ render: URL, reference: URL, text: String, hints: [String], tokens: [String]?) async throws -> ScoreResult {
+        struct Timing: Decodable { var wordTimes: [[Double]]?; var matched: Double? }
+        var arguments: [String: Any] = ["audio": render.path, "reference": reference.path, "text": text, "hints": hints]
+        arguments["tokens"] = tokens
+        let data = try await send("score", arguments, progress: nil)
+        let timing = try Self.decoder.decode(Timing.self, from: data)
+        return ScoreResult(scores: try Self.decoder.decode(Scores.self, from: data), words: try timing.wordTimes.map(Self.times),
+                           matched: timing.matched)
+    }
+
+    func timeWords(_ audio: URL, tokens: [String], hints: [String]) async throws -> (words: [WordTime], heard: String, matched: Double) {
+        struct Result: Decodable { var wordTimes: [[Double]]; var heard: String; var matched: Double }
+        let result = try await call("time_words", ["audio": audio.path, "tokens": tokens, "hints": hints], as: Result.self)
+        return (try Self.times(result.wordTimes), result.heard, result.matched)
+    }
+
+    func applyMarks(_ audio: URL, words: [WordTime], marks: ScriptMarks, to output: URL) async throws -> (duration: Double, words: [WordTime]) {
+        struct Result: Decodable { var duration: Double; var wordTimes: [[Double]] }
+        let result = try await call("apply_marks", [
+            "audio": audio.path, "out": output.path, "word_times": words.map { [$0.start, $0.end] }, "marks": marks.request(),
+        ], as: Result.self)
+        return (result.duration, try Self.times(result.wordTimes))
+    }
+
+    /// `[[start, end]]` pairs as word times.
+    private static func times(_ pairs: [[Double]]) throws -> [WordTime] {
+        try pairs.map { pair in
+            guard pair.count == 2 else { throw EngineError(message: "The engine sent a word time that isn't a start and an end.") }
+            return WordTime(start: pair[0], end: pair[1])
+        }
     }
 
     func mix(_ request: MixRequest) async throws -> MixResult {
@@ -288,10 +342,13 @@ actor EngineClient: Engine {
 
     private func call<T: Decodable>(_ cmd: String, _ arguments: [String: Any], as type: T.Type,
                             progress: (@Sendable (Reply) -> Void)? = nil) async throws -> T {
-        let data = try await send(cmd, arguments, progress: progress)
+        try Self.decoder.decode(T.self, from: try await send(cmd, arguments, progress: progress))
+    }
+
+    private static var decoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(T.self, from: data)
+        return decoder
     }
 
     private func send(_ cmd: String, _ arguments: [String: Any], progress: (@Sendable (Reply) -> Void)?) async throws -> Data {
@@ -417,6 +474,16 @@ struct FakeEngine: Engine {
     var speakers = 1
     /// Scores to return instead of the made-up ones, such as a failing score for a test of the retry loop.
     var scores: (@Sendable (_ render: URL, _ text: String) -> Scores?)?
+    /// Every render, word timing and mark call, in order, shared by copies of this engine.
+    let calls = Calls()
+
+    final class Calls: Sendable {
+        private let log = Mutex<[String]>([])
+        /// "render: <text>" (with " | stress: <words>" when there are any), "timeWords: <file>" or "applyMarks: <file>".
+        var all: [String] { log.withLock { $0 } }
+        func count(_ kind: String) -> Int { all.filter { $0.hasPrefix(kind + ":") }.count }
+        fileprivate func add(_ call: String) { log.withLock { $0.append(call) } }
+    }
 
     private static let lines = [
         "I'll send the file in a minute.", "The meeting starts at ten.", "Let me double-check that.",
@@ -483,14 +550,62 @@ struct FakeEngine: Engine {
             try await Task.sleep(for: delay / 4)
             progress(Double(step) / 4)
         }
+        calls.add("render: \(line.text)" + (line.stress.isEmpty ? "" : " | stress: " + line.stress.joined(separator: " ")))
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: line.reference, to: output)
         return audioDuration(output)
     }
 
-    func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores {
+    func score(_ render: URL, reference: URL, text: String, hints: [String], tokens: [String]?) async throws -> ScoreResult {
         try await Task.sleep(for: delay / 4)
-        return scores?(render, text) ?? Scores(likeYou: 88 + pick(render) % 11, human: 3.5, words: 100, heard: text)
+        let scores = scores?(render, text) ?? Scores(likeYou: 88 + pick(render) % 11, human: 3.5, words: 100, heard: text)
+        return ScoreResult(scores: scores, words: tokens.map { Self.spread($0.count, over: audioDuration(render)) }, matched: tokens.map { _ in 1 })
+    }
+
+    /// The tokens share the audio evenly.
+    func timeWords(_ audio: URL, tokens: [String], hints: [String]) async throws -> (words: [WordTime], heard: String, matched: Double) {
+        try await Task.sleep(for: delay / 4)
+        calls.add("timeWords: \(audio.lastPathComponent)")
+        guard FileManager.default.fileExists(atPath: audio.path) else { throw AppError("No audio at \(audio.path).") }
+        return (Self.spread(tokens.count, over: audioDuration(audio)), tokens.joined(separator: " "), 1)
+    }
+
+    private static func spread(_ count: Int, over seconds: Double) -> [WordTime] {
+        (0..<count).map { WordTime(start: seconds * Double($0) / Double(count), end: seconds * Double($0 + 1) / Double(count)) }
+    }
+
+    /// The engine's cuts are simplified to the middle of each gap between words, and each token's stretch is sped up
+    /// on its own by dropping or repeating samples. Stress is the +2 dB without the pitch lift.
+    func applyMarks(_ audio: URL, words: [WordTime], marks: ScriptMarks, to output: URL) async throws -> (duration: Double, words: [WordTime]) {
+        calls.add("applyMarks: \(audio.lastPathComponent)")
+        let rate = 24000.0
+        var samples = try await loadSamples(audio, rate: rate)
+        let count = words.count, length = Double(samples.count) / rate
+        guard count > 0 else { throw AppError("apply_marks needs a time for at least one word.") }
+        func cut(after token: Int) -> Int {
+            let seconds = token < 0 ? 0 : token >= count - 1 ? length : (words[token].end + words[token + 1].start) / 2
+            return min(max(Int((seconds * rate).rounded()), 0), samples.count)
+        }
+        let gain = Float(pow(10, 2.0 / 20))
+        for span in marks.stresses {
+            for index in cut(after: span.first - 1)..<max(cut(after: span.first - 1), cut(after: span.last)) { samples[index] *= gain }
+        }
+        func pause(after token: Int) -> [Float] {
+            [Float](repeating: 0, count: Int((marks.pauses.filter { $0.after == token }.reduce(0) { $0 + $1.seconds } * rate).rounded()))
+        }
+        var out = pause(after: -1), times: [WordTime] = []
+        for token in 0..<count {
+            let from = cut(after: token - 1), to = max(from, cut(after: token))
+            let speed = marks.speeds.first { ($0.first...$0.last).contains(token) }?.rate ?? 1
+            let piece = (0..<Int((Double(to - from) / speed).rounded())).map { samples[min(from + Int(Double($0) * speed), to - 1)] }
+            let offset = Double(out.count) / rate, start = Double(from) / rate, end = offset + Double(piece.count) / rate
+            func moved(_ time: Double) -> Double { ((offset + max(0, time - start) / speed).clamped(offset...max(offset, end)) * 1000).rounded() / 1000 }
+            times.append(WordTime(start: moved(words[token].start), end: moved(words[token].end)))
+            out += piece + pause(after: token)
+        }
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writeWAV(out[...], rate: rate, to: output)
+        return (Double(out.count) / rate, times)
     }
 
     /// The first line's audio as the mix, never overwriting.

@@ -122,24 +122,27 @@ final class ToolBridge {
 
     static let scriptTools: [[String: Any]] = [
         tool("get_voices", "Every voice with its takes per tone and its pronunciations. A tone with no takes still renders, from a written direction."),
-        tool("get_script", "The script of the project open in VocalCord: each line's number, text, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change. A pending new line has no text until the user accepts it."),
-        tool("update_script", "Propose changes to lines. Nothing is applied: each changed line waits in the script for the user to accept or reject it. Fields left out keep their pending or current value.",
+        tool("get_script", "The script of the project open in VocalCord: each line's number, text with any tags, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change. A pending new line has no text until the user accepts it."),
+        tool("update_script", "Propose changes to lines. Nothing is applied: each changed line waits in the script for the user to accept or reject it. Fields left out keep their pending or current value. "
+             + "Text can direct delivery with tags: [pause 0.5], [breath], [speed 80%]…[/speed], [stress]…[/stress] and [say Koo-ber]Kuber[/say]; "
+             + "any other [label] is a tone direction. A line whose tags have problems isn't proposed: its problems come back in errors, to fix and send again.",
              properties: ["changes": [
                  "type": "array",
                  "items": ["type": "object", "required": ["line"], "properties": [
                      "line": ["type": "integer", "description": "Line number, from 1"],
-                     "text": ["type": "string"],
+                     "text": ["type": "string", "description": "The whole line, with any tags"],
                      "tone": ["type": "string", "enum": Tone.all],
                      "pause": ["type": "number", "minimum": 0, "maximum": 10, "description": "Seconds of silence after the line"],
                  ]],
              ]], required: ["changes"]),
-        tool("add_lines", "Propose new lines, such as a whole script for an empty project. Nothing is applied: each new line waits in the script for the user to accept or reject it, and a rejected one is removed.",
+        tool("add_lines", "Propose new lines, such as a whole script for an empty project. Nothing is applied: each new line waits in the script for the user to accept or reject it, and a rejected one is removed. "
+             + "Text takes the same tags as update_script; a line whose tags have problems isn't added: its problems come back in errors.",
              properties: [
                  "after": ["type": "integer", "minimum": 0, "description": "Add after this line number; 0 for the top. Left out: at the end."],
                  "lines": [
                      "type": "array",
                      "items": ["type": "object", "required": ["text"], "properties": [
-                         "text": ["type": "string"],
+                         "text": ["type": "string", "description": "The whole line, with any tags"],
                          "voice": ["type": "string", "description": "A voice name from get_voices. Left out: the last line's voice"],
                          "tone": ["type": "string", "enum": Tone.all],
                          "pause": ["type": "number", "minimum": 0, "maximum": 10, "description": "Seconds of silence after the line"],
@@ -150,6 +153,17 @@ final class ToolBridge {
              properties: lineProperty, required: ["line"]),
         tool("get_scores", "Every version of a line with its scores: like_you (speaker similarity, %), human (naturalness, 1 to 5), words (% of words right) and heard (what Whisper heard), plus flags for low scores and for pitch, pace or gaps that drift from the take.",
              properties: lineProperty, required: ["line"]),
+        tool("get_pacing", "How each line of the open project is paced, from its chosen render: its text with tags and plain, each word "
+             + "with its start and end in seconds, words_per_minute against target (target_from: project when set_pace_target set one, "
+             + "else take, the speaker's pace in the take), a verdict, rushed and dragging stretches, gaps over 1.2 s the script didn't "
+             + "ask for, and any tag problems. Word numbers count the words without tags, from 1. Times come from Whisper and are about "
+             + "0.1 s either way; matched is the share of words Whisper heard (0 to 1), so trust the times less when it's low. Pauses "
+             + "and breaths in the text don't count as speaking time. A line with no render or no times yet says so in note."),
+        tool("set_pace_target", "Set the words a minute get_pacing judges the open project against, 80 to 260; null or left out goes "
+             + "back to each line's take. It's a project setting, not script content, so it changes at once, with no proposal.",
+             properties: ["words_per_minute": ["type": "number", "minimum": Project.paceTargets.lowerBound,
+                                               "maximum": Project.paceTargets.upperBound,
+                                               "description": "About 150 is a normal pace. Null or left out: each line's take"]]),
     ]
 
     static let checkTool = tool("check_script", "Jev checks of each line: spoken (reads like something a person would say aloud), fits_tone (suits its tone) and, "
@@ -158,7 +172,7 @@ final class ToolBridge {
 
     static let timelineTools: [[String: Any]] = [
         tool("get_timeline", "The Timeline tab's track for the open project, in seconds: each clip's number, its script line and "
-             + "the render's text, its start and duration on the timeline, the part of its render it plays (render_start to render_end), the "
+             + "the render's words, its start and duration on the timeline, the part of its render it plays (render_start to render_end), the "
              + "gap after it, volume, fades and voice tools, and whether a newer render of its line waits to be swapped in; plus rendered "
              + "lines not on the timeline and the changes of any pending proposal."),
         tool("propose_timeline_edits", "Propose edits to the timeline. Nothing is applied: the edits wait in the Timeline tab for the user "
@@ -271,6 +285,8 @@ final class ToolBridge {
             case "add_lines": return (try json(add(arguments, in: currentProject())), false)
             case "render_line": return (try json(await render(arguments, in: currentProject())), false)
             case "get_scores": return (try json(scores(arguments, in: currentProject())), false)
+            case "get_pacing": return (try json(pacing(currentProject())), false)
+            case "set_pace_target": return (try json(setPaceTarget(arguments, in: currentProject())), false)
             case "check_script":
                 guard jev.added else { return ("Jev plugin not added", false) }
                 return (try json(await check(currentProject())), false)
@@ -342,6 +358,51 @@ final class ToolBridge {
     private struct ScoresResult: Encodable {
         var line: Int
         var versions: [VersionInfo]
+    }
+
+    private struct PacingInfo: Encodable {
+        var project: String
+        var paceTarget: Double?
+        var lines: [PacingLine]
+    }
+
+    /// Word numbers are 1-based display words of the chosen render's text.
+    private struct PacingLine: Encodable {
+        struct Word: Encodable {
+            var word: String
+            var start: Double
+            var end: Double
+        }
+        struct Stretch: Encodable {
+            var fromWord: Int
+            var toWord: Int
+            var text: String
+        }
+        struct Gap: Encodable {
+            var afterWord: Int
+            var seconds: Double
+        }
+        var line: Int
+        var text: String
+        var plain: String
+        var timed = false
+        var words: [Word]?
+        var wordsPerMinute: Int?
+        var target: Int?
+        /// project or take.
+        var targetFrom: String?
+        var verdict: String?
+        var rushed: [Stretch]?
+        var dragging: [Stretch]?
+        var gaps: [Gap]?
+        var matched: Double?
+        var problems: [String]
+        var note: String?
+    }
+
+    private struct PaceTargetResult: Encodable {
+        var paceTarget: Double?
+        var note: String
     }
 
     private struct CheckInfo: Encodable {
@@ -461,7 +522,9 @@ final class ToolBridge {
     private func versionInfo(_ version: Version, in line: Line) -> VersionInfo {
         var flags = version.flags
         if version.scores != nil, !version.likeYouJudged { flags.append("Like you not judged: under \(Int(Version.likeYouMinSeconds)) s") }
-        return VersionInfo(version: (line.versions.firstIndex(of: version) ?? 0) + 1, of: line.versions.count, text: version.text,
+        // Raw renders are hidden sources: never counted or listed.
+        let versions = line.visibleVersions
+        return VersionInfo(version: (versions.firstIndex(of: version) ?? 0) + 1, of: versions.count, text: version.text,
                            tone: version.tone, chosen: line.chosen == version.id, seconds: (version.duration * 100).rounded() / 100,
                            scores: version.scores, flags: flags)
     }
@@ -498,6 +561,10 @@ final class ToolBridge {
                     result.errors.append("Line \(number): text can't be empty.")
                     continue
                 }
+                if let problem = Self.tagProblems(text) {
+                    result.errors.append("Line \(number) not proposed: \(problem)")
+                    continue
+                }
                 proposal.text = text
             }
             if let value = change["tone"] {
@@ -518,6 +585,12 @@ final class ToolBridge {
             result.warnings += Script.warnings(proposal.text).map { "Line \(number): \($0)" }
         }
         return result
+    }
+
+    /// The tags' problems as one message for the agent to fix, or nil when every tag can be read.
+    private static func tagProblems(_ text: String) -> String? {
+        let problems = Marks.parse(text).problems
+        return problems.isEmpty ? nil : problems.joined(separator: " ") + " Fix the tags and send it again."
     }
 
     private static func tone(_ value: Any) -> String? {
@@ -547,6 +620,10 @@ final class ToolBridge {
             let label = "New line \(index + 1)"
             guard let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
                 result.errors.append("\(label): text can't be empty.")
+                continue
+            }
+            if let problem = Self.tagProblems(text) {
+                result.errors.append("\(label) not added: \(problem)")
                 continue
             }
             var voiceID = lastVoice
@@ -588,7 +665,7 @@ final class ToolBridge {
             throw AppError("A render or audition is running. Try again when it finishes.")
         }
         do { try await task.value } catch is CancellationError { throw AppError("The render was cancelled.") }
-        guard let updated = projects.project(project.id)?.lines.first(where: { $0.id == line.id }), let version = updated.versions.last else {
+        guard let updated = projects.project(project.id)?.lines.first(where: { $0.id == line.id }), let version = updated.visibleVersions.last else {
             throw AppError("Line \(number) is gone.")
         }
         return versionInfo(version, in: updated)
@@ -620,7 +697,75 @@ final class ToolBridge {
 
     private func scores(_ arguments: [String: Any], in project: Project) throws -> ScoresResult {
         let (number, line) = try line(arguments, in: project)
-        return ScoresResult(line: number, versions: line.versions.map { versionInfo($0, in: line) })
+        return ScoresResult(line: number, versions: line.visibleVersions.map { versionInfo($0, in: line) })
+    }
+
+    // MARK: Pace
+
+    /// Each line's pace from its chosen version's word times. Lines whose chosen version isn't timed yet are timed in
+    /// the background, for the next call.
+    private func pacing(_ project: Project) -> PacingInfo {
+        var untimed = false
+        let lines = project.lines.enumerated().map { index, line -> PacingLine in
+            var info = PacingLine(line: index + 1, text: line.text, plain: Marks.plain(line.text), problems: Marks.parse(line.text).problems)
+            guard let version = line.chosenVersion else {
+                info.note = line.added == true ? "A pending new line: nothing to time until the user accepts it and it's rendered."
+                    : line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No text." : "Not rendered yet."
+                return info
+            }
+            guard let times = projects.displayTimes(version) else {
+                untimed = true
+                info.note = "Its words aren't timed yet. VocalCord times them in the background, after any render; try again in a minute."
+                return info
+            }
+            let tokens = Marks.parse(version.text).tokens
+            func stretch(_ range: ClosedRange<Int>) -> PacingLine.Stretch {
+                .init(fromWord: range.lowerBound + 1, toWord: range.upperBound + 1, text: tokens[range].map(\.text).joined(separator: " "))
+            }
+            info.timed = true
+            info.words = zip(tokens, times).map { .init(word: $0.text, start: Self.rounded($1.start), end: Self.rounded($1.end)) }
+            info.matched = version.matched.map(Self.rounded)
+            var notes: [String] = []
+            if version.text != line.text {
+                notes.append("Timed from the chosen render, made before the text changed: \u{201C}\(Marks.plain(version.text))\u{201D}. "
+                    + "Word numbers are its words.")
+            }
+            if let report = projects.paceReport(line: line.id, in: project.id) {
+                info.wordsPerMinute = Int(report.wordsPerMinute.rounded())
+                info.target = Int(report.target.rounded())
+                info.targetFrom = project.paceTarget.map { $0.isFinite && $0 > 0 } == true ? "project" : "take"
+                info.verdict = report.verdict ?? "On pace."
+                info.rushed = report.rushed.map(stretch)
+                info.dragging = report.dragging.map(stretch)
+                info.gaps = report.gaps.map { .init(afterWord: $0.after + 1, seconds: Self.rounded($0.seconds)) }
+            } else if tokens.count < 4 {
+                notes.append("Under 4 words: too short to judge its pace.")
+            } else if Pace.target(projectOverride: project.paceTarget, referencePace: version.scores?.referencePace) == nil {
+                notes.append("No pace target: its take's pace isn't known. Set one with set_pace_target.")
+            } else {
+                notes.append("Its pace can't be judged from these times.")
+            }
+            info.note = notes.isEmpty ? nil : notes.joined(separator: " ")
+            return info
+        }
+        if untimed { projects.timeWordsIfNeeded(project.id, voices: voices) }
+        return PacingInfo(project: project.name, paceTarget: project.paceTarget, lines: lines)
+    }
+
+    /// A project setting, so it changes at once rather than waiting as a proposal.
+    private func setPaceTarget(_ arguments: [String: Any], in project: Project) throws -> PaceTargetResult {
+        let value = arguments["words_per_minute"]
+        guard let value, !(value is NSNull) else {
+            projects.setPaceTarget(nil, in: project.id)
+            return PaceTargetResult(note: "Cleared: get_pacing judges each line against the pace of its take.")
+        }
+        let range = Project.paceTargets
+        guard !(value is Bool), let number = (value as? NSNumber)?.doubleValue, number.isFinite, range.contains(number) else {
+            throw AppError("words_per_minute must be a number from \(Self.plain(range.lowerBound)) to \(Self.plain(range.upperBound)), or null.")
+        }
+        projects.setPaceTarget(number, in: project.id)
+        let target = projects.project(project.id)?.paceTarget ?? number
+        return PaceTargetResult(paceTarget: target, note: "Set: get_pacing judges every line against \(Self.plain(target)) words a minute.")
     }
 
     // MARK: Timeline
@@ -651,7 +796,7 @@ final class ToolBridge {
         let numbers = lineNumbers(project), waiting = projects.newRenders(project.id)
         let clips = zip(edit.clips, edit.starts).enumerated().map { index, pair in
             let (clip, start) = pair, render = project.version(clip.versionID), effects = clip.effects
-            return ClipInfo(clip: index + 1, line: numbers[clip.lineID], text: render?.text ?? "", start: Self.rounded(start),
+            return ClipInfo(clip: index + 1, line: numbers[clip.lineID], text: render.map { Marks.plain($0.text) } ?? "", start: Self.rounded(start),
                             duration: Self.rounded(clip.duration), renderStart: Self.rounded(clip.start), renderEnd: Self.rounded(clip.end),
                             renderDuration: Self.rounded(render?.duration ?? 0), gapAfter: Self.rounded(clip.gapAfter),
                             volumeDb: Self.rounded(clip.gain), fadeIn: Self.rounded(clip.fadeIn), fadeOut: Self.rounded(clip.fadeOut),

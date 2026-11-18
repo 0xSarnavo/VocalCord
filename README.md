@@ -9,12 +9,14 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 ## Features
 
 - **Clone a voice** from one 10–20 second clip, a guided session of about 8 minutes, or any audio or video file. Long files are cut into clips, grouped by speaker.
-- **Write a script** line by line, each with its own voice, tone and pause. Tags such as `[confident]`, `[pause 0.3]` and `(sigh)` steer a line.
+- **Write a script** line by line, each with its own voice, tone and pause. Press Return and only that line renders again, then plays.
+- **Direct each word:** select words and right-click (or type `[`) to add a pause, slow down or speed up a phrase, stress a word, or respell it for the voice. Pauses and speed apply instantly, without a new render. Tags such as `[confident]` set a tone mid-line.
+- **Read along:** the script lights up word by word as it plays, in the table, in a large Read view (click a word to play from it) and under Timeline clips. A pace check flags rushed or dragging phrases against your own take's pace, with a one-click fix.
 - **Score every line:** how much it sounds like you, how human it sounds, whether the words came out right, and whether its pitch, pace and pauses stay true to your take. A line that fails renders again, up to five times, and keeps its best version.
 - **Voice check:** render ten test lines (every tone, one line ten times, or long lines) to see how a voice holds up, with the time it will take on your Mac shown first.
 - **Edit on a timeline:** split, trim, move and space out your renders, and set each clip's volume, fades, speed, pitch, warmth and brightness, or remove noise. A line rendered again asks before replacing your cuts, and export follows the timeline.
 - **Preview against your video**, then export WAV or M4A, with captions and per-line or per-voice files.
-- **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script and proposes edits that you accept or reject.
+- **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script, word timings and pace, and proposes edits that you accept or reject. Review pace asks it to direct the rhythm for you.
 - **Jev plugin** (optional): checks that each line reads as speech and fits its tone.
 
 ![The Clone tab: takes by tone, pronunciations, and an agent proposing changes](docs/screenshots/clone.png)
@@ -30,7 +32,7 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 
 ## Install
 
-1. Download `VocalCord-1.0.1.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
+1. Download `VocalCord-1.1.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
 2. VocalCord is not signed by Apple, so macOS blocks the first launch. Right-click VocalCord in Applications and choose **Open**. Or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 3. On first launch, VocalCord installs its voice engine and downloads the models, about 4.6 GB. This happens once.
 
@@ -49,7 +51,7 @@ Needs Xcode 26. In a clone of this repo:
 
 ```sh
 ./build.sh                # VocalCord.app, in this folder
-scripts/make-dmg.sh       # dist/VocalCord-1.0.1.dmg
+scripts/make-dmg.sh       # dist/VocalCord-1.1.0.dmg
 swift test
 ```
 

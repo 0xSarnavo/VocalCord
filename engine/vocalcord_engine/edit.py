@@ -70,17 +70,17 @@ def read(src: str) -> np.ndarray:
     return audio.read_mono(path, RATE)
 
 
-def filters(job: dict, samples: np.ndarray) -> str:
+def filters(job: dict, samples: np.ndarray, rate: int = RATE) -> str:
     """The ffmpeg filter chain for the voice tools, or "" when none is on."""
     chain = []
     if job["denoise"]:
         # The noise floor is the clip's quietest frames, kept 15 dB under its speech so a clip with no pause
         # does not have its quieter words taken for noise. afftdn accepts -80 to -20 dB.
-        meter = audio.LevelMeter(RATE)
+        meter = audio.LevelMeter(rate)
         meter.add(samples)
         levels = meter.result()
         floor = max(-80.0, min(levels["noise_floor_dbfs"], levels["speech_dbfs"] - 15, -20.0))
-        chain += [f"afftdn=nr={DENOISE_DB}:nf={floor:.1f}", f"atrim=start_sample={DENOISE_DELAY}",
+        chain += [f"afftdn=nr={DENOISE_DB}:nf={floor:.1f}", f"atrim=start_sample={round(DENOISE_DELAY * rate / RATE)}",
                   "asetpts=PTS-STARTPTS"]
     if job["warmth"]:
         chain.append(f"lowshelf=g={job['warmth']:g}:f={WARMTH_HZ}")
@@ -89,9 +89,9 @@ def filters(job: dict, samples: np.ndarray) -> str:
     speed = job["tempo"]
     if job["pitch"]:
         # Playing the samples at another rate moves the pitch and the speed; atempo below undoes the speed.
-        shifted = round(RATE * 2 ** (job["pitch"] / 12))
-        chain += [f"asetrate={shifted}", f"aresample={RATE}"]
-        speed *= RATE / shifted
+        shifted = round(rate * 2 ** (job["pitch"] / 12))
+        chain += [f"asetrate={shifted}", f"aresample={rate}"]
+        speed *= rate / shifted
     if abs(math.log2(speed)) > 1e-6:
         # One pitch-keeping speed change, in equal atempo stages of 0.5-2x each (beyond that atempo skips audio).
         stages = max(1, math.ceil(abs(math.log2(speed)) - 1e-9))
@@ -99,10 +99,10 @@ def filters(job: dict, samples: np.ndarray) -> str:
     return ",".join(chain)
 
 
-def apply(samples: np.ndarray, chain: str) -> np.ndarray:
+def apply(samples: np.ndarray, chain: str, rate: int = RATE) -> np.ndarray:
     run = subprocess.run(
-        audio._ffmpeg("-f", "f32le", "-ar", str(RATE), "-ac", "1", "-i", "pipe:0", "-af", chain,
-                      "-f", "f32le", "-ar", str(RATE), "-ac", "1", "pipe:1"),
+        audio._ffmpeg("-f", "f32le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0", "-af", chain,
+                      "-f", "f32le", "-ar", str(rate), "-ac", "1", "pipe:1"),
         input=samples.astype(np.float32).tobytes(), capture_output=True)
     if run.returncode:
         error = run.stderr.decode(errors="replace").strip()
@@ -124,13 +124,13 @@ def fades(samples: np.ndarray, fade_in: float, fade_out: float) -> np.ndarray:
     return out
 
 
-def write(path: Path, samples: np.ndarray) -> None:
+def write(path: Path, samples: np.ndarray, rate: int = RATE) -> None:
     """Into a temporary file beside `path`, then renamed, so the app never plays a half-written clip."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".wav")
     os.close(handle)
     try:
-        sf.write(temp, samples, RATE, subtype="FLOAT", format="WAV")
+        sf.write(temp, samples, rate, subtype="FLOAT", format="WAV")
         os.replace(temp, path)
     except BaseException:
         Path(temp).unlink(missing_ok=True)

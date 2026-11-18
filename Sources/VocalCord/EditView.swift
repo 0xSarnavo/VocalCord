@@ -116,10 +116,40 @@ enum TrackLayout {
         return (clip, offset)
     }
 
-    /// The words a render speaks, without tags such as `[confident]`, `[pause 0.3]` or `(sigh)`.
-    static func words(_ text: String) -> String {
-        text.replacing(/\[[^\]]*\]|\([^)]*\)/, with: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    /// The words a render speaks, without tags such as `[confident]` or `[pause 0.3]`.
+    static func words(_ text: String) -> String { Marks.plain(text) }
+
+    /// Room inside a clip's rounded ends before the first word and after the last, and between words.
+    static let stripInset = 4.0, stripGap = 6.0
+
+    /// The words a clip plays, for the strip under its waveform: each one mostly inside the trim (`start`–`end` of the
+    /// render), placed where it starts, `(word.start − clip.start) / tempo × pointsPerSecond` from the clip's left edge.
+    /// A word whose label would run into the one before it, or past the clip's end, is left out, so zoomed out the strip
+    /// thins rather than overlaps; a clip under 40 points shows none. `texts` and `times` are the render's display words.
+    static func stripWords(_ texts: [String], times: [WordTime], clip: EditClip, pointsPerSecond: Double,
+                           measure: (String) -> Double) -> [StripWord] {
+        let width = clip.duration * pointsPerSecond
+        guard texts.count == times.count, clip.end > clip.start, width >= 40 else { return [] }
+        var words: [StripWord] = [], next = stripInset
+        for (token, time) in times.enumerated() {
+            let middle = (time.start + time.end) / 2
+            guard middle >= clip.start, middle <= clip.end else { continue }
+            let x = max(stripInset, (max(time.start, clip.start) - clip.start) / clip.effects.tempo * pointsPerSecond)
+            let label = measure(texts[token])
+            guard x >= next, x + label <= width - stripInset else { continue }
+            words.append(StripWord(token: token, text: texts[token], x: x))
+            next = x + label + stripGap
+        }
+        return words
     }
+}
+
+/// A word under a clip's waveform: its display token in the render's text and where it starts, in points from the
+/// clip's left edge.
+struct StripWord: Equatable {
+    var token: Int
+    var text: String
+    var x: Double
 }
 
 extension Double {
@@ -191,7 +221,7 @@ struct EditView: View {
                                 .panel()
                                 if terminalOpen {
                                     // The track keeps room for its header, questions, transport and clips.
-                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 360)
+                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 376)
                                 }
                             }
                         }
@@ -241,7 +271,7 @@ struct EditView: View {
 // MARK: Editor
 
 /// The track, with the questions about it above and the transport between.
-private struct EditorPane: View {
+struct EditorPane: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
     @Environment(Preview.self) private var preview
@@ -268,9 +298,10 @@ private struct EditorPane: View {
             banners
             transport
             Theme.line.frame(height: 1).padding(.horizontal, 8)
-            // The clips grow with the panel up to a point; the rest stays empty below, as under a short script.
+            // The clips grow with the panel up to a point; the rest stays empty below, as under a short script. The
+            // smallest still has room for its name, some waveform and its words.
             GeometryReader { proxy in
-                let lane = min(200, max(48, proxy.size.height - Track.height(lane: 0) - 40))
+                let lane = min(216, max(64, proxy.size.height - Track.height(lane: 0) - 40))
                 VStack(alignment: .leading, spacing: 4) {
                     Track(project: project, edit: edit, scale: scale, lane: lane, peaks: peaks, selected: $selected, scroll: $scroll,
                           visible: $visible) { focused = true }
@@ -288,7 +319,11 @@ private struct EditorPane: View {
         .focusable(interactions: .edit)
         .focused($focused)
         .onKeyPress(phases: .down, action: key)
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            // Old renders get their word times in the background, for the words under the clips.
+            projects.timeWordsIfNeeded(project.id, voices: voices)
+        }
         .task(id: project.edit) { await build() }
         .confirmationDialog("Reset the timeline from the script?", isPresented: $resetting, titleVisibility: .visible) {
             Button("Reset timeline", role: .destructive) {
@@ -504,9 +539,12 @@ private struct EditorPane: View {
     }
 }
 
-/// Play and pause, the round button the preview uses. Space does the same while the track has focus.
-private struct PlayToggle: View {
+/// Play and pause, the round button the preview uses, on the track and in the Read view. On the track Space does the
+/// same while it has focus.
+struct PlayToggle: View {
     @Environment(Preview.self) private var preview
+    /// Space plays and pauses here too, so the tooltip says so.
+    var spaceKey = true
 
     var body: some View {
         Button { preview.toggle() } label: {
@@ -518,7 +556,7 @@ private struct PlayToggle: View {
         }
         .buttonStyle(.plain)
         .disabled(preview.timeline.duration == 0)
-        .help(preview.isPlaying ? "Pause (space)" : "Play (space)")
+        .help((preview.isPlaying ? "Pause" : "Play") + (spaceKey ? " (space)" : ""))
         .accessibilityLabel(preview.isPlaying ? "Pause" : "Play")
     }
 }
@@ -636,11 +674,17 @@ private struct Track: View {
         let name = number.map { "Line \($0)" } ?? "Line"
         var shown = clip
         if let trim, trim.clipID == clip.id { (shown.start, shown.end) = (trim.start, trim.end) }
+        let strip = version.flatMap { version in
+            projects.displayTimes(version).map { times in
+                TrackLayout.stripWords(Marks.parse(version.text).tokens.map(\.text), times: times, clip: shown,
+                                       pointsPerSecond: scale.pointsPerSecond, measure: StripText.width)
+            }
+        } ?? []
         let isMoving = moving?.clipID == clip.id
         let handle = min(8, frame.width / 4)
         return ZStack {
             ClipBlock(clip: shown, name: name, words: words, selected: selected == clip.id, newRender: newRender,
-                      peaks: url.flatMap { peaks.peaks[$0] })
+                      peaks: url.flatMap { peaks.peaks[$0] }, project: project, strip: strip)
                 .contentShape(.rect)
                 .onTapGesture { location in
                     onFocus()
@@ -712,7 +756,8 @@ private struct Track: View {
     }
 }
 
-/// One clip: its waveform for the trimmed stretch, shaped by its volume and fades, under "Line N" and its first words.
+/// One clip: its waveform for the trimmed stretch, shaped by its volume and fades, under "Line N" and its first words,
+/// with its words along the bottom where they're said.
 private struct ClipBlock: View {
     let clip: EditClip
     let name: String
@@ -720,14 +765,25 @@ private struct ClipBlock: View {
     let selected: Bool
     let newRender: Bool
     let peaks: [Float]?
+    let project: Project
+    let strip: [StripWord]
     @State private var hovered = false
+
+    /// The words' row along the bottom, kept even when they aren't timed yet so every clip's waveform lines up.
+    static let stripHeight = 16.0, stripBottom = 4.0
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 8)
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
                 shape.fill(selected ? Theme.selection : Color.white.opacity(hovered ? 0.075 : 0.055))
-                waveform.padding(.top, 24).padding(.bottom, 8).padding(.horizontal, 3)
+                waveform.padding(.top, 24).padding(.bottom, Self.stripHeight + Self.stripBottom + 2).padding(.horizontal, 3)
+                if !strip.isEmpty {
+                    ClipWords(project: project, clipID: clip.id, words: strip)
+                        .frame(height: Self.stripHeight)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, Self.stripBottom)
+                }
                 if proxy.size.width >= 40 {
                     HStack(spacing: 5) {
                         Text(name).fontWeight(.semibold).foregroundStyle(Theme.text).layoutPriority(1)
@@ -794,6 +850,58 @@ private struct ClipBlock: View {
             }
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// A clip's words under its waveform, lit up to the word being said while it plays. Its own view, so only it follows
+/// playback; the drawing redraws only when the lit word changes.
+private struct ClipWords: View {
+    @Environment(ProjectStore.self) private var projects
+    @Environment(Preview.self) private var preview
+    let project: Project
+    let clipID: String
+    let words: [StripWord]
+
+    var body: some View {
+        StripText(words: words, lit: lit).equatable()
+    }
+
+    /// The word being said, while the preview plays this clip. The cheap check first, as every clip asks on each tick.
+    private var lit: Int? {
+        guard preview.isPlaying, preview.timeline.segment(at: preview.position)?.clipID == clipID,
+              let word = ReadAlong.lit(preview.timeline, at: preview.position, in: project, projects: projects), word.clipID == clipID
+        else { return nil }
+        return word.token
+    }
+}
+
+/// The strip's words: spoken ones in Theme.text, the rest in Theme.secondary.
+struct StripText: View, Equatable {
+    let words: [StripWord]
+    /// The last display token spoken; nil while the clip isn't playing.
+    let lit: Int?
+
+    static let fontSize = 11.0
+    @MainActor private static var widths: [String: Double] = [:]
+
+    var body: some View {
+        Canvas { context, size in
+            for word in words {
+                let spoken = lit.map { word.token <= $0 } ?? false
+                context.draw(Text(word.text).font(.system(size: Self.fontSize)).foregroundStyle(spoken ? Theme.text : Theme.secondary),
+                             at: CGPoint(x: word.x, y: size.height / 2), anchor: .leading)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// A word's label width, measured once.
+    static func width(_ text: String) -> Double {
+        if let width = widths[text] { return width }
+        let width = ceil((text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: fontSize)]).width)
+        widths[text] = width
+        return width
     }
 }
 
@@ -933,7 +1041,9 @@ private struct ClipSettings: View {
     var body: some View {
         let line = project.line(clip.lineID), version = project.version(clip.versionID)
         let number = project.lines.firstIndex { $0.id == clip.lineID }.map { $0 + 1 }
-        let take = line.flatMap { line in line.versions.firstIndex { $0.id == clip.versionID }.map { "v\($0 + 1) of \(line.versions.count)" } }
+        let take = line.flatMap { line in
+            line.visibleVersions.firstIndex { $0.id == clip.versionID }.map { "v\($0 + 1) of \(line.visibleVersions.count)" }
+        }
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {

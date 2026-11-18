@@ -118,7 +118,9 @@ private func clip(_ id: String, length: Double = 2, gap: Double = 0.5, tempo: Do
 }
 
 @Test func clipLabelsDropTags() {
-    #expect(TrackLayout.words("[confident] Hello there, [pause 0.3] friend (sigh).") == "Hello there, friend .")
+    // Parentheses are words to the voice, so they stay, as in Marks.plain.
+    #expect(TrackLayout.words("[confident] Hello there, [pause 0.3] friend (sigh).") == "Hello there, friend (sigh).")
+    #expect(TrackLayout.words("Meet [say Ha-vee-air]Javier[/say], [stress]please[/stress].") == "Meet Javier, please.")
     #expect(TrackLayout.words("  Plain   words\nhere ") == "Plain words here")
     #expect(TrackLayout.words("[happy]") == "")
 }

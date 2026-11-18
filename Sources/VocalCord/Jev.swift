@@ -24,9 +24,8 @@ struct JevSubject: Hashable, Sendable {
         self.init(text: proposal.text, tone: proposal.tone, original: proposal.text == line.text ? line.original : line.text)
     }
 
-    static func words(_ text: String) -> String {
-        text.replacing(/\[[^\]]*\]/, with: " ").replacing(/\s+/, with: " ").trimmingCharacters(in: .whitespaces)
-    }
+    /// The words as read: tags out, a [say] group as its written words.
+    static func words(_ text: String) -> String { Marks.plain(text) }
 }
 
 /// Jev's answers for one line, each the probability that the check passes.

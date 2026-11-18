@@ -46,6 +46,12 @@ struct GenerateView: View {
                     .onGeometryChange(for: Double.self) { $0.size.width } action: { width = $0 }
                     .task(id: timeline) { await preview.load(timeline) }
                     .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
+                    // Renders made before word timing get their words in the background, for the read-along and the
+                    // pace notes; a render blocks it, so it tries again once the render finishes.
+                    .onChange(of: project.id, initial: true) { projects.timeWordsIfNeeded(project.id, voices: voices) }
+                    .onChange(of: projects.progress == nil) { _, idle in
+                        if idle { projects.timeWordsIfNeeded(project.id, voices: voices) }
+                    }
                 } else {
                     Text("No projects").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
                 }
@@ -176,58 +182,76 @@ private enum Column {
     static let inset: CGFloat = 8
 }
 
+/// The Script panel's two views: the table of lines, or the whole script to read along.
+enum ScriptViewMode: String {
+    case table, read
+}
+
+/// The Pace menu's choices, in words a minute; nil follows each line's take.
+enum PaceChoice {
+    static let presets: [Double] = [130, 150, 170, 190]
+
+    /// The menu's label: "Pace: take" or "Pace: 150".
+    static func title(_ target: Double?) -> String {
+        target.map { "Pace: \(Int($0.rounded()))" } ?? "Pace: take"
+    }
+
+    /// Set, but not one of the presets.
+    static func isCustom(_ target: Double?) -> Bool {
+        target.map { value in !presets.contains { abs($0 - value) < 0.5 } } ?? false
+    }
+}
+
 struct ScriptPane: View {
     @Environment(VoiceStore.self) private var voices
     @Environment(ProjectStore.self) private var projects
     @Environment(Jev.self) private var jev
+    @Environment(Player.self) private var player
+    @Environment(Preview.self) private var preview
+    @Environment(Terminals.self) private var terminals
     let project: Project
+    @AppStorage("scriptView") private var mode = ScriptViewMode.table
+    @AppStorage("terminalOpen") private var terminalOpen = false
     @State private var splitText: String?
     @State private var importing = false
     @State private var comparing: [String]?
+    @State private var customPace = false
+    @State private var customValue = 150.0
+
+    /// How much of the header's actions fit: all of them, then Pace, Compare and Check in one menu, then Review too.
+    private enum HeaderFit { case full, folded, compact }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            PanelHeader("Script") {
-                let pending = project.lines.filter { $0.proposal != nil }.map(\.id)
-                if pending.count > 1 {
-                    Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline)
-                    Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline)
+            PanelHeader {
+                HStack(spacing: 12) {
+                    Text("Script")
+                    modePicker
                 }
-                if jev.added {
-                    Button(jev.isChecking ? "Checking…" : "Check script") {
-                        let subjects = project.lines.map(JevSubject.init)
-                        Task { await jev.check(subjects) }
-                    }
-                    .buttonStyle(.outline)
-                    .disabled(jev.isChecking || renderable.isEmpty)
+                .fixedSize()
+            } actions: {
+                ViewThatFits(in: .horizontal) {
+                    actions(.full)
+                    actions(.folded)
+                    actions(.compact)
                 }
-                Button("Compare styles…") { comparing = renderable.map(\.id) }
-                    .buttonStyle(.outline)
-                    .disabled(renderable.isEmpty || projects.progress != nil)
-            }
-            ScrollView {
-                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
-                // Leading, so a window too narrow for every column cuts off the last ones, never the text.
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
-                            LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
-                                    onCompare: { comparing = [line.id] })
-                            Theme.rule.frame(height: 1)
-                        }
-                        footer
-                    } header: {
-                        VStack(spacing: 0) {
-                            header
-                            Theme.line.frame(height: 1)
-                        }
-                        .background(Theme.content)
+                // The Pace menu, or the menu that holds it, is the leftmost action in every fit.
+                .popover(isPresented: $customPace, attachmentAnchor: .rect(.rect(CGRect(x: 0, y: 0, width: 40, height: 30))),
+                         arrowEdge: .bottom) {
+                    CustomPacePopover(value: customValue) { value in
+                        projects.setPaceTarget(value, in: project.id)
+                        customPace = false
                     }
                 }
-                .padding(.horizontal, 8)
+                // Ahead of the header's spacer, so the actions get the room they need and fold only when it runs out.
+                .layoutPriority(1)
             }
-            .scrollIndicators(.automatic)
-            .scrollBounceBehavior(.basedOnSize)
+            if mode == .read {
+                ReadView(project: project)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                table
+            }
         }
         .sheet(isPresented: Binding(present: $splitText)) {
             SplitSheet(text: splitText ?? "") { lines in projects.addLines(lines, to: project.id, voices: voices) }
@@ -249,6 +273,151 @@ struct ScriptPane: View {
     }
 
     private var renderable: [Line] { project.lines.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty } }
+
+    private var table: some View {
+        // One clock for the read-along, here rather than per row: each tick gives only the playing row a new `lit`,
+        // and rows are Equatable, so the others aren't redrawn.
+        TimelineView(.animation(minimumInterval: 0.05, paused: player.playing == nil && !preview.isPlaying)) { _ in
+            let lit = ReadAlong.lit(in: project, projects: projects, preview: preview, player: player)
+            ScrollView {
+                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
+                // Leading, so a window too narrow for every column cuts off the last ones, never the text.
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
+                            LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
+                                    lit: LineRow.lit(lit, in: line), paceTarget: project.paceTarget,
+                                    onCompare: { comparing = [line.id] })
+                                .equatable()
+                            Theme.rule.frame(height: 1)
+                        }
+                        footer
+                    } header: {
+                        VStack(spacing: 0) {
+                            header
+                            Theme.line.frame(height: 1)
+                        }
+                        .background(Theme.content)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+            .scrollIndicators(.automatic)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    private var modePicker: some View {
+        Picker("Script view", selection: $mode) {
+            Text("Table").tag(ScriptViewMode.table)
+            Text("Read").tag(ScriptViewMode.read)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .font(.system(size: 13))
+        .fixedSize()
+    }
+
+    // MARK: Header actions
+
+    /// Least used on the left, most used on the right: the pace target, Compare, Check, Review pace, then Accept and
+    /// Reject all while an agent's changes wait.
+    private func actions(_ fit: HeaderFit) -> some View {
+        let pending = project.lines.filter { $0.proposal != nil }.map(\.id)
+        return HStack(spacing: 8) {
+            if fit == .full {
+                Menu {
+                    paceOptions
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(PaceChoice.title(project.paceTarget))
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
+                    }
+                }
+                .menuStyle(.button)
+                .buttonStyle(.outline)
+                .menuIndicator(.hidden)
+                .help("The pace the pace notes aim for")
+                .accessibilityLabel("Pace target")
+                .accessibilityValue(paceValue)
+                Button("Compare styles…") { comparing = renderable.map(\.id) }
+                    .buttonStyle(.outline)
+                    .disabled(!canCompare)
+                if jev.added {
+                    Button(jev.isChecking ? "Checking…" : "Check script", action: checkScript)
+                        .buttonStyle(.outline)
+                        .disabled(!canCheck)
+                }
+            } else {
+                Menu {
+                    Button("Compare styles…") { comparing = renderable.map(\.id) }.disabled(!canCompare)
+                    if jev.added {
+                        Button(jev.isChecking ? "Checking…" : "Check script", action: checkScript).disabled(!canCheck)
+                    }
+                    Divider()
+                    Menu(PaceChoice.title(project.paceTarget)) { paceOptions }
+                    if fit == .compact {
+                        Divider()
+                        Button("Review pace", action: reviewPace).disabled(!canReview)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis").frame(height: 14)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.outline)
+                .menuIndicator(.hidden)
+                .help("More")
+                .accessibilityLabel("More script actions")
+            }
+            if fit != .compact {
+                Button("Review pace", action: reviewPace)
+                    .buttonStyle(.outline)
+                    .disabled(!canReview)
+                    .help("Ask the terminal agent to review the pacing and propose changes")
+            }
+            if pending.count > 1 {
+                Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline)
+                Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline)
+            }
+        }
+        .fixedSize()
+    }
+
+    /// Checked items: the take's own pace, the presets, and Custom… for any other number.
+    @ViewBuilder private var paceOptions: some View {
+        let target = project.paceTarget
+        Toggle("Your take's pace", isOn: Binding(get: { target == nil }, set: { _ in projects.setPaceTarget(nil, in: project.id) }))
+        Divider()
+        ForEach(PaceChoice.presets, id: \.self) { preset in
+            Toggle("\(Int(preset)) words a minute", isOn: Binding(get: { target.map { abs($0 - preset) < 0.5 } ?? false },
+                                                                 set: { _ in projects.setPaceTarget(preset, in: project.id) }))
+        }
+        Divider()
+        Toggle(PaceChoice.isCustom(target) ? "Custom (\(Int((target ?? 0).rounded())))…" : "Custom…",
+               isOn: Binding(get: { PaceChoice.isCustom(target) }, set: { _ in
+                   customValue = (target ?? 150).rounded()
+                   customPace = true
+               }))
+    }
+
+    private var paceValue: String {
+        project.paceTarget.map { "\(Int($0.rounded())) words a minute" } ?? "Your take's pace"
+    }
+
+    private var canCompare: Bool { !renderable.isEmpty && projects.progress == nil }
+    private var canCheck: Bool { !jev.isChecking && !renderable.isEmpty }
+    /// The agent reads the pace from renders, so there must be one.
+    private var canReview: Bool { project.lines.contains { $0.chosenVersion != nil } }
+
+    private func checkScript() {
+        let subjects = project.lines.map(JevSubject.init)
+        Task { await jev.check(subjects) }
+    }
+
+    private func reviewPace() {
+        terminalOpen = true
+        terminals.ask(Agent.reviewPacePrompt)
+    }
 
     private var header: some View {
         HStack(spacing: 0) {
@@ -294,14 +463,21 @@ struct LineRow: View {
     let line: Line
     let number: Int
     let isLast: Bool
+    /// The display word being said while this row's text plays, else nil.
+    let lit: Int?
+    /// The project's pace target, for the pace notes.
+    let paceTarget: Double?
     let onCompare: () -> Void
     @State private var hovered = false
+    /// Applying marks takes a moment; a spinner shows only when it takes longer, so the usual case doesn't flash.
+    @State private var slowApply = false
 
     var body: some View {
         let version = line.chosenVersion
         let scores = version?.scores
         // A pending change takes room from the version cell for its Accept and Reject buttons.
         let decision: CGFloat = line.proposal == nil ? 0 : 22
+        let isApplying = projects.applying.contains(line.id)
         HStack(spacing: 0) {
             Text("\(number)").foregroundStyle(Theme.secondary).frame(width: Column.number, alignment: .leading)
             // The script rules the line breaks show under its text, for the pending change while there is one.
@@ -309,10 +485,20 @@ struct LineRow: View {
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
                 } else {
-                    TextField("Text", text: Binding(get: { line.text }, set: { projects.setText($0, line: line.id, in: projectID) }), axis: .vertical)
-                        .textFieldStyle(.plain)
+                    // Return or leaving the text renders or applies the edit and plays it; a command applies at once.
+                    ScriptTextView(text: line.text, style: .row, lit: lit,
+                                   onChange: { projects.setText($0, line: line.id, in: projectID) },
+                                   onCommit: commit,
+                                   onCommand: { text in
+                                       projects.setText(text, line: line.id, in: projectID)
+                                       commit()
+                                   })
                 }
                 ForEach(Script.warnings(line.proposal?.text ?? line.text), id: \.self) { Warning(text: $0) }
+                let pace = paceNotes
+                ForEach(pace.notes, id: \.self) { note in
+                    PaceNoteView(note: note, help: pace.verdict, busy: isApplying, onFix: fixPace)
+                }
             }
             .padding(.horizontal, 6)
             .frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
@@ -333,7 +519,7 @@ struct LineRow: View {
                                     onAccept: { projects.accept([line.id], in: projectID) },
                                     onReject: { projects.reject([line.id], in: projectID) })
                 } else {
-                    rerenderButton
+                    statusCell
                 }
             }
             .frame(width: Column.gutter + decision)
@@ -349,6 +535,12 @@ struct LineRow: View {
         }
         .contentShape(.rect)
         .onHover { hovered = $0 }
+        .task(id: isApplying) {
+            slowApply = false
+            guard isApplying else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            if !Task.isCancelled { slowApply = true }
+        }
         .simultaneousGesture(TapGesture().onEnded { preview.seek(toLine: line.id) })
         .contextMenu {
             Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
@@ -412,16 +604,18 @@ struct LineRow: View {
         .accessibilityLabel("Pause after, seconds")
     }
 
-    /// The label plays the chosen version; the chevron picks another, which then plays.
+    /// The label plays the chosen version; the chevron picks another, which then plays. Raw renders, the hidden sources
+    /// of marked versions, are never listed or counted.
     /// A pending change narrows the cell, so it gets smaller type.
     @ViewBuilder private var versionControl: some View {
         let compact = line.proposal != nil
-        if let version = line.chosenVersion, let index = line.versions.firstIndex(of: version) {
+        let visible = line.visibleVersions
+        if let version = line.chosenVersion, let index = visible.firstIndex(of: version) {
             let url = projects.audioURL(version, projectID: projectID)
             HStack(spacing: 0) {
                 Button { player.toggle(url) } label: {
                     HStack(spacing: 4) {
-                        Text("v\(index + 1) of \(line.versions.count)").lineLimit(1).minimumScaleFactor(0.8)
+                        Text("v\(index + 1) of \(visible.count)").lineLimit(1).minimumScaleFactor(0.8)
                         if version.direction {
                             Image(systemName: "text.bubble").font(.system(size: 10)).foregroundStyle(Theme.secondary)
                         }
@@ -434,7 +628,7 @@ struct LineRow: View {
                 .help(versionTitle(version, index))
                 .accessibilityLabel(player.playing == url ? "Stop" : "Play version \(index + 1)")
                 Menu {
-                    ForEach(Array(line.versions.enumerated()), id: \.element.id) { offset, item in
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { offset, item in
                         Button(versionTitle(item, offset)) {
                             projects.choose(item.id, line: line.id, in: projectID)
                             let url = projects.audioURL(item, projectID: projectID)
@@ -468,23 +662,238 @@ struct LineRow: View {
         (["v\(index + 1)", version.tone] + (version.direction ? ["direction"] : [])).joined(separator: " · ")
     }
 
-    @ViewBuilder private var rerenderButton: some View {
-        if projects.renderingLine == line.id {
+    /// What the gutter shows: a spinner while the line renders (or applies for a while), a clock while it waits for
+    /// the render ahead of it, else the button that brings it up to date.
+    enum Status: Equatable {
+        case rendering, waiting, applying
+        /// Only marks changed: applying them needs no render.
+        case apply
+        case render
+    }
+
+    static func status(_ line: Line, renderingLine: String?, queued: [String], applying: Set<String>) -> Status {
+        if renderingLine == line.id { return .rendering }
+        if queued.contains(line.id) { return .waiting }
+        if applying.contains(line.id) { return .applying }
+        return line.needsRender && !line.needsVoice ? .apply : .render
+    }
+
+    @ViewBuilder private var statusCell: some View {
+        let status = Self.status(line, renderingLine: projects.renderingLine, queued: projects.queued, applying: projects.applying)
+        switch status {
+        case .rendering:
             ProgressView().controlSize(.small)
-        } else {
-            Button { projects.rerender(line.id, in: projectID, voices: voices) } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil || voices.busy != nil)
-            .help("Render again, until a version passes")
-            .accessibilityLabel("Render line \(number) again")
+        case .waiting:
+            Image(systemName: "clock")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.secondary)
+                .frame(width: 28, height: 28)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .help("Waiting… It renders after the line ahead of it.")
+                .accessibilityElement()
+                .accessibilityLabel("Line \(number) waiting to render")
+        case .applying where slowApply:
+            ProgressView().controlSize(.small)
+        case .applying, .apply, .render:
+            // Kept as is while marks apply, so the usual quick apply doesn't flash a new state.
+            rerenderButton(apply: status != .render)
         }
+    }
+
+    private func rerenderButton(apply: Bool) -> some View {
+        Button {
+            if apply {
+                guard !projects.applying.contains(line.id) else { return }
+                commit()
+            } else {
+                projects.rerender(line.id, in: projectID, voices: voices)
+            }
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        // Applying marks doesn't use the voice model, so it can run beside a render.
+        .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || !apply && (projects.progress != nil || voices.busy != nil))
+        .help(apply ? "Apply the changed pauses and speeds, without a new render" : "Render again, until a version passes")
+        .accessibilityLabel(apply ? "Apply changes to line \(number)" : "Render line \(number) again")
+    }
+
+    // MARK: Editing and pace
+
+    /// Renders the line or applies its marks as needed, then plays it.
+    private func commit() {
+        projects.commitAndPlay(line.id, in: projectID, voices: voices, player: player)
+    }
+
+    /// The pace notes for the chosen version, as `ProjectStore.paceReport` judges it but from this row's own line, so an
+    /// edit to another line doesn't redraw every row. None while the text differs from the version's: its words are
+    /// what the report's word numbers count.
+    private var paceNotes: (notes: [PaceNote], verdict: String?) {
+        guard line.proposal == nil, let version = line.chosenVersion, version.text == line.text, let words = version.words,
+              let target = Pace.target(projectOverride: paceTarget, referencePace: version.scores?.referencePace) else { return ([], nil) }
+        let parsed = Marks.parse(version.text)
+        guard let times = Marks.displayTimes(parsed, spoken: words), let report = Pace.report(parsed, times: times, target: target)
+        else { return ([], nil) }
+        return (PaceNote.notes(report, tokens: parsed.tokens), report.verdict)
+    }
+
+    /// Slows or speeds a stretch at once, then plays the line. A line that needs the voice first is rendered, then played.
+    private func fixPace(_ range: ClosedRange<Int>) {
+        let lineID = line.id
+        Task {
+            do {
+                if try await projects.fixPace(line: lineID, range: range, in: projectID, voices: voices) {
+                    if let version = projects.project(projectID)?.line(lineID)?.chosenVersion {
+                        player.play(projects.audioURL(version, projectID: projectID), from: 0)
+                    }
+                } else {
+                    projects.commitAndPlay(lineID, in: projectID, voices: voices, player: player)
+                }
+            } catch is CancellationError {
+            } catch {
+                projects.error = "Couldn't change the pace. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// The row's display word being said, from the word playing now: only when this line's version plays, and only while
+    /// the line's text is still that version's, so the word numbers match.
+    static func lit(_ lit: LitWord?, in line: Line) -> Int? {
+        guard let lit, lit.lineID == line.id, let version = line.versions.first(where: { $0.id == lit.versionID }),
+              version.text == line.text else { return nil }
+        return lit.token
+    }
+}
+
+extension LineRow: Equatable {
+    /// The row's values without `onCompare`, which only captures the pane's state. The read-along clock rebuilds every
+    /// row on each tick; with this only the playing one, whose `lit` changed, is redrawn.
+    nonisolated static func == (a: LineRow, b: LineRow) -> Bool {
+        a.projectID == b.projectID && a.line == b.line && a.number == b.number && a.isLast == b.isLast && a.lit == b.lit
+            && a.paceTarget == b.paceTarget
+    }
+}
+
+/// One quiet note under a line about its pace: a rushed or slow stretch with the button that fixes it, a long gap, or
+/// the verdict alone when there's nothing more particular to point at. Shown only when the line as a whole is off pace.
+struct PaceNote: Hashable, Sendable {
+    enum Fix: Hashable, Sendable {
+        case slowDown, speedUp
+        var title: String { self == .slowDown ? "Slow down" : "Speed up" }
+    }
+
+    /// In amber: "Rushed:", "Slow:" or "1.4 s gap".
+    var key: String
+    /// After the key: the stretch's words in quotes, or where the gap is.
+    var detail: String
+    /// Display tokens, for `ProjectStore.fixPace`.
+    var range: ClosedRange<Int>? = nil
+    var fix: Fix? = nil
+
+    /// `Rushed: “and it's free” · Slow down`
+    var text: String { "\(key) \(detail)" + (fix.map { " · \($0.title)" } ?? "") }
+
+    /// The fix button's label for VoiceOver, with its words: `Slow down “and it's free”`.
+    var fixLabel: String? { fix.map { "\($0.title) \(detail)" } }
+
+    static let limit = 2
+    /// A longer stretch shows its first and last words.
+    static let phraseWords = 8
+
+    /// Up to `limit` notes: stretches in the order they're said, then gaps, even on a line that's on pace overall, as one
+    /// rushed phrase is what the ear catches. Without either, the verdict when the whole line is off.
+    static func notes(_ report: PaceReport, tokens: [ParsedLine.Token]) -> [PaceNote] {
+        let stretches = (report.rushed.map { ($0, Fix.slowDown) } + report.dragging.map { ($0, Fix.speedUp) })
+            .filter { tokens.indices.contains($0.0.lowerBound) }
+            .sorted { $0.0.lowerBound < $1.0.lowerBound }
+            .map { range, fix in
+                PaceNote(key: fix == .slowDown ? "Rushed:" : "Slow:", detail: quoted(phrase(range, in: tokens)), range: range, fix: fix)
+            }
+        let gaps = report.gaps.filter { tokens.indices.contains($0.after) }.map { gap in
+            PaceNote(key: String(format: "%.1f s gap", gap.seconds), detail: "after " + quoted(phrase(gap.after...gap.after, in: tokens)))
+        }
+        let notes = stretches + gaps
+        guard notes.isEmpty else { return Array(notes.prefix(limit)) }
+        guard let verdict = report.verdict else { return [] }
+        return [PaceNote(key: report.wordsPerMinute > report.target ? "Rushed:" : "Slow:", detail: verdict)]
+    }
+
+    /// The display words of `range` as written, without the punctuation at either end: `and it's free`. Past
+    /// `phraseWords`, the first four and last three with an ellipsis between.
+    static func phrase(_ range: ClosedRange<Int>, in tokens: [ParsedLine.Token]) -> String {
+        let low = max(range.lowerBound, 0), high = min(range.upperBound, tokens.count - 1)
+        guard low <= high else { return "" }
+        let words = tokens[low...high].map(\.text)
+        let shown = words.count > phraseWords ? words.prefix(4) + ["…"] + words.suffix(3) : words[...]
+        return shown.joined(separator: " ").trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+    }
+
+    private static func quoted(_ text: String) -> String { "\u{201C}\(text)\u{201D}" }
+}
+
+/// A pace note in the row: secondary text with its key in amber, quieter than a `Warning`, and its fix as a text button.
+private struct PaceNoteView: View {
+    let note: PaceNote
+    /// The verdict sentence, on hover.
+    let help: String?
+    let busy: Bool
+    let onFix: (ClosedRange<Int>) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("\(Text(note.key).foregroundStyle(Theme.amber)) \(note.detail)")
+                .foregroundStyle(Theme.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let fix = note.fix, let range = note.range {
+                Text("·").foregroundStyle(Theme.secondary).accessibilityHidden(true)
+                Button(fix.title) { onFix(range) }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.text)
+                    .fontWeight(.medium)
+                    .fixedSize()
+                    .disabled(busy)
+                    .accessibilityLabel(note.fixLabel ?? fix.title)
+            }
+        }
+        .font(.system(size: 12))
+        .help(help ?? "")
+    }
+}
+
+/// The Pace menu's Custom…: a target in words a minute, which the store keeps within `Project.paceTargets`.
+struct CustomPacePopover: View {
+    @State var value: Double
+    let onSet: (Double) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Pace target").font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                TextField("150", value: $value, format: .number.precision(.fractionLength(0)))
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 64)
+                    .onSubmit { onSet(value) }
+                    .accessibilityLabel("Words a minute")
+                Text("words a minute").foregroundStyle(Theme.secondary)
+            }
+            HStack {
+                Text("\(Int(Project.paceTargets.lowerBound)) to \(Int(Project.paceTargets.upperBound))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.secondary)
+                Spacer(minLength: 12)
+                Button("Set") { onSet(value) }.buttonStyle(.outline(height: 28)).keyboardShortcut(.defaultAction)
+            }
+        }
+        .font(.system(size: 13))
+        .padding(14)
+        .frame(width: 240)
     }
 }
 

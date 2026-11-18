@@ -2,6 +2,10 @@ import Foundation
 import NaturalLanguage
 
 /// One render of a line. Its audio is `Projects/<project>/renders/<id>.wav`.
+///
+/// A line whose text has marks (pauses, speeds, stress) is rendered without them as a `raw` version, a hidden source,
+/// and `apply_marks` makes the version the user hears from it, with `source` naming the raw one. Changing only the
+/// marks makes a new version from the same source, without rendering.
 struct Version: Codable, Identifiable, Hashable, Sendable {
     var id: String
     /// The line's text, voice and tone when this version was rendered.
@@ -16,6 +20,24 @@ struct Version: Codable, Identifiable, Hashable, Sendable {
     var scores: Scores?
     /// The reference take's own Human score.
     var referenceHuman: Double?
+    // Optional so versions saved before they existed still decode.
+    /// When each `Marks.parse(text).spokenTokens` entry is spoken in this version's own file. Nil until timed.
+    var words: [WordTime]? = nil
+    /// 0–1: the share of words whose times Whisper heard; low means most were estimated.
+    var matched: Double? = nil
+    /// Model output whose text has marks that aren't applied in this file: a hidden source, never chosen or played.
+    var raw: Bool? = nil
+    /// Made by `apply_marks` from this version (a raw render, or a render whose text had no marks).
+    var source: String? = nil
+
+    /// Marks can be applied to it to make a version: model output with the marks left out of its audio (raw), or
+    /// whose text has none, and with words to time. Versions rendered with [pause] tags before marks existed had the
+    /// engine split the line at each pause, so they can't.
+    var isMarkSource: Bool {
+        guard source == nil else { return false }
+        let parsed = Marks.parse(text)
+        return (raw == true || parsed.marks.isEmpty) && (words != nil || !parsed.spokenTokens.isEmpty)
+    }
 
     static let likeYouFloor = 70, wordsFloor = 90, humanDrop = 0.5
     /// Speaker similarity is unreliable on shorter audio: lines of about 1.4 s scored 31–57%.
@@ -95,10 +117,30 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
 
-    /// No version reads the current text in the current voice and tone yet.
+    /// The versions to list and play: raw sources are left out.
+    var visibleVersions: [Version] { versions.filter { $0.raw != true } }
+
+    /// The version can play for the current text, voice and tone: it reads them and isn't a raw source.
+    func reads(_ version: Version) -> Bool {
+        version.raw != true && version.text == text && version.voiceID == voiceID && version.tone == tone
+    }
+
+    /// No version plays the current text in the current voice and tone yet.
     var needsRender: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !versions.contains { $0.text == text && $0.voiceID == voiceID && $0.tone == tone }
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !versions.contains(where: reads)
+    }
+
+    /// Needs the voice model, not only marks applied to a version it has: the voice would read the text differently
+    /// (its words, a respelling, a stress or a direction changed), or there's no render to apply marks to. A line that
+    /// `needsRender` without this is fixed at once with "Apply".
+    var needsVoice: Bool { needsRender && markSource == nil }
+
+    /// The best version (by `rank`) that marks can be applied to for the current text: same voice and tone, and read
+    /// the same way by the voice (`ParsedLine.renderKey`), so only the marks differ.
+    var markSource: Version? {
+        let key = Marks.parse(text).renderKey
+        return versions.filter { $0.voiceID == voiceID && $0.tone == tone && $0.isMarkSource && Marks.parse($0.text).renderKey == key }
+            .max { $0.rank < $1.rank }
     }
 }
 
@@ -139,6 +181,10 @@ struct Project: Codable, Identifiable, Hashable, Sendable {
     /// The Timeline tab's cut of the audio, made the first time it opens; export uses it from then on.
     var edit: Edit?
     var editProposal: EditProposal?
+    /// Words a minute the pace check aims for; nil uses each version's take.
+    var paceTarget: Double?
+
+    static let paceTargets = 80.0...260.0
 
     func line(_ id: String) -> Line? { lines.first { $0.id == id } }
     func version(_ id: String) -> Version? { lines.lazy.flatMap(\.versions).first { $0.id == id } }
@@ -304,7 +350,13 @@ final class ProjectStore {
     func setPause(_ seconds: Double, line: String, in projectID: String) {
         updateLine(projectID, line) { $0.pauseAfter = min(10, max(0, seconds)) }
     }
-    func choose(_ versionID: String, line: String, in projectID: String) { updateLine(projectID, line) { $0.chosen = versionID } }
+    /// A raw source is never chosen.
+    func choose(_ versionID: String, line: String, in projectID: String) {
+        updateLine(projectID, line) { line in
+            guard line.versions.contains(where: { $0.id == versionID && $0.raw != true }) else { return }
+            line.chosen = versionID
+        }
+    }
 
     func moveLine(_ lineID: String, by offset: Int, in projectID: String) {
         update(projectID) { project in
@@ -360,7 +412,7 @@ final class ProjectStore {
                 line.pauseAfter = proposal.pauseAfter
                 line.proposal = nil
                 line.added = nil
-                if let match = line.versions.last(where: { $0.text == line.text && $0.voiceID == line.voiceID && $0.tone == line.tone }) {
+                if let match = line.versions.last(where: line.reads) {
                     line.chosen = match.id
                 }
                 project.lines[index] = line
@@ -378,15 +430,16 @@ final class ProjectStore {
 
     // MARK: Outputs
 
-    /// Every render and export, newest first.
+    /// Every render and export, newest first. Raw sources are left out. A render is in use while it's its line's
+    /// chosen take, the timeline uses it, or another version was made from it by applying marks.
     func outputs(_ projectID: String) -> [Output] {
         guard let project = project(projectID) else { return [] }
-        let edited = project.editedRenders
+        let used = project.editedRenders.union(project.lines.flatMap(\.versions).compactMap(\.source))
         let renders = project.lines.enumerated().flatMap { number, line in
-            line.versions.enumerated().map { index, version in
+            line.visibleVersions.enumerated().map { index, version in
                 Output(id: version.id, name: "Line \(number + 1) · v\(index + 1)", url: audioURL(version, projectID: projectID),
                        duration: version.duration, date: version.createdAt,
-                       usedBy: line.chosen == version.id || edited.contains(version.id) ? number + 1 : nil)
+                       usedBy: line.chosen == version.id || used.contains(version.id) ? number + 1 : nil)
             }
         }
         let exports = (project.exports ?? []).map { export in
@@ -398,14 +451,16 @@ final class ProjectStore {
     }
 
     /// Moves an export's files, or a render and its timing file, to the Trash. A line's chosen take stays, and so does
-    /// a render the timeline or a pending timeline proposal uses.
+    /// a render the timeline or a pending timeline proposal uses, or that another version was made from. Deleting a
+    /// version made from a raw render leaves the raw one.
     func deleteOutput(_ id: String, in projectID: String) {
         guard let project = project(projectID) else { return }
         let urls: [URL]
         if let export = project.exports?.first(where: { $0.id == id }) {
             urls = export.files.map { URL(filePath: $0) }
         } else if let line = project.lines.first(where: { line in line.versions.contains { $0.id == id } }), line.chosen != id,
-                  !project.editedRenders.contains(id), let version = line.versions.first(where: { $0.id == id }) {
+                  !project.editedRenders.contains(id), !project.lines.contains(where: { $0.versions.contains { $0.source == id } }),
+                  let version = line.versions.first(where: { $0.id == id }) {
             let audio = audioURL(version, projectID: projectID)
             urls = [audio, audio.deletingPathExtension().appendingPathExtension("json")]
         } else { return }
@@ -441,7 +496,7 @@ final class ProjectStore {
         guard let edit = project.edit else {
             return project.lines.enumerated().compactMap { number, line in
                 line.chosenVersion.map { version in
-                    MixLine(audio: audioURL(version, projectID: projectID), text: version.text,
+                    MixLine(audio: audioURL(version, projectID: projectID), text: Marks.plain(version.text),
                             voice: voices.voice(version.voiceID)?.name ?? "Voice", pauseAfter: line.pauseAfter, number: number + 1)
                 }
             }
@@ -449,7 +504,7 @@ final class ProjectStore {
         var lines: [MixLine] = []
         for clip in edit.clips {
             guard let number = project.lines.firstIndex(where: { $0.id == clip.lineID }), let version = project.version(clip.versionID) else { continue }
-            lines.append(MixLine(audio: try await clipAudio(clip, in: projectID, engine: voices.engine), text: version.text,
+            lines.append(MixLine(audio: try await clipAudio(clip, in: projectID, engine: voices.engine), text: Marks.plain(version.text),
                                  voice: voices.voice(version.voiceID)?.name ?? "Voice", pauseAfter: clip.gapAfter, number: number + 1))
         }
         return lines
@@ -620,7 +675,8 @@ final class ProjectStore {
         timeline.projectID = projectID
         for (clip, start) in zip(edit.clips, edit.starts) {
             let audio = try await clipAudio(clip, in: projectID, engine: engine)
-            timeline.segments.append(Timeline.Segment(lineID: clip.lineID, audio: audio, start: start, duration: clip.duration, clipID: clip.id))
+            timeline.segments.append(Timeline.Segment(lineID: clip.lineID, audio: audio, start: start, duration: clip.duration, clipID: clip.id,
+                                                      versionID: clip.versionID, renderStart: clip.start, tempo: clip.effects.tempo))
         }
         timeline.duration = edit.duration
         return timeline
@@ -668,10 +724,12 @@ final class ProjectStore {
         var tries = 1
     }
 
-    /// Every line with text that has no version for its current text, voice and tone, each until it passes.
+    /// Every line with text that has no version for its current text, voice and tone: each rendered until it passes,
+    /// or, when only its marks changed, made at once from a version it has (`applyMarks`).
     func renderNeeded(_ projectID: String, voices: VoiceStore) {
         let lines = project(projectID)?.lines.filter(\.needsRender) ?? []
-        start(lines.map { Job(lineID: $0.id, tone: $0.tone, choose: true, tries: Version.tries) }, in: projectID, voices: voices)
+        for line in lines where !line.needsVoice { applyInBackground(line.id, in: projectID, voices: voices) }
+        start(lines.filter(\.needsVoice).map { Job(lineID: $0.id, tone: $0.tone, choose: true, tries: Version.tries) }, in: projectID, voices: voices)
     }
 
     /// A new version of one line, in its own tone, until one passes.
@@ -694,7 +752,19 @@ final class ProjectStore {
         return start([job], in: projectID, voices: voices)
     }
 
-    func cancel() { task?.cancel() }
+    /// Stops the render, and drops the lines waiting their turn (`queued`): their tasks fail with CancellationError.
+    func cancel() {
+        let waiting = lineQueue
+        lineQueue = []
+        queued = []
+        for entry in waiting { entry.finish(.failure(CancellationError())) }
+        task?.cancel()
+    }
+
+    /// The line's chosen version's audio.
+    func chosenAudio(line lineID: String, in projectID: String) -> URL? {
+        project(projectID)?.line(lineID)?.chosenVersion.map { audioURL($0, projectID: projectID) }
+    }
 
     /// The returned task fails with the render's error, which also shows in the app.
     @discardableResult
@@ -707,6 +777,7 @@ final class ProjectStore {
                 renderingLine = nil
                 renderTry = nil
                 self.task = nil
+                startQueued()
             }
             do { try await run(jobs, in: projectID, voices: voices) } catch is CancellationError { throw CancellationError() } catch {
                 self.error = "Render failed. \(error.localizedDescription)"
@@ -719,25 +790,28 @@ final class ProjectStore {
 
     /// Rounds of rendering: each renders its jobs, then scores them, so the engine swaps Breeze for Whisper once a round.
     /// A job whose version fails a check goes into the next round with a new seed, until it passes or runs out of tries.
-    /// A line that chooses gets the best version this run made, and the lines that never passed are reported.
+    /// A line that chooses gets the best version this run made, and the lines that never passed are reported. A job
+    /// whose text has marks renders raw versions; once it's done, its best one gets the marks (`markJob`).
     private func run(_ jobs: [Job], in projectID: String, voices: VoiceStore) async throws {
-        var pending = jobs, attempt = 0
-        var made: [String: [String]] = [:]
+        var pending = Array(jobs.indices), attempt = 0
+        var made = [[String]](repeating: [], count: jobs.count)
         while !pending.isEmpty {
             attempt += 1
             renderTry = attempt
-            let rendered = try await round(pending, in: projectID, voices: voices)
-            for (job, id) in rendered where job.choose { made[job.lineID, default: []].append(id) }
+            let rendered = try await round(pending.map { jobs[$0] }, in: projectID, voices: voices).map { (job: pending[$0.job], version: $0.version) }
+            for item in rendered { made[item.job].append(item.version) }
+            let done = Set(rendered.map(\.job))
             update(projectID) { project in
-                for index in project.lines.indices {
-                    guard let ids = made[project.lines[index].id] else { continue }
-                    let best = project.lines[index].versions.filter { ids.contains($0.id) }.max { $0.rank < $1.rank }
-                    if let best { project.lines[index].chosen = best.id }
+                for index in done where jobs[index].choose {
+                    guard let line = project.lines.firstIndex(where: { $0.id == jobs[index].lineID }) else { continue }
+                    let best = project.lines[line].versions.filter { made[index].contains($0.id) && $0.raw != true }.max { $0.rank < $1.rank }
+                    if let best { project.lines[line].chosen = best.id }
                 }
             }
-            pending = rendered.filter { job, id in
-                attempt < job.tries && project(projectID)?.lines.first { $0.id == job.lineID }?.versions.first { $0.id == id }?.passes == false
-            }.map(\.0)
+            pending = rendered.filter { item in
+                attempt < jobs[item.job].tries && project(projectID)?.version(item.version)?.passes == false
+            }.map(\.job)
+            for index in done.subtracting(pending).sorted() { try await markJob(jobs[index], made: made[index], in: projectID, voices: voices) }
         }
         guard let lines = project(projectID)?.lines else { return }
         let failing = jobs.filter { $0.tries > 1 }.compactMap { job -> Int? in
@@ -751,29 +825,41 @@ final class ProjectStore {
         }
     }
 
-    /// Renders every job, then scores them all. Returns each job with the version it made.
-    private func round(_ jobs: [Job], in projectID: String, voices: VoiceStore) async throws -> [(Job, String)] {
-        struct Rendered { var job: Job; var version: Version; var take: Take; var voice: Voice }
+    /// The marks applied to the best raw version a finished job made, as a new version; chosen if the job chooses.
+    private func markJob(_ job: Job, made ids: [String], in projectID: String, voices: VoiceStore) async throws {
+        guard let line = project(projectID)?.line(job.lineID),
+              let best = line.versions.filter({ ids.contains($0.id) && $0.raw == true }).max(by: { $0.rank < $1.rank }) else { return }
+        let version = try await mark(best.id, line: job.lineID, text: best.text, in: projectID, voices: voices)
+        if job.choose { replaceChosen(job.lineID, with: version.id, in: projectID) }
+    }
+
+    /// Renders every job, then scores them all. Returns each job's index with the version it made.
+    private func round(_ jobs: [Job], in projectID: String, voices: VoiceStore) async throws -> [(job: Int, version: String)] {
+        struct Rendered { var index: Int; var job: Job; var version: Version; var parsed: ParsedLine; var take: Take; var voice: Voice }
         let engine = voices.engine
         // A render counts as 10 steps and a score as 1.
         let steps = Double(jobs.count * 11)
         var done = 0.0
         progress = 0
         var rendered: [Rendered] = []
-        for job in jobs {
+        for (index, job) in jobs.enumerated() {
             try Task.checkCancellation()
             guard let lines = project(projectID)?.lines, let number = lines.firstIndex(where: { $0.id == job.lineID }) else { continue }
             let line = lines[number]
-            let text = job.text ?? line.text
+            let text = job.text ?? line.text, parsed = Marks.parse(text)
+            guard !parsed.spokenTokens.isEmpty else { throw AppError("Line \(number + 1) has no words to say.") }
             guard let voice = voices.voice(line.voiceID) else { throw AppError("Choose a voice for line \(number + 1).") }
             guard let take = voice.reference(job.tone) else { throw AppError("\u{201C}\(voice.name)\u{201D} has no takes. Add one in Clone.") }
+            // The voice gets the words with respellings in and the stressed words named; the marks wait for `mark`.
             var version = Version(id: UUID().uuidString, text: text, voiceID: voice.id, tone: job.tone,
-                                  direction: take.tone != job.tone, seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
+                                  direction: take.tone != job.tone, seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now,
+                                  raw: parsed.marks.isEmpty ? nil : true)
             renderingLine = line.id
             let start = done, clock = ContinuousClock.now
             version.duration = try await engine.render(
-                RenderLine(text: text, tone: job.tone, reference: voices.audioURL(take, voiceID: voice.id),
-                           referenceText: take.transcript, pronunciations: voice.pronunciationMap, seed: version.seed),
+                RenderLine(text: parsed.spokenText, tone: job.tone, reference: voices.audioURL(take, voiceID: voice.id),
+                           referenceText: take.transcript, pronunciations: voice.pronunciationMap, seed: version.seed,
+                           stress: parsed.stressWords),
                 to: audioURL(version, projectID: projectID)
             ) { value in Task { @MainActor in if self.progress != nil { self.progress = (start + value * 10) / steps } } }
             let elapsed = ContinuousClock.now - clock
@@ -781,9 +867,9 @@ final class ProjectStore {
                                audio: version.duration)
             updateLine(projectID, line.id) { line in
                 line.versions.append(version)
-                if job.choose, line.chosen == nil || !(line.chosenVersion?.passes ?? false) { line.chosen = version.id }
+                if job.choose, version.raw != true, line.chosen == nil || !(line.chosenVersion?.passes ?? false) { line.chosen = version.id }
             }
-            rendered.append(Rendered(job: job, version: version, take: take, voice: voice))
+            rendered.append(Rendered(index: index, job: job, version: version, parsed: parsed, take: take, voice: voice))
             done += 10
             progress = done / steps
         }
@@ -791,23 +877,343 @@ final class ProjectStore {
         // Each reference take's own Human score, once; renders more than 0.5 below it are flagged.
         for item in rendered { try await voices.scoreHuman(item.take, voiceID: item.voice.id) }
 
+        // A raw version's scores judge the voice: its audio has none of the script's pauses yet, so they aren't gaps.
         for item in rendered {
             try Task.checkCancellation()
             renderingLine = item.job.lineID
-            let scores = try await engine.score(audioURL(item.version, projectID: projectID),
+            let result = try await engine.score(audioURL(item.version, projectID: projectID),
                                                 reference: voices.audioURL(item.take, voiceID: item.voice.id),
-                                                text: item.version.text, hints: item.voice.pronunciations.map(\.word))
-                .paced(text: item.version.text, duration: item.version.duration, take: item.take)
+                                                text: Marks.plain(item.version.text), hints: hints(item.parsed, voice: item.voice),
+                                                tokens: item.parsed.spokenTokens)
+            let scores = result.scores.paced(text: item.version.text, duration: item.version.duration, take: item.take,
+                                             raw: item.version.raw == true)
             let referenceHuman = voices.voice(item.voice.id)?.takes.first { $0.id == item.take.id }?.human
-            updateLine(projectID, item.job.lineID) { line in
-                guard let index = line.versions.firstIndex(where: { $0.id == item.version.id }) else { return }
-                line.versions[index].scores = scores
-                line.versions[index].referenceHuman = referenceHuman
+            updateVersion(projectID, item.job.lineID, item.version.id) { version in
+                version.scores = scores
+                version.referenceHuman = referenceHuman
+                if let words = result.words, words.count == item.parsed.spokenTokens.count {
+                    version.words = words
+                    version.matched = result.matched
+                }
             }
             done += 1
             progress = done / steps
         }
-        return rendered.map { ($0.job, $0.version.id) }
+        return rendered.map { ($0.index, $0.version.id) }
+    }
+
+    private func updateVersion(_ projectID: String, _ lineID: String, _ versionID: String, _ change: (inout Version) -> Void) {
+        updateLine(projectID, lineID) { line in
+            if let index = line.versions.firstIndex(where: { $0.id == versionID }) { change(&line.versions[index]) }
+        }
+    }
+
+    /// Words Whisper should expect: the voice's respelled words, and each word a [say] respells, as written.
+    private func hints(_ parsed: ParsedLine, voice: Voice?) -> [String] {
+        var hints = voice?.pronunciations.map(\.word) ?? []
+        for token in parsed.tokens where token.say != nil {
+            let word = token.text.trimmingCharacters(in: .punctuationCharacters.union(.symbols))
+            if !word.isEmpty, !hints.contains(word) { hints.append(word) }
+        }
+        return hints
+    }
+
+    // MARK: Marks
+
+    /// Lines whose marks are being applied, for the UI.
+    private(set) var applying: Set<String> = []
+    @ObservationIgnored private var marking: [String: (token: UUID, task: Task<Bool, Error>)] = [:]
+
+    /// Brings a line up to date without the voice when only its marks differ from a version it has: from the best such
+    /// version (`Line.markSource`), timing its words first if it has none (a queued engine job), it applies the marks
+    /// (about 0.1 s) and chooses the result. A version that already plays the text is chosen instead. True once the
+    /// line's chosen version plays its text; false when it needs a render (`Line.needsVoice`). Runs beside a render;
+    /// two calls for one line take turns.
+    @discardableResult
+    func applyMarks(line lineID: String, in projectID: String, voices: VoiceStore) async throws -> Bool {
+        while let running = marking[lineID] { _ = try? await running.task.value }
+        let token = UUID()
+        let task = Task { () async throws -> Bool in
+            defer {
+                if marking[lineID]?.token == token {
+                    marking[lineID] = nil
+                    applying.remove(lineID)
+                }
+            }
+            return try await markLine(lineID, in: projectID, voices: voices)
+        }
+        marking[lineID] = (token, task)
+        applying.insert(lineID)
+        return try await task.value
+    }
+
+    private func applyInBackground(_ lineID: String, in projectID: String, voices: VoiceStore) {
+        applying.insert(lineID)
+        Task {
+            do { try await applyMarks(line: lineID, in: projectID, voices: voices) } catch is CancellationError {} catch {
+                self.error = "Couldn't apply the marks. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func markLine(_ lineID: String, in projectID: String, voices: VoiceStore) async throws -> Bool {
+        guard let line = project(projectID)?.line(lineID) else { return false }
+        switch need(line) {
+        case .nothing: return !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .existing(let versionID):
+            choose(versionID, line: lineID, in: projectID)
+            return true
+        case .voice: return false
+        case .marks: break
+        }
+        guard let source = line.markSource else { return false }
+        let version = try await mark(source.id, line: lineID, text: line.text, in: projectID, voices: voices)
+        replaceChosen(lineID, with: version.id, in: projectID)
+        return true
+    }
+
+    /// `text`'s marks applied to a source version's audio, as a new version of the line with the source's scores. The
+    /// source's words are timed first if it has none.
+    private func mark(_ sourceID: String, line lineID: String, text: String, in projectID: String, voices: VoiceStore) async throws -> Version {
+        guard var source = project(projectID)?.line(lineID)?.versions.first(where: { $0.id == sourceID }) else {
+            throw AppError("This line's render no longer exists.")
+        }
+        let parsed = Marks.parse(text), audio = audioURL(source, projectID: projectID)
+        if source.words?.count != parsed.spokenTokens.count {
+            let timed = try await voices.engine.timeWords(audio, tokens: parsed.spokenTokens, hints: hints(parsed, voice: voices.voice(source.voiceID)))
+            guard timed.words.count == parsed.spokenTokens.count else { throw AppError("Couldn't time this line's words.") }
+            source.words = timed.words
+            source.matched = timed.matched
+            updateVersion(projectID, lineID, sourceID) { $0.words = timed.words; $0.matched = timed.matched }
+        }
+        var version = Version(id: UUID().uuidString, text: text, voiceID: source.voiceID, tone: source.tone, direction: source.direction,
+                              seed: source.seed, duration: 0, createdAt: .now, scores: source.scores, referenceHuman: source.referenceHuman,
+                              matched: source.matched, source: source.id)
+        let result = try await voices.engine.applyMarks(audio, words: source.words ?? [], marks: parsed.marks,
+                                                        to: audioURL(version, projectID: projectID))
+        version.duration = result.duration
+        version.words = result.words
+        updateLine(projectID, lineID) { $0.versions.append(version) }
+        return version
+    }
+
+    /// Chooses a version made by applying marks. The chosen version it replaces is dropped, file and all, when it was
+    /// made the same way and nothing else uses it: not the timeline (or a step to undo or redo it), a pending timeline
+    /// proposal or another line.
+    private func replaceChosen(_ lineID: String, with versionID: String, in projectID: String) {
+        guard let project = project(projectID), let previous = project.line(lineID)?.chosenVersion else {
+            choose(versionID, line: lineID, in: projectID)
+            return
+        }
+        choose(versionID, line: lineID, in: projectID)
+        let history = (undoSteps[projectID] ?? []) + (redoSteps[projectID] ?? [])
+        guard previous.id != versionID, previous.source != nil, !project.editedRenders.contains(previous.id),
+              !history.contains(where: { $0.clips.contains { $0.versionID == previous.id } }),
+              !project.lines.contains(where: { $0.id != lineID && $0.chosen == previous.id }),
+              !project.lines.contains(where: { $0.versions.contains { $0.source == previous.id } }) else { return }
+        let audio = audioURL(previous, projectID: projectID)
+        for url in [audio, audio.deletingPathExtension().appendingPathExtension("json")] where files.fileExists(atPath: url.path) {
+            try? files.removeItem(at: url)
+        }
+        updateLine(projectID, lineID) { $0.versions.removeAll { $0.id == previous.id } }
+    }
+
+    // MARK: Committing a line
+
+    /// What a line needs for its current text, voice and tone.
+    private enum Need { case nothing, existing(String), marks, voice }
+
+    private func need(_ line: Line) -> Need {
+        guard line.needsRender else {
+            if let chosen = line.chosenVersion, line.reads(chosen) { return .nothing }
+            return line.versions.last(where: line.reads).map { .existing($0.id) } ?? .nothing
+        }
+        return line.needsVoice ? .voice : .marks
+    }
+
+    /// A line committed for a render, waiting its turn.
+    @MainActor private final class QueuedLine {
+        let lineID: String, projectID: String, voices: VoiceStore
+        private var result: Result<Void, Error>?
+        private var waiters: [CheckedContinuation<Void, Error>] = []
+
+        init(lineID: String, projectID: String, voices: VoiceStore) {
+            self.lineID = lineID
+            self.projectID = projectID
+            self.voices = voices
+        }
+
+        func finish(_ result: Result<Void, Error>) {
+            guard self.result == nil else { return }
+            self.result = result
+            for waiter in waiters { waiter.resume(with: result) }
+            waiters = []
+        }
+
+        func wait() async throws {
+            if let result { return try result.get() }
+            try await withCheckedThrowingContinuation { waiters.append($0) }
+        }
+    }
+
+    @ObservationIgnored private var lineQueue: [QueuedLine] = []
+    /// Lines committed while a render runs, in the order they'll render.
+    private(set) var queued: [String] = []
+
+    /// Brings a line up to date once its text, voice or tone is edited (on Return, or leaving the text), and gives its
+    /// chosen version's audio to play when ready. Nil when nothing is needed. A version that already plays the text is
+    /// chosen; a change to the marks alone is applied at once (`applyMarks`); anything else renders the line until it
+    /// passes, after the render running now and the lines committed before it (`queued`; one entry per line). The task
+    /// fails with the render's error, or CancellationError on `cancel()`.
+    func commitLine(_ lineID: String, in projectID: String, voices: VoiceStore) -> Task<URL?, Error>? {
+        guard let line = project(projectID)?.line(lineID) else { return nil }
+        switch need(line) {
+        case .nothing:
+            return nil
+        case .existing(let versionID):
+            choose(versionID, line: lineID, in: projectID)
+            let url = chosenAudio(line: lineID, in: projectID)
+            return Task { url }
+        case .marks:
+            applying.insert(lineID)
+            return Task {
+                if try await !applyMarks(line: lineID, in: projectID, voices: voices), project(projectID)?.line(lineID)?.needsVoice == true {
+                    try await enqueue(lineID, in: projectID, voices: voices).wait()
+                }
+                return chosenAudio(line: lineID, in: projectID)
+            }
+        case .voice:
+            let entry = enqueue(lineID, in: projectID, voices: voices)
+            return Task {
+                try await entry.wait()
+                return chosenAudio(line: lineID, in: projectID)
+            }
+        }
+    }
+
+    private func enqueue(_ lineID: String, in projectID: String, voices: VoiceStore) -> QueuedLine {
+        let entry = lineQueue.first { $0.lineID == lineID } ?? QueuedLine(lineID: lineID, projectID: projectID, voices: voices)
+        if !lineQueue.contains(where: { $0 === entry }) {
+            lineQueue.append(entry)
+            queued = lineQueue.map(\.lineID)
+        }
+        startQueued()
+        return entry
+    }
+
+    /// Starts queued lines while no render runs. A line is looked at again when its turn comes, as it may need less by then.
+    private func startQueued() {
+        while task == nil, !lineQueue.isEmpty {
+            let entry = lineQueue.removeFirst()
+            queued = lineQueue.map(\.lineID)
+            guard let line = project(entry.projectID)?.line(entry.lineID) else {
+                entry.finish(.success(()))
+                continue
+            }
+            switch need(line) {
+            case .nothing:
+                entry.finish(.success(()))
+            case .existing(let versionID):
+                choose(versionID, line: line.id, in: entry.projectID)
+                entry.finish(.success(()))
+            case .marks:
+                Task {
+                    do {
+                        try await applyMarks(line: entry.lineID, in: entry.projectID, voices: entry.voices)
+                        entry.finish(.success(()))
+                    } catch {
+                        entry.finish(.failure(error))
+                    }
+                }
+            case .voice:
+                let job = Job(lineID: line.id, tone: line.tone, choose: true, tries: Version.tries)
+                guard let render = start([job], in: entry.projectID, voices: entry.voices) else {
+                    entry.finish(.failure(AppError("An audition or voice check is running. Try again when it finishes.")))
+                    continue
+                }
+                Task {
+                    do {
+                        try await render.value
+                        entry.finish(.success(()))
+                    } catch {
+                        entry.finish(.failure(error))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Word times and pace
+
+    /// The version's display-token times (`ParsedLine.tokens` of its text); nil until its words are timed.
+    func displayTimes(_ version: Version) -> [WordTime]? {
+        version.words.flatMap { Marks.displayTimes(Marks.parse(version.text), spoken: $0) }
+    }
+
+    @ObservationIgnored private var timing: Task<Void, Never>?
+
+    /// Times the words of each line's chosen version that has none, one at a time in the background. Call when a
+    /// project opens in Generate or Timeline. Does nothing while a render runs or it's already timing, and stops when a
+    /// render starts; a version that can't be timed stays untimed, quietly.
+    func timeWordsIfNeeded(_ projectID: String, voices: VoiceStore) {
+        guard task == nil, timing == nil else { return }
+        timing = Task {
+            defer { timing = nil }
+            var tried = Set<String>()
+            while task == nil, let (lineID, version) = untimed(projectID, skipping: tried) {
+                tried.insert(version.id)
+                let parsed = Marks.parse(version.text)
+                guard let timed = try? await voices.engine.timeWords(audioURL(version, projectID: projectID), tokens: parsed.spokenTokens,
+                                                                     hints: hints(parsed, voice: voices.voice(version.voiceID))),
+                      timed.words.count == parsed.spokenTokens.count else { continue }
+                updateVersion(projectID, lineID, version.id) { $0.words = timed.words; $0.matched = timed.matched }
+            }
+        }
+    }
+
+    /// The first line whose chosen version has no word times and could get them.
+    private func untimed(_ projectID: String, skipping: Set<String>) -> (String, Version)? {
+        for line in project(projectID)?.lines ?? [] {
+            guard let version = line.chosenVersion, version.words == nil, !skipping.contains(version.id),
+                  !Marks.parse(version.text).spokenTokens.isEmpty, files.fileExists(atPath: audioURL(version, projectID: projectID).path)
+            else { continue }
+            return (line.id, version)
+        }
+        return nil
+    }
+
+    /// Words a minute, clamped to `Project.paceTargets`; nil goes back to each version's take.
+    func setPaceTarget(_ wordsPerMinute: Double?, in projectID: String) {
+        if let wordsPerMinute, !wordsPerMinute.isFinite { return }
+        update(projectID) { $0.paceTarget = wordsPerMinute.map { $0.clamped(Project.paceTargets) } }
+    }
+
+    /// The pace of the line's chosen version against the project's target, else its take's. Nil until it's timed.
+    func paceReport(line lineID: String, in projectID: String) -> PaceReport? {
+        guard let project = project(projectID), let version = project.line(lineID)?.chosenVersion, let times = displayTimes(version),
+              let target = Pace.target(projectOverride: project.paceTarget, referencePace: version.scores?.referencePace) else { return nil }
+        return Pace.report(Marks.parse(version.text), times: times, target: target)
+    }
+
+    /// Slows a rushed stretch of the line to 85% or speeds a dragging one to 115% (`range` is display tokens, as in
+    /// `PaceReport`), on top of any speed already there, then applies it like any marks change. Returns `applyMarks`'s
+    /// answer: false when the line needs a render first. Throws when the stretch isn't rushed or dragging.
+    @discardableResult
+    func fixPace(line lineID: String, range: ClosedRange<Int>, in projectID: String, voices: VoiceStore) async throws -> Bool {
+        guard let line = project(projectID)?.line(lineID) else { throw AppError("This line no longer exists.") }
+        guard let report = paceReport(line: lineID, in: projectID) else { throw AppError("This line's pace isn't known yet.") }
+        let change: Double
+        if report.rushed.contains(where: { $0.overlaps(range) }) {
+            change = 0.85
+        } else if report.dragging.contains(where: { $0.overlaps(range) }) {
+            change = 1.15
+        } else {
+            throw AppError("Those words are on pace.")
+        }
+        let tokens = Marks.parse(line.text).tokens
+        let current = tokens.indices.contains(range.lowerBound) ? tokens[range.lowerBound].speed ?? 1 : 1
+        setText(try Marks.setSpeed(current * change, tokens: range, in: line.text), line: lineID, in: projectID)
+        return try await applyMarks(line: lineID, in: projectID, voices: voices)
     }
 }
 
@@ -848,20 +1254,22 @@ enum Script {
         return out.joined(separator: "\n")
     }
 
-    /// The script rules a computer can check, each as a fix to make. The rest (key word last, contractions, emotion in
-    /// the words) live in the agents' instructions and the voice-direction skill.
+    /// The script rules a computer can check, each as a fix to make, after any tag the line can't use as written. The
+    /// rest (key word last, contractions, emotion in the words) live in the agents' instructions and the voice-direction
+    /// skill. Pauses are added after the render, so they no longer split the take.
     static func warnings(_ text: String) -> [String] {
-        let spoken = text.replacing(/\[[^\]]*\]/, with: " ")
-        var found: [String] = []
+        let parsed = Marks.parse(text)
+        let spoken = parsed.tokens.map(\.text).joined(separator: " ")
+        var found = parsed.problems
         if spoken.count > 600 {
             found.append("Over 600 characters, so the voice splits it into separate takes. Split the line at a sentence.")
         }
-        let pauses = text.matches(of: /\[\s*pause/.ignoresCase()).count
-        if pauses > 1 { found.append("\(pauses) [pause] tags, and each one splits the take. Use punctuation instead.") }
         if let longest = lines(spoken, by: .sentences).map({ $0.split(whereSeparator: \.isWhitespace).count }).max(), longest > 25 {
             found.append("A \(longest)-word sentence. Break it up; keep sentences under 25 words.")
         }
-        let symbols = Array(Set(spoken.matches(of: /\S*[0-9$%&@#€£¥+=\/]\S*/).map { String($0.output) })).sorted().prefix(3)
+        // A word with a [say] is already spelled out for the voice.
+        let unsaid = parsed.tokens.filter { $0.say == nil }.map(\.text).joined(separator: " ")
+        let symbols = Array(Set(unsaid.matches(of: /\S*[0-9$%&@#€£¥+=\/]\S*/).map { String($0.output) })).sorted().prefix(3)
         if !symbols.isEmpty {
             found.append("Write numbers and symbols as spoken words: " + symbols.map { "\u{201C}\($0)\u{201D}" }.joined(separator: ", ") + ".")
         }
