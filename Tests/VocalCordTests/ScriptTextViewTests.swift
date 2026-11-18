@@ -255,6 +255,29 @@ private func chip(_ kind: ParsedLine.Chip.Kind, in display: ScriptDisplay) -> Sc
     #expect(ScriptDisplay("plain words").underlines.isEmpty)
 }
 
+/// Rows at the table's 13 pt; chips are rounded rectangles a quarter as round as they're tall (never pills), and stress
+/// is rose, as amber means a warning.
+@Test func chipsAreRoundedRectanglesInDataHues() {
+    let row = ScriptTextMetrics(.row), read = ScriptTextMetrics(.read)
+    #expect(row.font.pointSize == 13 && read.font.pointSize == 26)
+    #expect(row.chipHeight == 16 && row.chipRadius == 4)
+    #expect(read.chipHeight == 26 && read.chipRadius == 6)
+    for metrics in [row, read] {
+        #expect(metrics.chipRadius == (metrics.chipHeight * 0.25).rounded(.toNearestOrEven))
+        #expect(metrics.chipRadius < metrics.chipHeight / 2)
+        #expect([11, 13, 15].contains(metrics.chipFont.pointSize))
+    }
+    let stress = ScriptTextMetrics.tint(ParsedLine.Chip.Kind.stress).usingColorSpace(.sRGB)!
+    #expect(abs(stress.redComponent - 0xD9 / 255.0) < 0.002 && abs(stress.greenComponent - 0x9B / 255.0) < 0.002
+        && abs(stress.blueComponent - 0xB0 / 255.0) < 0.002)
+    let amber = NSColor(Theme.amber).usingColorSpace(.sRGB)!
+    for kind in [ParsedLine.Chip.Kind.pause(1), .breath, .speed(0.8), .stress, .say("x"), .direction("calm")] {
+        let tint = ScriptTextMetrics.tint(kind).usingColorSpace(.sRGB)!
+        #expect(abs(tint.redComponent - amber.redComponent) + abs(tint.greenComponent - amber.greenComponent)
+            + abs(tint.blueComponent - amber.blueComponent) > 0.1)
+    }
+}
+
 @Test func chipLabelsAndAccessibility() {
     #expect(ScriptDisplay.label(.pause(0.5))?.text == "0.5s" && ScriptDisplay.label(.pause(0.5))?.symbol == "pause.fill")
     #expect(ScriptDisplay.label(.breath)?.text == "breath")
@@ -340,9 +363,11 @@ func snapshotsOfBothStyles() throws {
 func sizesLikeAVerticalTextField() {
     let (view, window) = host(sample, style: .row, width: 520)
     defer { window.close() }
-    // One line is a 14 pt line, as the TextField's; chips don't make a line taller.
-    #expect(view.height(forWidth: 5000) == 17)
-    #expect(ScriptTextNSView(style: .row).height(forWidth: 300) == 17)
+    // One line is a 13 pt line, the row's body size; chips don't make a line taller.
+    let line = ceil(NSLayoutManager().defaultLineHeight(for: .monospacedDigitSystemFont(ofSize: 13, weight: .regular)))
+    #expect(line == 16)
+    #expect(view.height(forWidth: 5000) == line)
+    #expect(ScriptTextNSView(style: .row).height(forWidth: 300) == line)
     // Narrower wraps onto more lines.
     #expect(view.height(forWidth: 300) > view.height(forWidth: 520))
     #expect(view.height(forWidth: 120) > view.height(forWidth: 300))

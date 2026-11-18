@@ -103,6 +103,44 @@ private func tokens(_ text: String) -> [ParsedLine.Token] { Marks.parse(text).to
     #expect(LineRow.status(line, renderingLine: nil, queued: [], applying: []) == .render)
 }
 
+@MainActor @Test func rowMarksSayWhatNeedsAttention() {
+    let plain = "One two three."
+    var line = Line(text: plain, voiceID: "me")
+    // No render yet: the grey bar, and VoiceOver hears why.
+    #expect(LineRow.mark(line) == .stale && LineRow.mark(line).color != nil)
+    #expect(LineRow.accessibilityLabel(line, number: 3) == "Line 3, not rendered")
+    line.versions = [version("v", text: plain)]
+    line.chosen = "v"
+    #expect(LineRow.mark(line) == .current && LineRow.mark(line).color == nil)
+    #expect(LineRow.accessibilityLabel(line, number: 3) == "Line 3")
+    line.text = "One two three four."
+    #expect(LineRow.mark(line) == .stale)
+    #expect(LineRow.accessibilityLabel(line, number: 3) == "Line 3, changed since render")
+    // A chosen version that failed a check: amber.
+    line.text = plain
+    line.versions[0].scores?.words = 60
+    #expect(!line.versions[0].flags.isEmpty)
+    #expect(LineRow.mark(line) == .flagged && LineRow.mark(line).color == Theme.amber)
+    #expect(LineRow.accessibilityLabel(line, number: 3) == "Line 3, failed a check")
+    // An empty line needs nothing.
+    #expect(LineRow.mark(Line(text: "  ", voiceID: "me")) == .current)
+}
+
+/// The narrowest window (1200 pt) with the default sidebar (200) leaves the script 742 pt beside a 256 pt side column,
+/// and every column fits in it, Jev's too, with room for a scroll bar that takes space.
+@Test func theScriptTableFitsTheNarrowestWindow() {
+    let detail = 1200.0 - 200 - 1
+    let side = GenerateView.sideWidth(detail: detail)
+    #expect(side == 256)
+    let script = detail - 1 - side
+    #expect(script == 742)
+    #expect(ScriptColumn.minimumWidth(jev: false) == 692 && ScriptColumn.minimumWidth(jev: true) == 724)
+    #expect(ScriptColumn.minimumWidth(jev: true) + 16 <= script)
+    // Wider windows give the preview more, up to 320.
+    #expect(GenerateView.sideWidth(detail: 1079) > 256 && GenerateView.sideWidth(detail: 1079) < 270)
+    #expect(GenerateView.sideWidth(detail: 3000) == 320 && GenerateView.sideWidth(detail: 600) == 256)
+}
+
 @MainActor @Test func rowsCompareWithoutTheirClosure() {
     let line = Line(text: "Hi.", voiceID: "me")
     let row = LineRow(projectID: "p", line: line, number: 1, isLast: true, lit: nil, paceTarget: nil, onCompare: {})
@@ -209,7 +247,6 @@ private func spoken(_ count: Int, each: Double, from start: Double) -> [WordTime
         .environment(Preview(player: player))
         .environment(Terminals(tools: tools, support: support))
         .panel()
-        .padding(8)
 }
 
 @MainActor @Test(.enabled(if: hasWindowServer, "Needs a window server to draw."))
@@ -223,21 +260,49 @@ func snapshotsOfTheScriptPanel() throws {
     let slow = try #require(projects.paceReport(line: second.id, in: project.id))
     #expect(slow.verdict != nil && !slow.dragging.isEmpty && !slow.gaps.isEmpty)
 
-    try snapshot(panel(projects, voices, project, jev: false), width: 1000, height: 420, name: "rows")
+    // 742 pt: the script pane in the narrowest window with the default sidebar.
+    try snapshot(panel(projects, voices, project, jev: false), width: 742, height: 420, name: "rows")
     projects.setPaceTarget(150, in: project.id)
     try snapshot(panel(projects, voices, try #require(projects.project(project.id)), jev: false), width: 1400, height: 420, name: "rows-1400")
 }
 
-/// The header with everything it can show (Jev added, two pending changes) at each width the panel can have: 544 pt is
-/// the narrowest (a 1200 pt window, the widest sidebar and the side panel open).
+/// The header with everything it can show (Jev added, two pending changes) at each width the panel can have: 622 pt is
+/// the narrowest (a 1200 pt window, the widest sidebar and the side column open), 742 the narrowest window with the
+/// default sidebar.
 @MainActor @Test(.enabled(if: hasWindowServer, "Needs a window server to draw."))
 func snapshotsOfTheHeader() throws {
     let (projects, voices, project) = try panelFixture(proposals: true)
-    for width: CGFloat in [544, 684, 1000, 1400] {
+    for width: CGFloat in [622, 742, 1000, 1400] {
         try snapshot(panel(projects, voices, project, jev: true), width: width, height: 150, name: "header-\(Int(width))")
     }
     let (plainProjects, plainVoices, plainProject) = try panelFixture(proposals: false)
-    try snapshot(panel(plainProjects, plainVoices, plainProject, jev: false), width: 544, height: 150, name: "header-544-plain")
+    try snapshot(panel(plainProjects, plainVoices, plainProject, jev: false), width: 622, height: 150, name: "header-622-plain")
     // The Pace menu's Custom… popover, which a menu can't open off-screen.
     try snapshot(CustomPacePopover(value: 163) { _ in }.background(Theme.selection), width: 260, height: 130, name: "pace-custom")
+}
+
+/// Narrower than its columns (the widest sidebar at 1200 pt), the table keeps every column and scrolls sideways, so
+/// Version and the render buttons stay reachable; at 742 pt it fits and doesn't.
+@MainActor @Test(.enabled(if: hasWindowServer, "Needs a window server to lay out."))
+func aNarrowTableScrollsSidewaysInsteadOfCuttingColumns() throws {
+    let (projects, voices, project) = try panelFixture(proposals: false)
+    func widestDocument(at width: CGFloat) -> CGFloat {
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: panel(projects, voices, project, jev: false).frame(width: width, height: 420))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 420), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        for _ in 0..<6 {
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: .now + 0.05)
+        }
+        func scrollViews(_ view: NSView) -> [NSScrollView] {
+            ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrollViews)
+        }
+        return scrollViews(host).compactMap { $0.documentView?.frame.width }.max() ?? 0
+    }
+    let minimum = ScriptColumn.minimumWidth(jev: false)
+    #expect(widestDocument(at: 622) >= minimum)
+    #expect(widestDocument(at: 742) <= 742)
 }

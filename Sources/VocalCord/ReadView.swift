@@ -60,14 +60,24 @@ enum ReadLayout {
     }
 
     /// The first baseline of a `.read` paragraph, from its top, so a line number sits on it.
-    static let firstBaseline: Double = {
+    static var firstBaseline: Double { firstLine.baseline }
+
+    /// The playing paragraph's bar beside its first line: from the top of the font's tallest letters to the bottom of
+    /// the line, measured from the paragraph's top.
+    static var firstLineMark: (top: Double, height: Double) {
+        let top = (firstLine.baseline - ScriptTextMetrics(.read).font.ascender).rounded()
+        return (top, firstLine.bottom.rounded(.down) - top)
+    }
+
+    private static let firstLine: (baseline: Double, bottom: Double) = {
         let storage = NSTextStorage(string: "A", attributes: ScriptTextMetrics(.read).attributes)
         let layout = NSLayoutManager(), container = NSTextContainer(size: NSSize(width: 1000, height: 1000))
         container.lineFragmentPadding = 0
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
         layout.ensureLayout(for: container)
-        return layout.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil).minY + layout.location(forGlyphAt: 0).y
+        let fragment = layout.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        return (fragment.minY + layout.location(forGlyphAt: 0).y, fragment.maxY)
     }()
 }
 
@@ -84,25 +94,21 @@ struct ReadView: View {
     let project: Project
     /// When the user last scrolled or clicked a word; following the playing line waits a few seconds after.
     @State private var touched = Date.distantPast
+    /// The Preview column has its own play button and time; with it open, the footer doesn't repeat them.
+    @AppStorage("generateSideOpen") private var previewOpen = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let lines = project.lines.enumerated().filter { !$0.element.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         VStack(spacing: 0) {
             if lines.isEmpty {
-                VStack(spacing: 6) {
-                    Text("The script is empty.")
-                    Text("Write or paste lines in Table, then listen to them here.").foregroundStyle(Theme.secondary)
-                }
-                .font(.system(size: 14))
-                .multilineTextAlignment(.center)
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyState(title: "The script is empty", message: "Write or paste lines in Table, then listen to them here.")
             } else {
                 // Player.time isn't observable, so a take playing on its own redraws on a timer.
                 TimelineView(.animation(minimumInterval: 0.05, paused: player.playing == nil && !preview.isPlaying)) { _ in
                     page(lines)
                 }
-                Theme.line.frame(height: 1).padding(.horizontal, 8)
+                Theme.line.frame(height: 1)
                 transport
             }
         }
@@ -129,17 +135,23 @@ struct ReadView: View {
                 }
                 .frame(maxWidth: ReadLayout.textWidth, alignment: .leading)
                 .padding(.horizontal, ReadLayout.margin)
-                .padding(.vertical, 40)
+                .padding(.vertical, 48)
                 .frame(maxWidth: .infinity)
             }
             .scrollBounceBehavior(.basedOnSize)
             .onScrollPhaseChange { old, new in
                 if Self.byUser(old) || Self.byUser(new) { touched = .now }
             }
-            // Keeps the playing line about a third of the way down, unless the user is looking elsewhere.
+            // Keeps the playing line about a third of the way down, unless the user is looking elsewhere. With Reduce
+            // Motion it jumps there.
             .onChange(of: playing?.lineID, initial: true) { _, id in
                 guard let id, Date.now.timeIntervalSince(touched) > 3 else { return }
-                withAnimation(.smooth(duration: 0.6)) { proxy.scrollTo(id, anchor: UnitPoint(x: 0.5, y: 0.3)) }
+                let anchor = UnitPoint(x: 0.5, y: 0.3)
+                if reduceMotion {
+                    proxy.scrollTo(id, anchor: anchor)
+                } else {
+                    withAnimation(.smooth(duration: 0.6)) { proxy.scrollTo(id, anchor: anchor) }
+                }
             }
         }
     }
@@ -168,22 +180,25 @@ struct ReadView: View {
         projects.commitAndPlay(line.id, in: project.id, voices: voices, player: player)
     }
 
+    /// Play and the time, unless the Preview column beside it shows them, then the hint.
     private var transport: some View {
-        HStack(spacing: 8) {
-            PlayToggle(spaceKey: false)
-            PlayTime().padding(.leading, 4)
+        HStack(spacing: 12) {
+            if !previewOpen {
+                PlayToggle(spaceKey: false)
+                PlayTime()
+            }
             Spacer(minLength: 16)
             ViewThatFits(in: .horizontal) {
                 Text("Click a word to play from it. Select words and right-click to direct them.")
                 Text("Click a word to play from it.")
                 Color.clear.frame(width: 0)
             }
-            .font(.system(size: 12))
+            .font(.vcCaption)
             .foregroundStyle(Theme.secondary)
             .lineLimit(1)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 52)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
     }
 }
 
@@ -206,24 +221,34 @@ private struct Paragraph: View {
             ScriptTextView(text: line.text, style: .read, lit: lit, placeholder: "", onCommand: onCommand, onWordClick: onWordClick)
                 // Nothing to play yet, so it reads as a draft.
                 .opacity(line.chosenVersion == nil ? 0.55 : 1)
-            if let hint { Text(hint).font(.system(size: 11)).foregroundStyle(Theme.secondary) }
+            if let hint { Text(hint).font(.vcCaption).foregroundStyle(Theme.secondary) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .topLeading) {
             Text("\(number)")
-                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .font(.vcCaption.monospacedDigit())
                 .foregroundStyle(playing ? Theme.text : Theme.secondary)
                 .alignmentGuide(.leading) { $0[.trailing] + 20 }
                 .alignmentGuide(.top) { $0[.firstTextBaseline] - baseline }
                 .accessibilityHidden(true)
+        }
+        // The playing paragraph's bar, between its number and its first line.
+        .overlay(alignment: .topLeading) {
+            if playing {
+                let mark = ReadLayout.firstLineMark
+                StatusBar(color: Theme.text)
+                    .frame(height: mark.height)
+                    .offset(x: -12, y: mark.top)
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.bottom, gap ?? 0)
         // The pause in the margin, in the middle of the space it makes, lined up under the numbers.
         .overlay(alignment: .bottomLeading) {
             if let gap, line.pauseAfter > 0 {
                 Text(ScriptDisplay.format(line.pauseAfter) + "s")
-                    .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(Theme.secondary.opacity(0.6))
+                    .font(.vcCaption.monospacedDigit())
+                    .foregroundStyle(Theme.tertiary)
                     .frame(width: ReadLayout.margin - 24, height: gap, alignment: .trailing)
                     .offset(x: -ReadLayout.margin + 4)
                     .accessibilityHidden(true)

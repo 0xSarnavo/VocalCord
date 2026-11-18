@@ -215,6 +215,37 @@ final class ScoreCounter: Sendable {
     #expect(!version.likeYouJudged && version.likeYouFlag == nil && version.wordsFlag != nil)
 }
 
+/// The preview's waveform is one continuous shape: the loudest peak under each column, holes where a line has no
+/// render, and never thinner than a line.
+@Test func waveformEnvelopeIsContinuous() {
+    #expect(WaveformEnvelope.columns([0.1, 0.9, 0.2, 0.4], count: 2) == [0.9, 0.4])
+    #expect(WaveformEnvelope.columns([0.5], count: 3) == [0.5, 0.5, 0.5])
+    #expect(WaveformEnvelope.columns([], count: 3).isEmpty && WaveformEnvelope.columns([1], count: 0).isEmpty)
+    let columns: [Float] = [0, 1, 1, 0, 0, 1]
+    let whole = WaveformEnvelope.path(columns, middle: 10, half: 8)
+    #expect(whole.boundingRect == CGRect(x: 0, y: 2, width: 6, height: 16))
+    // Silence still draws a 1 pt line, not nothing.
+    let quiet = WaveformEnvelope.path([0, 0], middle: 10, half: 8).boundingRect
+    #expect(quiet.height == 1 && quiet.width == 2)
+    // A hole for columns 3 and 4: two separate shapes, nothing drawn between them.
+    let holed = WaveformEnvelope.path(columns, middle: 10, half: 8) { !(3...4).contains($0) }
+    #expect(!holed.contains(CGPoint(x: 3.5, y: 10)) && !holed.contains(CGPoint(x: 4.5, y: 10)))
+    #expect(holed.contains(CGPoint(x: 1.5, y: 10)) && holed.contains(CGPoint(x: 5.5, y: 10)))
+    // The playhead's head: flat on top, its point at the bottom.
+    let head = WaveformEnvelope.head(at: 20, width: 9, height: 8)
+    #expect(head.boundingRect == CGRect(x: 15.5, y: 0, width: 9, height: 8))
+    #expect(head.contains(CGPoint(x: 16, y: 0.5)) && head.contains(CGPoint(x: 24, y: 0.5)) && !head.contains(CGPoint(x: 16, y: 7.5)))
+}
+
+/// An output's second line: format, length and the date with its year, so no column truncates the name.
+@MainActor @Test func outputDetailsIncludeTheYear() {
+    let date = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 11, day: 18))!
+    let output = Output(id: "o", name: "Line 6 · v1", url: URL(filePath: "/tmp/o.wav"), duration: 2.4, date: date)
+    let details = OutputsPane.details(output)
+    #expect(details.hasPrefix("WAV · 0:02 · "))
+    #expect(details.contains("2026") && details.contains("18"))
+}
+
 @Test func timelineKeepsPausesAndGaps() {
     func version(_ id: String, _ duration: Double) -> Version {
         Version(id: id, text: "x", voiceID: "me", tone: "Neutral", direction: false, seed: 1, duration: duration, createdAt: .now)

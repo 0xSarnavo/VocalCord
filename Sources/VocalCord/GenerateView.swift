@@ -11,94 +11,162 @@ struct GenerateView: View {
     @AppStorage("terminalHeight") private var terminalHeight = 300.0
     /// Preview and Outputs; folding them gives the script the room. Preview keeps its state and playback while folded.
     @AppStorage("generateSideOpen") private var sideOpen = true
-    @State private var width = 1036.0
+    /// Everything right of the sidebar, for the side column's width.
+    @State private var width = 999.0
+    /// The empty state's New project: the sidebar asks for the name, as its + does.
+    @State private var creating = false
 
     var body: some View {
         SidebarLayout {
-            ProjectsSidebar(selection: $selection)
+            ProjectsSidebar(selection: $selection, newRequest: $creating)
         } detail: {
             Group {
                 if let project = projects.project(selection) {
-                    let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
-                    HStack(spacing: 8) {
-                        GeometryReader { proxy in
-                            VStack(spacing: 8) {
-                                ScriptPane(project: project).id(project.id)
-                                    .frame(maxHeight: .infinity)
-                                    .panel()
-                                if terminalOpen {
-                                    // The script keeps room for its header and a few lines.
-                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
-                                }
-                            }
-                        }
-                        if sideOpen {
-                            VStack(spacing: 8) {
-                                PreviewPane(project: project) { sideOpen = false }
-                                OutputsPane(project: project).id(project.id)
-                            }
-                            // Narrow windows give the script the room; wide ones a larger preview.
-                            .frame(width: min(320, max(264, 264 + (width - 1036) * 0.15)))
-                        } else {
-                            FoldedSidePanel(title: "Preview") { sideOpen = true }
-                        }
-                    }
-                    .onGeometryChange(for: Double.self) { $0.size.width } action: { width = $0 }
-                    .task(id: timeline) { await preview.load(timeline) }
-                    .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
-                    // Renders made before word timing get their words in the background, for the read-along and the
-                    // pace notes; a render blocks it, so it tries again once the render finishes.
-                    .onChange(of: project.id, initial: true) { projects.timeWordsIfNeeded(project.id, voices: voices) }
-                    .onChange(of: projects.progress == nil) { _, idle in
-                        if idle { projects.timeWordsIfNeeded(project.id, voices: voices) }
-                    }
+                    workspace(project)
                 } else {
-                    Text("No projects").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
+                    EmptyState(title: "No projects yet", message: "A project holds one script, its voices and its renders.") {
+                        Button("New project") { creating = true }.buttonStyle(.vc(.primary, .l))
+                    }
+                    .panel()
                 }
             }
+            .onGeometryChange(for: Double.self) { $0.size.width } action: { width = $0 }
             .onDisappear { preview.pause() }
         }
-        .toolbar { toolbar }
+        .toolbar {
+            WorkspaceToolbar {
+                renderSlot
+                exportButton
+            }
+        }
+        .focusedSceneValue(\.renderAction, renderAction)
+        .focusedSceneValue(\.exportAction, exportAction)
         .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
     }
 
-    /// Native toolbar glass: Terminal, Render, then Export as the one off-white action, then the gear.
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) { TerminalButton() }
-        ToolbarSpacer(.fixed, placement: .primaryAction)
-        ToolbarItem(placement: .primaryAction) {
-            if let progress = projects.progress {
-                HStack(spacing: 8) {
-                    ProgressView(value: progress).frame(width: 90).padding(.leading, 10)
-                    // Lines that failed a check render again, keeping the best of up to five.
-                    if let attempt = projects.renderTry, attempt > 1 {
-                        Text("Try \(attempt) of \(Version.tries)").font(.system(size: 12)).foregroundStyle(Theme.secondary).monospacedDigit()
+    /// Edge to edge: the script, then Preview and Outputs, meeting at 1 pt dividers with no gaps and no frames.
+    private func workspace(_ project: Project) -> some View {
+        let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
+        return HStack(spacing: 0) {
+            GeometryReader { proxy in
+                VStack(spacing: 0) {
+                    ScriptPane(project: project).id(project.id)
+                        .frame(maxHeight: .infinity)
+                        .panel()
+                    if terminalOpen {
+                        // Its top edge is its own resizable divider. The script keeps room for its header and a few lines.
+                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
                     }
-                    Button("Cancel") { projects.cancel() }
                 }
+            }
+            PaneDivider()
+            sideColumn(project)
+        }
+        .task(id: timeline) { await preview.load(timeline) }
+        .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
+        // Renders made before word timing get their words in the background, for the read-along and the pace notes; a
+        // render blocks it, so it tries again once the render finishes.
+        .onChange(of: project.id, initial: true) { projects.timeWordsIfNeeded(project.id, voices: voices) }
+        .onChange(of: projects.progress == nil) { _, idle in
+            if idle { projects.timeWordsIfNeeded(project.id, voices: voices) }
+        }
+        .focusedSceneValue(\.toggleSidePanel, toggleSide)
+    }
+
+    @ViewBuilder private func sideColumn(_ project: Project) -> some View {
+        if sideOpen {
+            VStack(spacing: 0) {
+                // Laid out first, so the video gets the column's whole width and Outputs the height left.
+                PreviewPane(project: project) { sideOpen = false }
+                    .layoutPriority(1)
+                PaneDivider(axis: .horizontal)
+                OutputsPane(project: project).id(project.id)
+            }
+            .frame(width: Self.sideWidth(detail: width))
+        } else {
+            FoldedSidePanel(title: "Preview") { sideOpen = true }
+        }
+    }
+
+    private func toggleSide() { sideOpen.toggle() }
+
+    /// For the menu bar's Render and Export…: nil while there's nothing to do, which disables them.
+    private var renderAction: (() -> Void)? { canRender ? { render() } : nil }
+    private var exportAction: (() -> Void)? { canExport ? { exporting = true } : nil }
+
+    /// The Preview and Outputs column for a detail `width` wide (everything right of the sidebar): 256 at the narrowest
+    /// window with the default sidebar, so the script table fits, growing to 320 in wide windows.
+    static func sideWidth(detail width: Double) -> Double { min(320, max(256, 256 + (width - 1000) * 0.15)) }
+
+    // MARK: Toolbar
+
+    /// Lines with text and no render that reads it: what Render renders, or applies when only marks changed.
+    private var needed: Int { projects.project(selection)?.lines.count(where: \.needsRender) ?? 0 }
+    private var canRender: Bool { projects.progress == nil && voices.busy == nil && needed > 0 }
+    private var canExport: Bool { projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false }
+
+    private func render() { projects.renderNeeded(selection, voices: voices) }
+
+    /// Render, or its progress while it runs, in one slot as wide as the widest of them, so nothing beside it moves.
+    private var renderSlot: some View {
+        ZStack(alignment: .trailing) {
+            // Sizes the slot: progress with the retry count is the widest state.
+            renderProgress(value: 0, attempt: Version.tries).hidden().accessibilityHidden(true).allowsHitTesting(false)
+            if let progress = projects.progress {
+                renderProgress(value: progress, attempt: projects.renderTry)
             } else {
-                Button { projects.renderNeeded(selection, voices: voices) } label: { Label("Render", systemImage: "play.fill") }
-                    .labelStyle(.titleAndIcon)
-                    .disabled(voices.busy != nil || !(projects.project(selection)?.lines.contains(where: \.needsRender) ?? false))
-                    .help(voices.busy != nil ? "A voice check or audition is running" : "")
+                let count = needed
+                Button(action: render) {
+                    HStack(spacing: 6) {
+                        Text("Render")
+                        if count > 0 { Text("\(count)").foregroundStyle(Theme.secondary).monospacedDigit() }
+                    }
+                }
+                .buttonStyle(.vc(.secondary, .m))
+                .disabled(!canRender)
+                .help(voices.busy != nil ? "A voice check or audition is running"
+                      : count == 0 ? "Every line is up to date" : "Render the lines that need it (⌘R)")
+                .accessibilityLabel(count == 0 ? "Render" : "Render \(count) \(count == 1 ? "line" : "lines")")
             }
         }
-        ToolbarItem(placement: .primaryAction) {
-            Button { exporting = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
-                .labelStyle(.titleAndIcon)
-                .buttonStyle(.toolbarPrimary)
-                .disabled(!(projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false))
+    }
+
+    private func renderProgress(value: Double, attempt: Int?) -> some View {
+        HStack(spacing: 8) {
+            ProgressView(value: value)
+                .progressViewStyle(.linear)
+                .frame(width: 72)
+                .accessibilityLabel("Rendering")
+            // Lines that failed a check render again, keeping the best of up to five.
+            if let attempt, attempt > 1 {
+                Text("Try \(attempt) of \(Version.tries)").font(.vcCaption).foregroundStyle(Theme.secondary).monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            Button { projects.cancel() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.icon(.s))
+                .help("Cancel render")
+                .accessibilityLabel("Cancel render")
         }
-        .sharedBackgroundVisibility(.hidden)
-        ToolbarSpacer(.fixed, placement: .primaryAction)
-        ToolbarItem(placement: .primaryAction) { SettingsButton() }
+        .frame(height: VCSize.m.height)
+    }
+
+    /// The screen's one off-white action.
+    private var exportButton: some View {
+        Button("Export") { exporting = true }
+            .buttonStyle(.vc(.primary, .m))
+            .disabled(!canExport)
+            .help(canExport ? "Export (⇧⌘E)" : "Render a line first")
     }
 }
 
-/// The projects list in Generate and Timeline, with its New, Rename and Delete; it keeps a project selected.
+/// The projects list in Generate and Timeline, with its New, Rename and Delete; it keeps a project selected. It also
+/// gives the menu bar its New Project (⌘N).
 struct ProjectsSidebar: View {
     @Environment(ProjectStore.self) private var projects
     @Binding var selection: String
+    /// Set to ask for a new project's name, as the + does (Generate's empty state); the sidebar sets it back.
+    var newRequest: Binding<Bool> = .constant(false)
     @State private var naming: NameRequest?
     @State private var name = ""
     @State private var deleting: String?
@@ -110,22 +178,18 @@ struct ProjectsSidebar: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Projects").font(.system(size: 17, weight: .bold)).padding(.horizontal, 8)
-            Button { name = ""; naming = .new } label: { Label("New project", systemImage: "plus").frame(maxWidth: .infinity) }
-                .buttonStyle(.outline(height: 40))
+        VStack(spacing: 0) {
+            PanelHeader("Projects") {
+                Button(action: askForNew) { Image(systemName: "plus") }
+                    .buttonStyle(.icon(.s))
+                    .help("New project (⌘N)")
+                    .accessibilityLabel("New project")
+            }
             ScrollView {
-                VStack(spacing: 4) {
+                VStack(spacing: 2) {
                     ForEach(projects.projects) { project in
                         Button { selection = project.id } label: {
-                            Label(project.name, systemImage: "folder")
-                                .font(.system(size: 14))
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .frame(height: 38)
-                                .background(selection == project.id ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
-                                .contentShape(.rect)
+                            SidebarRow(title: project.name, systemImage: "folder", selected: selection == project.id)
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(selection == project.id ? .isSelected : [])
@@ -135,12 +199,18 @@ struct ProjectsSidebar: View {
                         }
                     }
                 }
+                .padding(8)
             }
             .scrollIndicators(.never)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
         .onAppear { if projects.project(selection) == nil { selection = projects.projects.first?.id ?? "" } }
+        .onChange(of: newRequest.wrappedValue) { _, requested in
+            guard requested else { return }
+            newRequest.wrappedValue = false
+            askForNew()
+        }
+        .focusedSceneValue(\.newItemAction, askForNew)
+        .focusedSceneValue(\.newItemTitle, "New Project")
         .alert(naming.map { if case .new = $0 { "New project" } else { "Rename project" } } ?? "",
                isPresented: Binding(present: $naming), presenting: naming) { request in
             TextField("Name", text: $name)
@@ -160,31 +230,53 @@ struct ProjectsSidebar: View {
             Text("Its renders move to the Trash.")
         }
     }
+
+    private func askForNew() {
+        name = ""
+        naming = .new
+    }
 }
 
 // MARK: Script
 
-/// Fixed widths; Text takes the rest. Voice fits a name of about 12 characters; a score column fits its heading and a
-/// flagged two-digit value.
-private enum Column {
-    static let text: CGFloat = 140
-    static let number: CGFloat = 22
-    static let voice: CGFloat = 112
-    static let tone: CGFloat = 90
+/// The script table's columns: fixed widths, and Text takes the rest. The header uses the same widths and insets as the
+/// cells. Voice fits a name of about 11 characters; a score column fits its heading and a flagged value.
+enum ScriptColumn {
+    /// The status bar and the line number.
+    static let number: CGFloat = 24
+    static let text: CGFloat = 136
+    static let voice: CGFloat = 100
+    static let tone: CGFloat = 88
     static let pause: CGFloat = 44
     static let like: CGFloat = 60
-    static let human: CGFloat = 50
-    static let words: CGFloat = 58
-    static let jev: CGFloat = 36
-    static let version: CGFloat = 80
-    static let gutter: CGFloat = 32
-    /// Between a number and its column's right edge, and a boxed control's text and its column's left edge.
-    static let inset: CGFloat = 8
+    static let human: CGFloat = 48
+    static let words: CGFloat = 56
+    static let jev: CGFloat = 32
+    static let version: CGFloat = 76
+    static let gutter: CGFloat = 28
+    /// From the pane's edges to the first and last columns.
+    static let edge: CGFloat = 16
+    /// A number's distance from its column's right edge.
+    static let trailing: CGFloat = 8
+    /// A pop-up's text from its column's left edge, which its heading shares.
+    static let leading: CGFloat = 6
+    /// Between the end of the text and the Voice column.
+    static let textGap: CGFloat = 8
+
+    /// The narrowest pane that shows every column: 692 pt, or 724 with Jev's, inside the 742 a 1200 pt window leaves.
+    static func minimumWidth(jev: Bool) -> CGFloat {
+        let fixed = number + voice + tone + pause + like + human + words + (jev ? self.jev : 0) + version + gutter
+        return edge * 2 + fixed + text
+    }
 }
+
+private typealias Column = ScriptColumn
 
 /// The Script panel's two views: the table of lines, or the whole script to read along.
 enum ScriptViewMode: String {
     case table, read
+
+    var title: String { self == .table ? "Table" : "Read" }
 }
 
 /// The Pace menu's choices, in words a minute; nil follows each line's take.
@@ -217,6 +309,8 @@ struct ScriptPane: View {
     @State private var comparing: [String]?
     @State private var customPace = false
     @State private var customValue = 150.0
+    /// The table's width, to tell when it's too narrow for every column.
+    @State private var tableWidth: CGFloat = 0
 
     /// How much of the header's actions fit: all of them, then Pace, Compare and Check in one menu, then Review too.
     private enum HeaderFit { case full, folded, compact }
@@ -226,7 +320,8 @@ struct ScriptPane: View {
             PanelHeader {
                 HStack(spacing: 12) {
                     Text("Script")
-                    modePicker
+                    SegmentedTabs(selection: $mode, options: [ScriptViewMode.table, .read], title: \.title, segmentWidth: 56, size: .s,
+                                  label: "Script view")
                 }
                 .fixedSize()
             } actions: {
@@ -236,7 +331,7 @@ struct ScriptPane: View {
                     actions(.compact)
                 }
                 // The Pace menu, or the menu that holds it, is the leftmost action in every fit.
-                .popover(isPresented: $customPace, attachmentAnchor: .rect(.rect(CGRect(x: 0, y: 0, width: 40, height: 30))),
+                .popover(isPresented: $customPace, attachmentAnchor: .rect(.rect(CGRect(x: 0, y: 0, width: 40, height: 24))),
                          arrowEdge: .bottom) {
                     CustomPacePopover(value: customValue) { value in
                         projects.setPaceTarget(value, in: project.id)
@@ -275,47 +370,53 @@ struct ScriptPane: View {
     private var renderable: [Line] { project.lines.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty } }
 
     private var table: some View {
+        let minimum = Column.minimumWidth(jev: jev.added)
+        // Narrower than every column needs (the widest sidebar in a small window): the table keeps its columns and
+        // scrolls sideways, rather than cut off Version and the render buttons. The allowance is for a scroll bar that
+        // takes room.
+        let narrow = tableWidth > 0 && tableWidth < minimum + 16
         // One clock for the read-along, here rather than per row: each tick gives only the playing row a new `lit`,
         // and rows are Equatable, so the others aren't redrawn.
-        TimelineView(.animation(minimumInterval: 0.05, paused: player.playing == nil && !preview.isPlaying)) { _ in
+        return TimelineView(.animation(minimumInterval: 0.05, paused: player.playing == nil && !preview.isPlaying)) { _ in
             let lit = ReadAlong.lit(in: project, projects: projects, preview: preview, player: player)
-            ScrollView {
-                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
-                // Leading, so a window too narrow for every column cuts off the last ones, never the text.
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
-                            LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
-                                    lit: LineRow.lit(lit, in: line), paceTarget: project.paceTarget,
-                                    onCompare: { comparing = [line.id] })
-                                .equatable()
-                            Theme.rule.frame(height: 1)
-                        }
-                        footer
-                    } header: {
-                        VStack(spacing: 0) {
-                            header
-                            Theme.line.frame(height: 1)
-                        }
-                        .background(Theme.content)
-                    }
+            if narrow {
+                ScrollView(.horizontal) {
+                    rows(lit).frame(width: minimum)
                 }
-                .padding(.horizontal, 8)
+                .scrollBounceBehavior(.basedOnSize)
+            } else {
+                rows(lit)
             }
-            .scrollIndicators(.automatic)
-            .scrollBounceBehavior(.basedOnSize)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { tableWidth = $0 }
     }
 
-    private var modePicker: some View {
-        Picker("Script view", selection: $mode) {
-            Text("Table").tag(ScriptViewMode.table)
-            Text("Read").tag(ScriptViewMode.read)
+    private func rows(_ lit: LitWord?) -> some View {
+        ScrollView {
+            // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it. Rows and
+            // their separators run to both edges; the rows carry their own inset.
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Section {
+                    ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
+                        LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
+                                lit: LineRow.lit(lit, in: line), paceTarget: project.paceTarget,
+                                onCompare: { comparing = [line.id] })
+                            .equatable()
+                        Theme.rule.frame(height: 1)
+                    }
+                    footer
+                } header: {
+                    // Leading, so the rule under a header wider than the pane starts at its edge.
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        Theme.line.frame(height: 1)
+                    }
+                    .background(Theme.content)
+                }
+            }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .font(.system(size: 13))
-        .fixedSize()
+        .scrollIndicators(.automatic)
+        .scrollBounceBehavior(.basedOnSize)
     }
 
     // MARK: Header actions
@@ -329,23 +430,24 @@ struct ScriptPane: View {
                 Menu {
                     paceOptions
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Text(PaceChoice.title(project.paceTarget))
                         Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
                     }
                 }
                 .menuStyle(.button)
-                .buttonStyle(.outline)
+                .buttonStyle(.vc(.ghost, .s))
                 .menuIndicator(.hidden)
+                .fixedSize()
                 .help("The pace the pace notes aim for")
                 .accessibilityLabel("Pace target")
                 .accessibilityValue(paceValue)
                 Button("Compare styles…") { comparing = renderable.map(\.id) }
-                    .buttonStyle(.outline)
+                    .buttonStyle(.vc(.secondary, .s))
                     .disabled(!canCompare)
                 if jev.added {
                     Button(jev.isChecking ? "Checking…" : "Check script", action: checkScript)
-                        .buttonStyle(.outline)
+                        .buttonStyle(.vc(.secondary, .s))
                         .disabled(!canCheck)
                 }
             } else {
@@ -361,23 +463,24 @@ struct ScriptPane: View {
                         Button("Review pace", action: reviewPace).disabled(!canReview)
                     }
                 } label: {
-                    Image(systemName: "ellipsis").frame(height: 14)
+                    Image(systemName: "ellipsis")
                 }
                 .menuStyle(.button)
-                .buttonStyle(.outline)
+                .buttonStyle(.icon(.s))
                 .menuIndicator(.hidden)
+                .fixedSize()
                 .help("More")
                 .accessibilityLabel("More script actions")
             }
             if fit != .compact {
                 Button("Review pace", action: reviewPace)
-                    .buttonStyle(.outline)
+                    .buttonStyle(.vc(.secondary, .s))
                     .disabled(!canReview)
-                    .help("Ask the terminal agent to review the pacing and propose changes")
+                    .help(canReview ? "Ask the terminal agent to review the pacing and propose changes" : "Render a line first")
             }
             if pending.count > 1 {
-                Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.outline)
-                Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.outline)
+                Button("Accept all") { projects.accept(pending, in: project.id) }.buttonStyle(.vc(.secondary, .s))
+                Button("Reject all") { projects.reject(pending, in: project.id) }.buttonStyle(.vc(.secondary, .s))
             }
         }
         .fixedSize()
@@ -419,36 +522,42 @@ struct ScriptPane: View {
         terminals.ask(Agent.reviewPacePrompt)
     }
 
+    /// Column headings, with what each score means on hover.
     private var header: some View {
         HStack(spacing: 0) {
-            Text("#").frame(width: Column.number, alignment: .leading)
-            Text("Text").padding(.horizontal, 6).frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
-            Text("Voice").padding(.leading, Column.inset).frame(width: Column.voice, alignment: .leading)
-            Text("Tone").padding(.leading, Column.inset).frame(width: Column.tone, alignment: .leading)
-            Text("Pause").padding(.trailing, Column.inset).frame(width: Column.pause, alignment: .trailing)
-            Text("Like you").padding(.trailing, Column.inset).frame(width: Column.like, alignment: .trailing)
-            Text("Human").padding(.trailing, Column.inset).frame(width: Column.human, alignment: .trailing)
-            Text("Words").padding(.trailing, Column.inset).frame(width: Column.words, alignment: .trailing)
-            if jev.added { Text("Jev").frame(width: Column.jev) }
-            Text("Version").padding(.leading, Column.inset + 4).frame(width: Column.version, alignment: .leading)
+            Text("#").padding(.leading, Column.leading).frame(width: Column.number, alignment: .leading)
+            Text("Text").padding(.trailing, Column.textGap).frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
+            Text("Voice").padding(.leading, Column.leading).frame(width: Column.voice, alignment: .leading)
+            Text("Tone").padding(.leading, Column.leading).frame(width: Column.tone, alignment: .leading)
+            Text("Pause").padding(.trailing, Column.trailing).frame(width: Column.pause, alignment: .trailing)
+                .help("Silence after the line, in seconds")
+            Text("Like you").padding(.trailing, Column.trailing).frame(width: Column.like, alignment: .trailing)
+                .help("How much the render sounds like you. Grey when the line is too short to judge.")
+            Text("Human").padding(.trailing, Column.trailing).frame(width: Column.human, alignment: .trailing)
+                .help("How natural it sounds, from 1 to 5")
+            Text("Words").padding(.trailing, Column.trailing).frame(width: Column.words, alignment: .trailing)
+                .help("How many of the words were heard as written")
+            if jev.added { Text("Jev").frame(width: Column.jev).help("Jev's checks of the line") }
+            Text("Version").padding(.leading, Column.leading).frame(width: Column.version, alignment: .leading)
             Color.clear.frame(width: Column.gutter)
         }
-        .font(.system(size: 12, weight: .medium))
+        .font(.vcCaptionBold)
         .foregroundStyle(Theme.secondary)
         .lineLimit(1)
-        .padding(.horizontal, 8)
-        .frame(height: 32)
+        .padding(.horizontal, Column.edge)
+        .frame(height: 28)
     }
 
+    /// Ghost buttons, their labels on the pane's 16 pt text edge.
     private var footer: some View {
         HStack(spacing: 8) {
             Button { projects.addLines([""], to: project.id, voices: voices) } label: { Label("Add line", systemImage: "plus") }
             Button("Paste…") { splitText = NSPasteboard.general.string(forType: .string) ?? "" }
             Button("Import…") { importing = true }
         }
-        .buttonStyle(.outline(height: 28))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 16)
+        .buttonStyle(.vc(.ghost, .s))
+        .padding(.horizontal, Column.edge - VCSize.s.padding)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -469,8 +578,39 @@ struct LineRow: View {
     let paceTarget: Double?
     let onCompare: () -> Void
     @State private var hovered = false
+    @State private var versionHovered = false
     /// Applying marks takes a moment; a spinner shows only when it takes longer, so the usual case doesn't flash.
     @State private var slowApply = false
+
+    /// The bar beside a line's number: nothing while its render is current, grey while it has none or its text changed
+    /// since, amber when the chosen version failed a check.
+    enum Mark: Equatable {
+        case current, stale, flagged
+
+        var color: Color? {
+            switch self {
+            case .current: nil
+            case .stale: Theme.secondary.opacity(0.6)
+            case .flagged: Theme.amber
+            }
+        }
+    }
+
+    static func mark(_ line: Line) -> Mark {
+        if line.needsRender { return .stale }
+        if let version = line.chosenVersion, !version.flags.isEmpty { return .flagged }
+        return .current
+    }
+
+    /// What VoiceOver says for the row: "Line 3, changed since render".
+    static func accessibilityLabel(_ line: Line, number: Int) -> String {
+        let state: String? = switch mark(line) {
+        case .current: nil
+        case .stale: line.chosenVersion == nil ? "not rendered" : "changed since render"
+        case .flagged: "failed a check"
+        }
+        return (["Line \(number)"] + (state.map { [$0] } ?? [])).joined(separator: ", ")
+    }
 
     var body: some View {
         let version = line.chosenVersion
@@ -478,8 +618,13 @@ struct LineRow: View {
         // A pending change takes room from the version cell for its Accept and Reject buttons.
         let decision: CGFloat = line.proposal == nil ? 0 : 22
         let isApplying = projects.applying.contains(line.id)
+        let playing = preview.currentLine == line.id
         HStack(spacing: 0) {
-            Text("\(number)").foregroundStyle(Theme.secondary).frame(width: Column.number, alignment: .leading)
+            Text("\(number)")
+                .font(.vcCaption.monospacedDigit())
+                .foregroundStyle(Theme.secondary)
+                .padding(.leading, Column.leading)
+                .frame(width: Column.number, alignment: .leading)
             // The script rules the line breaks show under its text, for the pending change while there is one.
             VStack(alignment: .leading, spacing: 4) {
                 if let proposal = line.proposal {
@@ -500,7 +645,7 @@ struct LineRow: View {
                     PaceNoteView(note: note, help: pace.verdict, busy: isApplying, onFix: fixPace)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.trailing, Column.textGap)
             .frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
             voiceMenu.frame(width: Column.voice)
             toneMenu.frame(width: Column.tone)
@@ -512,7 +657,7 @@ struct LineRow: View {
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
             if jev.added { JevCell(subject: JevSubject(line)).frame(width: Column.jev) }
-            versionControl.frame(width: Column.version - decision)
+            versionControl(playingRow: playing).frame(width: Column.version - decision)
             Group {
                 if line.proposal != nil {
                     DecisionButtons(label: line.added == true ? "new line \(number)" : "change to line \(number)",
@@ -522,16 +667,20 @@ struct LineRow: View {
                     statusCell
                 }
             }
-            .frame(width: Column.gutter + decision)
+            .frame(width: Column.gutter + decision, alignment: .trailing)
         }
-        .font(.system(size: 14).monospacedDigit())
-        .padding(.horizontal, 8)
-        .padding(.vertical, 9)
-        .frame(minHeight: 50)
-        .background {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(preview.currentLine == line.id ? Theme.selection : hovered ? Theme.hover : .clear)
-                .padding(.vertical, 2)
+        .font(.vcBody.monospacedDigit())
+        .padding(.horizontal, Column.edge)
+        .padding(.vertical, 8)
+        .frame(minHeight: 40)
+        // Rectangular, between the full-width separators: rows are a table, not cards.
+        .background(alignment: .leading) {
+            ZStack(alignment: .leading) {
+                Rectangle().fill(playing ? Theme.selection : hovered ? Theme.hover : .clear)
+                if let color = Self.mark(line).color {
+                    StatusBar(color: color).padding(.vertical, 8).padding(.leading, Column.edge)
+                }
+            }
         }
         .contentShape(.rect)
         .onHover { hovered = $0 }
@@ -550,6 +699,8 @@ struct LineRow: View {
             Divider()
             Button("Delete line", role: .destructive) { projects.deleteLine(line.id, in: projectID) }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Self.accessibilityLabel(line, number: number))
     }
 
     /// A score cell's flags: Like you also covers pitch, Human also covers pace and gaps.
@@ -564,12 +715,11 @@ struct LineRow: View {
                 Button(voice.name) { projects.setVoice(voice.id, line: line.id, in: projectID) }
             }
         } label: {
-            MenuBox(title: voices.voice(line.voiceID)?.name ?? "Choose", dim: voices.voice(line.voiceID) == nil)
+            InlinePopupLabel(title: voices.voice(line.voiceID)?.name ?? "Choose", dim: voices.voice(line.voiceID) == nil)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .padding(.horizontal, 3)
         .help(voices.voice(line.voiceID)?.name ?? "")
         .accessibilityLabel("Voice")
     }
@@ -580,12 +730,12 @@ struct LineRow: View {
                 Button(tone) { projects.setTone(tone, line: line.id, in: projectID) }
             }
         } label: {
-            MenuBox(title: line.tone)
+            InlinePopupLabel(title: line.tone)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .padding(.horizontal, 3)
+        // The whole column, so "Confident", the longest tone, fits beside the chevron.
         .accessibilityLabel("Tone")
     }
 
@@ -595,23 +745,24 @@ struct LineRow: View {
                       format: .number.precision(.fractionLength(0...2)))
                 .textFieldStyle(.plain)
                 .multilineTextAlignment(.trailing)
-                .frame(width: 30)
+                .frame(width: 28)
             Text("s")
         }
-        .padding(.trailing, Column.inset)
+        .padding(.trailing, Column.trailing)
         .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Pause after, seconds")
     }
 
-    /// The label plays the chosen version; the chevron picks another, which then plays. Raw renders, the hidden sources
-    /// of marked versions, are never listed or counted.
-    /// A pending change narrows the cell, so it gets smaller type.
-    @ViewBuilder private var versionControl: some View {
+    /// Borderless like the other pop-ups: the label plays the chosen version, the chevron picks another, which then
+    /// plays; a fill under the pointer, the selection grey while it plays. Raw renders, the hidden sources of marked
+    /// versions, are never listed or counted. A pending change narrows the cell, so it gets smaller type.
+    @ViewBuilder private func versionControl(playingRow: Bool) -> some View {
         let compact = line.proposal != nil
         let visible = line.visibleVersions
         if let version = line.chosenVersion, let index = visible.firstIndex(of: version) {
             let url = projects.audioURL(version, projectID: projectID)
+            let playing = player.playing == url
             HStack(spacing: 0) {
                 Button { player.toggle(url) } label: {
                     HStack(spacing: 4) {
@@ -620,13 +771,13 @@ struct LineRow: View {
                             Image(systemName: "text.bubble").font(.system(size: 10)).foregroundStyle(Theme.secondary)
                         }
                     }
-                    .padding(.leading, compact ? 6 : Column.inset + 1)
+                    .padding(.leading, Column.leading)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
                 .help(versionTitle(version, index))
-                .accessibilityLabel(player.playing == url ? "Stop" : "Play version \(index + 1)")
+                .accessibilityLabel(playing ? "Stop" : "Play version \(index + 1)")
                 Menu {
                     ForEach(Array(visible.enumerated()), id: \.element.id) { offset, item in
                         Button(versionTitle(item, offset)) {
@@ -636,10 +787,11 @@ struct LineRow: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "chevron.down")
+                    // Tertiary at rest like the other pop-ups' chevrons, but never on the selection grey.
+                    Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Theme.secondary)
-                        .frame(width: compact ? 14 : 20, height: 28)
+                        .foregroundStyle(versionHovered || playing || playingRow ? Theme.secondary : Theme.tertiary)
+                        .frame(width: compact ? 14 : 18, height: VCSize.s.height)
                         .contentShape(.rect)
                 }
                 .menuStyle(.button)
@@ -647,11 +799,11 @@ struct LineRow: View {
                 .menuIndicator(.hidden)
                 .accessibilityLabel("Versions")
             }
-            .font(.system(size: compact ? 11 : 13).monospacedDigit())
-            .frame(height: 28)
-            .background(player.playing == url ? Theme.selection : .clear, in: .rect(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-            .padding(.horizontal, compact ? 2 : 3)
+            .font((compact ? Font.vcCaption : .vcBody).monospacedDigit())
+            .frame(height: VCSize.s.height)
+            .background(playing ? Theme.selection : versionHovered ? Theme.hover : .clear, in: .rect(cornerRadius: VCSize.s.radius))
+            .onHover { versionHovered = $0 }
+            .padding(.trailing, compact ? 2 : 4)
         } else {
             // Nothing rendered yet: an empty cell, not a dash.
             Color.clear
@@ -682,26 +834,28 @@ struct LineRow: View {
         let status = Self.status(line, renderingLine: projects.renderingLine, queued: projects.queued, applying: projects.applying)
         switch status {
         case .rendering:
-            ProgressView().controlSize(.small)
+            ProgressView().controlSize(.small).frame(width: VCSize.s.height, height: VCSize.s.height)
         case .waiting:
             Image(systemName: "clock")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13))
                 .foregroundStyle(Theme.secondary)
-                .frame(width: 28, height: 28)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(width: VCSize.s.height, height: VCSize.s.height)
                 .help("Waiting… It renders after the line ahead of it.")
                 .accessibilityElement()
                 .accessibilityLabel("Line \(number) waiting to render")
         case .applying where slowApply:
-            ProgressView().controlSize(.small)
+            ProgressView().controlSize(.small).frame(width: VCSize.s.height, height: VCSize.s.height)
         case .applying, .apply, .render:
             // Kept as is while marks apply, so the usual quick apply doesn't flash a new state.
             rerenderButton(apply: status != .render)
         }
     }
 
+    /// Bright and always there while the line needs a render or its marks applied; otherwise rendering again is a
+    /// choice, so it waits for the pointer to come over the row.
     private func rerenderButton(apply: Bool) -> some View {
-        Button {
+        let needed = line.needsRender
+        return Button {
             if apply {
                 guard !projects.applying.contains(line.id) else { return }
                 commit()
@@ -709,14 +863,14 @@ struct LineRow: View {
                 projects.rerender(line.id, in: projectID, voices: voices)
             }
         } label: {
-            Image(systemName: "arrow.clockwise")
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28)
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-                .contentShape(.rect)
+            if needed {
+                Image(systemName: "arrow.clockwise").foregroundStyle(Theme.text)
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
         }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .buttonStyle(.icon(.s))
+        .opacity(needed || hovered ? 1 : 0)
         // Applying marks doesn't use the voice model, so it can run beside a render.
         .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || !apply && (projects.progress != nil || voices.busy != nil))
         .help(apply ? "Apply the changed pauses and speeds, without a new render" : "Render again, until a version passes")
@@ -855,13 +1009,13 @@ private struct PaceNoteView: View {
                 Button(fix.title) { onFix(range) }
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.text)
-                    .fontWeight(.medium)
+                    .fontWeight(.semibold)
                     .fixedSize()
                     .disabled(busy)
                     .accessibilityLabel(note.fixLabel ?? fix.title)
             }
         }
-        .font(.system(size: 12))
+        .font(.vcCaption)
         .help(help ?? "")
     }
 }
@@ -872,8 +1026,8 @@ struct CustomPacePopover: View {
     let onSet: (Double) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Pace target").font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Pace target").font(.vcBodyBold)
             HStack(spacing: 8) {
                 TextField("150", value: $value, format: .number.precision(.fractionLength(0)))
                     .textFieldStyle(.roundedBorder)
@@ -885,19 +1039,19 @@ struct CustomPacePopover: View {
             }
             HStack {
                 Text("\(Int(Project.paceTargets.lowerBound)) to \(Int(Project.paceTargets.upperBound))")
-                    .font(.system(size: 11))
+                    .font(.vcCaption.monospacedDigit())
                     .foregroundStyle(Theme.secondary)
                 Spacer(minLength: 12)
-                Button("Set") { onSet(value) }.buttonStyle(.outline(height: 28)).keyboardShortcut(.defaultAction)
+                Button("Set") { onSet(value) }.buttonStyle(.vc(.primary, .m)).keyboardShortcut(.defaultAction)
             }
         }
-        .font(.system(size: 13))
-        .padding(14)
+        .font(.vcBody)
+        .padding(16)
         .frame(width: 240)
     }
 }
 
-/// ✓ and ✕ for a change an agent proposed.
+/// ✓ and ✕ for a change an agent proposed: icon buttons, no outlines.
 struct DecisionButtons: View {
     /// What is decided, for VoiceOver: "Accept change to line 3".
     let label: String
@@ -912,15 +1066,9 @@ struct DecisionButtons: View {
     }
 
     private func button(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 24, height: 28)
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-                .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .help(help)
+        Button(action: action) { Image(systemName: icon) }
+            .buttonStyle(.icon(.s))
+            .help(help)
     }
 }
 
@@ -943,7 +1091,7 @@ private struct ProposalText: View {
             }
             Text(proposal.text)
             if !changes.isEmpty {
-                Text(changes.joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                Text(changes.joined(separator: " · ")).font(.vcCaption).foregroundStyle(Theme.secondary)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -953,27 +1101,8 @@ private struct ProposalText: View {
     private func seconds(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...2))) + "s" }
 }
 
-/// A menu's label: title and chevron in a thin outline.
-private struct MenuBox: View {
-    let title: String
-    var dim = false
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Text(title).lineLimit(1).foregroundStyle(dim ? Theme.secondary : Theme.text).frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
-        }
-        .font(.system(size: 13))
-        .padding(.leading, Column.inset - 3)
-        .padding(.trailing, 6)
-        .frame(height: 28)
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-        .contentShape(.rect)
-    }
-}
-
-/// A score as a number, right-aligned so values line up row to row; a low one gets the amber triangle, a bold value
-/// and its reason on hover. A dim one is shown but not judged. No score leaves the cell empty.
+/// A score as a number, right-aligned so values line up row to row; a low one gets the amber triangle, a semibold
+/// value and its reason on hover. A dim one is shown but not judged. No score leaves the cell empty.
 private struct ScoreCell: View {
     let value: String?
     let flag: String?
@@ -981,18 +1110,18 @@ private struct ScoreCell: View {
     var help: String?
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 4) {
             if flag != nil {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Theme.amber)
             }
             if let value {
                 Text(value)
-                    .fontWeight(flag == nil ? .regular : .bold)
+                    .fontWeight(flag == nil ? .regular : .semibold)
                     .foregroundStyle(dim ? Theme.secondary : Theme.text)
             }
         }
         .lineLimit(1)
-        .padding(.trailing, Column.inset)
+        .padding(.trailing, Column.trailing)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .contentShape(.rect)
         .help(flag ?? help ?? "")
@@ -1050,7 +1179,7 @@ struct SplitSheet: View {
         let lines = Script.lines(Script.plainText(text), by: split)
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Split into lines").font(.system(size: 22, weight: .bold))
+                Text("Split into lines").font(.vcTitle)
                 Spacer()
                 Picker("Split", selection: $split) {
                     ForEach(ScriptSplit.allCases) { Text($0.rawValue).tag($0) }
@@ -1060,20 +1189,20 @@ struct SplitSheet: View {
                 .frame(width: 220)
             }
             TextEditor(text: $text)
-                .font(.system(size: 14))
+                .font(.vcBody)
                 .scrollContentBackground(.hidden)
                 .padding(8)
-                .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.line))
+                .background(Theme.hover, in: .rect(cornerRadius: Radius.card))
+                .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
                 .frame(height: 280)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Cancel") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
                 Button(lines.count == 1 ? "Add 1 line" : "Add \(lines.count) lines") {
                     onAdd(lines)
                     dismiss()
                 }
-                .buttonStyle(.primary(height: 32))
+                .buttonStyle(.vc(.primary, .m))
                 .keyboardShortcut(.defaultAction)
                 .disabled(lines.isEmpty)
             }
@@ -1096,12 +1225,12 @@ struct CompareSheet: View {
 
     var body: some View {
         let count = lines.count * tones.count
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Compare styles").font(.system(size: 22, weight: .bold))
+                Text("Compare styles").font(.vcTitle)
                 Text(title).foregroundStyle(Theme.secondary)
             }
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], spacing: 10) {
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], spacing: 8) {
                 ForEach(Tone.all, id: \.self) { tone in
                     Toggle(isOn: Binding(get: { tones.contains(tone) },
                                          set: { if $0 { tones.insert(tone) } else { tones.remove(tone) } })) {
@@ -1113,14 +1242,14 @@ struct CompareSheet: View {
                     .toggleStyle(.checkbox)
                 }
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Cancel") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
                 Button(count == 1 ? "Render 1 version" : "Render \(count) versions") {
                     onRender(Tone.all.filter(tones.contains))
                     dismiss()
                 }
-                .buttonStyle(.primary(height: 32))
+                .buttonStyle(.vc(.primary, .m))
                 .keyboardShortcut(.defaultAction)
                 .disabled(count == 0)
             }

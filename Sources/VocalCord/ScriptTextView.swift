@@ -8,7 +8,7 @@ import SwiftUI
 /// One line of the script, edited in a row (`.row`) or read along while it plays (`.read`). Values in, closures out.
 struct ScriptTextView: NSViewRepresentable {
     enum Style {
-        /// Editable, 14 pt, wraps and grows in height like a vertical TextField.
+        /// Editable, 13 pt like the rest of a table row, wraps and grows in height like a vertical TextField.
         case row
         /// Not editable but selectable, large, with generous line height.
         case read
@@ -391,7 +391,7 @@ struct ScriptDisplay: Sendable {
 
     // MARK: Chip text
 
-    /// A chip's pill: an SF Symbol, its text, and whether it's a direction (drawn in italics). Nil for a wrap's end,
+    /// A chip's label: an SF Symbol, its text, and whether it's a direction (drawn in italics). Nil for a wrap's end,
     /// drawn as a small cap.
     static func label(_ kind: ParsedLine.Chip.Kind) -> (symbol: String?, text: String, italic: Bool)? {
         switch kind {
@@ -521,7 +521,8 @@ struct ScriptTextMetrics {
     let dim = NSColor(Theme.secondary)
     let chipFont: NSFont
     let chipHeight: CGFloat
-    let chipBaseline: CGFloat          // the pill's bottom, from the text's baseline
+    let chipRadius: CGFloat            // a quarter of the height: rounded rectangles, never pills
+    let chipBaseline: CGFloat          // the chip's bottom, from the text's baseline
     let chipPadding: CGFloat
     let chipMargin: CGFloat
     let chipMaxLabel: CGFloat
@@ -535,14 +536,15 @@ struct ScriptTextMetrics {
         let paragraph = NSMutableParagraphStyle()
         switch style {
         case .row:
-            // The row's TextField font: 14 pt with monospaced digits.
-            font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
-            chipFont = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+            // The row's body font: 13 pt with monospaced digits.
+            font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            chipFont = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             lineMultiple = 1
             // Room for a nested wrap's lower underline above the next line's chips.
             lineGap = 3
             color = NSColor(Theme.text)
             chipHeight = 16
+            chipRadius = 4
             chipPadding = 6
             chipMargin = 2
             chipMaxLabel = 220
@@ -553,11 +555,12 @@ struct ScriptTextMetrics {
             underlineThickness = 1.25
         case .read:
             font = .systemFont(ofSize: 26, weight: .regular)
-            chipFont = .monospacedDigitSystemFont(ofSize: 16, weight: .medium)
+            chipFont = .monospacedDigitSystemFont(ofSize: 15, weight: .regular)
             lineMultiple = 1.3
             lineGap = 0
             color = NSColor(Theme.secondary)
             chipHeight = 26
+            chipRadius = 6
             chipPadding = 9
             chipMargin = 3
             chipMaxLabel = 360
@@ -569,18 +572,18 @@ struct ScriptTextMetrics {
         }
         paragraph.lineHeightMultiple = lineMultiple
         self.paragraph = paragraph
-        // The pill centred on the text's capitals, so it sits on the line like a word.
+        // The chip centred on the text's capitals, so it sits on the line like a word.
         chipBaseline = ((font.capHeight - chipHeight) / 2).rounded()
     }
 
     var attributes: [NSAttributedString.Key: Any] { [.font: font, .foregroundColor: color, .paragraphStyle: paragraph] }
 
-    /// Each kind's tint, muted for the dark theme.
+    /// Each kind's tint, muted for the dark theme. Data hues, not accents; amber stays for warnings, so stress is rose.
     static func tint(_ kind: ParsedLine.Chip.Kind) -> NSColor {
         switch kind {
         case .pause, .breath: rgb(0xA4A9AF)
         case .speed, .speedEnd: rgb(0x7FA8E0)
-        case .stress, .stressEnd: NSColor(Theme.amber)
+        case .stress, .stressEnd: rgb(0xD99BB0)
         case .say, .sayEnd: rgb(0x85C7A0)
         case .direction: rgb(0xB8A2E8)
         }
@@ -599,7 +602,7 @@ struct ScriptTextMetrics {
     }
 }
 
-/// Draws one chip: a small tinted pill, or a narrow cap for a wrap's end.
+/// Draws one chip: a small tinted rounded rectangle, or a narrow cap for a wrap's end.
 final class ScriptChipCell: NSTextAttachmentCell {
     let kind: ParsedLine.Chip.Kind
     // Set once in init; the text system asks for the size from outside the main actor's view of things.
@@ -625,7 +628,7 @@ final class ScriptChipCell: NSTextAttachmentCell {
                 label.addAttribute(.foregroundColor, value: text.withAlphaComponent(0.6), range: NSRange(location: 0, length: 4))
             }
             self.label = label
-            let configuration = NSImage.SymbolConfiguration(pointSize: metrics.chipFont.pointSize * 0.8, weight: .bold)
+            let configuration = NSImage.SymbolConfiguration(pointSize: metrics.chipFont.pointSize * 0.8, weight: .semibold)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [text]))
             symbol = parts.symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil)?.withSymbolConfiguration(configuration) }
         } else {
@@ -659,16 +662,16 @@ final class ScriptChipCell: NSTextAttachmentCell {
 
     override func draw(withFrame frame: NSRect, in view: NSView?) {
         guard let label else {
-            // A wrap's end: a slim cap just after the word before it, shorter than a pill so it doesn't read as one.
+            // A wrap's end: a slim cap just after the word before it, shorter than a chip so it doesn't read as one.
             let height = (frame.height * 0.62).rounded()
             let cap = NSRect(x: frame.minX + metrics.chipMargin / 2, y: frame.midY - height / 2, width: metrics.endWidth, height: height)
             tint.withAlphaComponent(0.6).setFill()
-            NSBezierPath(roundedRect: cap, xRadius: metrics.endWidth / 2, yRadius: metrics.endWidth / 2).fill()
+            NSBezierPath(roundedRect: cap, xRadius: 1, yRadius: 1).fill()
             return
         }
         let box = frame.insetBy(dx: metrics.chipMargin, dy: 0)
         let pill = box.insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2)
+        let path = NSBezierPath(roundedRect: pill, xRadius: metrics.chipRadius, yRadius: metrics.chipRadius)
         tint.withAlphaComponent(0.15).setFill()
         path.fill()
         tint.withAlphaComponent(0.32).setStroke()
@@ -1421,7 +1424,7 @@ final class ScriptCommandList {
         let pick: (Int) -> Void
         var selected = 0
         var problem: String?
-        private let row: CGFloat = 24, inset: CGFloat = 5, width: CGFloat = 188
+        private let row: CGFloat = 24, inset: CGFloat = 4, width: CGFloat = 188
         private let font = NSFont.systemFont(ofSize: 13)
 
         init(items: [(title: String, tint: NSColor)], pick: @escaping (Int) -> Void) {
@@ -1470,7 +1473,8 @@ final class ScriptCommandList {
         }
 
         override func draw(_ dirtyRect: NSRect) {
-            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9)
+            // A card's radius, and its items concentric inside it: 8 − 4.
+            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Radius.card, yRadius: Radius.card)
             NSColor(srgbRed: 0.105, green: 0.112, blue: 0.122, alpha: 0.98).setFill()
             shape.fill()
             NSColor(white: 1, alpha: 0.12).setStroke()
@@ -1479,10 +1483,10 @@ final class ScriptCommandList {
                 let rect = NSRect(x: inset, y: inset + row * CGFloat(index), width: bounds.width - inset * 2, height: row)
                 if index == selected {
                     NSColor(white: 1, alpha: 0.1).setFill()
-                    NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
+                    NSBezierPath(roundedRect: rect, xRadius: Radius.card - inset, yRadius: Radius.card - inset).fill()
                 }
                 item.tint.withAlphaComponent(0.85).setFill()
-                NSBezierPath(ovalIn: NSRect(x: rect.minX + 9, y: rect.midY - 3.5, width: 7, height: 7)).fill()
+                NSBezierPath(ovalIn: NSRect(x: rect.minX + 9, y: rect.midY - 3, width: 6, height: 6)).fill()
                 let title = NSAttributedString(string: item.title, attributes: [.font: font, .foregroundColor: NSColor(Theme.text)])
                 title.draw(at: NSPoint(x: rect.minX + 24, y: rect.midY - title.size().height / 2))
             }
@@ -1511,7 +1515,7 @@ final class ScriptValuePopover: NSObject, NSPopoverDelegate {
     init(title: String, value: String, placeholder: String, apply: @escaping (String) throws -> Void) {
         self.apply = apply
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = NSColor(Theme.secondary)
         field = NSTextField(string: value)
         field.placeholderString = placeholder

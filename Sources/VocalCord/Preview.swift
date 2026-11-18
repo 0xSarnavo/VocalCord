@@ -227,21 +227,22 @@ struct PreviewPane: View {
                     Button("Choose video…") { choosing = true }
                     Button("Remove video") { projects.setVideo(nil, in: project.id) }.disabled(project.video == nil)
                 } label: {
-                    Image(systemName: "ellipsis").frame(width: 28, height: 28).contentShape(.rect)
+                    Image(systemName: "ellipsis")
                 }
                 .menuStyle(.button)
-                .buttonStyle(.plain)
+                .buttonStyle(.icon(.s))
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .help("Video")
                 .accessibilityLabel("Video")
                 FoldButton(label: "preview and outputs", action: onFold)
             }
             VStack(spacing: 12) {
                 videoArea
-                Waveform().frame(height: 56)
+                Waveform().frame(height: 48)
                 transport
             }
-            .padding(14)
+            .padding(12)
         }
         .sidePanel(fill: false)
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.movie]) { result in
@@ -270,16 +271,9 @@ struct PreviewPane: View {
     }
 
     private var playButton: some View {
-        Button { preview.toggle() } label: {
-            Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 13))
-                .frame(width: 34, height: 34)
-                .background(Color.white.opacity(0.08), in: .circle)
-                .contentShape(.circle)
-        }
-        .buttonStyle(.plain)
-        .disabled(preview.timeline.duration == 0)
-        .accessibilityLabel(preview.isPlaying ? "Pause" : "Play")
+        TransportPlayButton(playing: preview.isPlaying) { preview.toggle() }
+            .disabled(preview.timeline.duration == 0)
+            .help(preview.isPlaying ? "Pause" : "Play")
     }
 
     /// A 16:9 frame: the video once one is set, else the place to drop or choose one.
@@ -290,31 +284,31 @@ struct PreviewPane: View {
                 if FileManager.default.fileExists(atPath: video.path) {
                     VideoSurface(player: preview.videoPlayer)
                 } else {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 8) {
                         Text("Video not found").foregroundStyle(Theme.secondary)
-                        Button("Choose…") { choosing = true }.buttonStyle(.outline(height: 28))
+                        Button("Choose…") { choosing = true }.buttonStyle(.vc(.secondary, .s))
                     }
-                    .font(.system(size: 13))
+                    .font(.vcBody)
                 }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
-            .clipShape(.rect(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropping ? Theme.outline : Theme.line))
+            .clipShape(.rect(cornerRadius: Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(dropping ? Theme.strong : Theme.line))
             .dropDestination(for: URL.self) { urls, _ in attach(urls) } isTargeted: { dropping = $0 }
         } else {
             Color.clear
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .overlay {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 8) {
                         Image(systemName: "film").font(.system(size: 20)).foregroundStyle(Theme.secondary)
                         Text("Drop a video").foregroundStyle(Theme.secondary)
-                        Button("Choose…") { choosing = true }.buttonStyle(.outline(height: 28))
+                        Button("Choose…") { choosing = true }.buttonStyle(.vc(.secondary, .s))
                     }
-                    .font(.system(size: 13))
+                    .font(.vcBody)
                 }
-                .background(dropping ? Theme.selection : Color.black.opacity(0.25), in: .rect(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropping ? Theme.outline : Theme.line,
-                                                                         style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                .background(dropping ? Theme.selection : Color.white.opacity(0.02), in: .rect(cornerRadius: Radius.card))
+                .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(dropping ? Theme.strong : Theme.stroke,
+                                                                                  style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
                 .dropDestination(for: URL.self) { urls, _ in attach(urls) } isTargeted: { dropping = $0 }
         }
     }
@@ -340,7 +334,7 @@ struct PreviewPane: View {
             Text("s").fixedSize()
             Stepper("Offset", value: offset, step: 0.1).labelsHidden()
         }
-        .font(.system(size: 13).monospacedDigit())
+        .font(.vcBody.monospacedDigit())
         .help("Seconds the video starts after the voiceover; negative starts it earlier")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Video offset, seconds")
@@ -353,35 +347,91 @@ struct PlayTime: View {
 
     var body: some View {
         Text("\(formatTime(preview.position.rounded(.down))) / \(formatTime(preview.timeline.duration))")
-            .font(.system(size: 13).monospacedDigit())
+            .font(.vcBody.monospacedDigit())
             .lineLimit(1)
             .fixedSize()
     }
 }
 
-/// The whole voiceover: bars, a thin mark where each line starts, a dashed line for a line without a render,
-/// and the playhead. Click or drag to seek.
+/// A waveform as one continuous filled shape rather than bars: the loudest peak under each point column, mirrored
+/// about the middle. Plain math, so it can be tested without drawing.
+enum WaveformEnvelope {
+    /// The loudest of `peaks` under each of `count` columns, 0–1.
+    static func columns(_ peaks: [Float], count: Int) -> [Float] {
+        guard count > 0, !peaks.isEmpty else { return [] }
+        return (0..<count).map { column in
+            let low = column * peaks.count / count, high = max(low + 1, (column + 1) * peaks.count / count)
+            return peaks[min(low, peaks.count - 1)..<min(high, peaks.count)].max() ?? 0
+        }
+    }
+
+    /// The filled shape: each run of columns that `draws` becomes one closed outline, top edge left to right and bottom
+    /// edge back, at least 1 pt thick so quiet stretches still show as a line. Columns that don't draw leave a hole.
+    static func path(_ columns: [Float], middle: CGFloat, half: CGFloat, draws: (Int) -> Bool = { _ in true }) -> Path {
+        var path = Path()
+        var start: Int?
+        func close(_ run: Range<Int>) {
+            func amplitude(_ column: Int) -> CGFloat { max(0.5, CGFloat(columns[column]) * half) }
+            path.move(to: CGPoint(x: CGFloat(run.lowerBound), y: middle - amplitude(run.lowerBound)))
+            for column in run { path.addLine(to: CGPoint(x: CGFloat(column) + 0.5, y: middle - amplitude(column))) }
+            path.addLine(to: CGPoint(x: CGFloat(run.upperBound), y: middle - amplitude(run.upperBound - 1)))
+            path.addLine(to: CGPoint(x: CGFloat(run.upperBound), y: middle + amplitude(run.upperBound - 1)))
+            for column in run.reversed() { path.addLine(to: CGPoint(x: CGFloat(column) + 0.5, y: middle + amplitude(column))) }
+            path.addLine(to: CGPoint(x: CGFloat(run.lowerBound), y: middle + amplitude(run.lowerBound)))
+            path.closeSubpath()
+        }
+        for column in columns.indices {
+            if draws(column) {
+                if start == nil { start = column }
+            } else if let first = start {
+                close(first..<column)
+                start = nil
+            }
+        }
+        if let first = start { close(first..<columns.count) }
+        return path
+    }
+
+    /// A playhead's head: flat on top, pointing down at `x`.
+    static func head(at x: CGFloat, width: CGFloat, height: CGFloat) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: x - width / 2, y: 0))
+        path.addLine(to: CGPoint(x: x + width / 2, y: 0))
+        path.addLine(to: CGPoint(x: x + width / 2, y: height / 2))
+        path.addLine(to: CGPoint(x: x, y: height))
+        path.addLine(to: CGPoint(x: x - width / 2, y: height / 2))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The whole voiceover: a continuous envelope, played part bright, a thin mark where each line starts, a dashed line
+/// for a line without a render, and the playhead with its pointed head. Click or drag to seek.
 private struct Waveform: View {
     @Environment(Preview.self) private var preview
+    private static let headWidth: CGFloat = 9, headHeight: CGFloat = 8
 
     var body: some View {
         let timeline = preview.timeline, peaks = preview.peaks, position = preview.position
         GeometryReader { geometry in
             Canvas { context, size in
-                guard timeline.duration > 0 else { return }
+                guard timeline.duration > 0, size.width >= 1 else { return }
                 func x(_ time: Double) -> CGFloat { CGFloat(time / timeline.duration) * size.width }
-                let middle = size.height / 2, head = min(max(x(position), 3.5), size.width - 3.5)
+                // The envelope sits below the playhead's head.
+                let top = Self.headHeight + 2, bottom = size.height - 1
+                let middle = (top + bottom) / 2, half = (bottom - top) / 2
+                let head = min(max(x(position), Self.headWidth / 2), size.width - Self.headWidth / 2).rounded()
                 let gaps = timeline.segments.filter { $0.audio == nil }.map { x($0.start)...x($0.start + $0.duration) }
-                let bars = max(1, Int(size.width / 3))
-                for bar in 0..<bars {
-                    let left = CGFloat(bar) * 3
-                    guard !gaps.contains(where: { $0.contains(left + 0.75) }) else { continue }
-                    let low = bar * peaks.count / bars, high = max(low + 1, (bar + 1) * peaks.count / bars)
-                    let peak = low < peaks.count ? peaks[low..<min(high, peaks.count)].max() ?? 0 : 0
-                    let height = max(1, CGFloat(peak) * (size.height - 10))
-                    context.fill(Path(CGRect(x: left, y: middle - height / 2, width: 1.5, height: height)),
-                                 with: .color(left < head ? Theme.text : Theme.secondary))
+                let columns = WaveformEnvelope.columns(peaks, count: Int(size.width.rounded(.up)))
+                let shape = WaveformEnvelope.path(columns, middle: middle, half: half) { column in
+                    !gaps.contains { $0.contains(CGFloat(column) + 0.5) }
                 }
+                var played = context
+                played.clip(to: Path(CGRect(x: 0, y: 0, width: head, height: size.height)))
+                played.fill(shape, with: .color(Theme.text))
+                var rest = context
+                rest.clip(to: Path(CGRect(x: head, y: 0, width: size.width - head, height: size.height)))
+                rest.fill(shape, with: .color(Theme.secondary))
                 for gap in gaps {
                     var line = Path()
                     line.move(to: CGPoint(x: gap.lowerBound + 2, y: middle))
@@ -389,10 +439,11 @@ private struct Waveform: View {
                     context.stroke(line, with: .color(Theme.secondary), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
                 for segment in timeline.segments.dropFirst() {
-                    context.fill(Path(CGRect(x: x(segment.start), y: 0, width: 1, height: size.height)), with: .color(Theme.line))
+                    context.fill(Path(CGRect(x: x(segment.start), y: top, width: 1, height: bottom - top)), with: .color(Theme.line))
                 }
-                context.fill(Path(CGRect(x: head - 0.75, y: 3, width: 1.5, height: size.height - 3)), with: .color(Theme.text))
-                context.fill(Path(ellipseIn: CGRect(x: head - 3.5, y: 0, width: 7, height: 7)), with: .color(Theme.text))
+                context.fill(Path(CGRect(x: head - 0.5, y: Self.headHeight - 1, width: 1, height: size.height - Self.headHeight + 1)),
+                             with: .color(Theme.text))
+                context.fill(WaveformEnvelope.head(at: head, width: Self.headWidth, height: Self.headHeight), with: .color(Theme.text))
             }
             .contentShape(.rect)
             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
@@ -438,18 +489,13 @@ struct OutputsPane: View {
         VStack(alignment: .leading, spacing: 0) {
             PanelHeader("Outputs") {
                 if pair.count == 2 {
-                    Picker("Compare", selection: Binding(get: { side }, set: { side = $0; compare(pair) })) {
-                        Text("A").tag(0)
-                        Text("B").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 80)
+                    SegmentedTabs(selection: Binding(get: { side }, set: { side = $0; compare(pair) }), options: [0, 1],
+                                  title: { $0 == 0 ? "A" : "B" }, segmentWidth: 32, size: .s,
+                                  help: { "Play \($0 == 0 ? "A" : "B") from the same moment" }, label: "Compare")
                 }
             }
             if outputs.isEmpty {
-                Text("No outputs").font(.system(size: 13)).foregroundStyle(Theme.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyState(title: "No renders yet", message: "Each line\u{2019}s renders appear here as they finish.")
             } else {
                 // Fills the rest of the column and scrolls.
                 ScrollView {
@@ -458,7 +504,7 @@ struct OutputsPane: View {
                             row(output, badge: pair.count == 2 ? (pair[0].id == output.id ? "A" : pair[1].id == output.id ? "B" : nil) : nil)
                         }
                     }
-                    .padding(.horizontal, 8)
+                    .padding(8)
                 }
                 .scrollBounceBehavior(.basedOnSize)
             }
@@ -466,31 +512,31 @@ struct OutputsPane: View {
         .sidePanel()
     }
 
+    /// Two lines, so the name gets the row's whole width: the name over its format, length and date.
     private func row(_ output: Output, badge: String?) -> some View {
         let selected = picked.contains(output.id), playing = player.playing == output.url
-        return HStack(spacing: 6) {
-            Button { player.toggle(output.url) } label: {
-                Image(systemName: playing ? "pause.fill" : "play.fill")
-                    .font(.system(size: 11))
-                    .frame(width: 26, height: 26)
-                    .background(Color.white.opacity(0.08), in: .circle)
-                    .contentShape(.circle)
+        return HStack(spacing: 8) {
+            Button { player.toggle(output.url) } label: { Image(systemName: playing ? "pause.fill" : "play.fill") }
+                .buttonStyle(.icon(.s))
+                .help(playing ? "Pause" : "Play")
+                .accessibilityLabel("\(playing ? "Pause" : "Play") \(output.name)")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(output.name).font(.vcBody).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                Text(Self.details(output)).font(.vcCaption.monospacedDigit()).foregroundStyle(Theme.secondary).lineLimit(1)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(playing ? "Pause" : "Play") \(output.name)")
-            if let badge { Text(badge).fontWeight(.bold).foregroundStyle(Theme.secondary) }
-            Text(output.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
-            Text(output.format).foregroundStyle(Theme.secondary).frame(width: 30, alignment: .leading)
-            Text(formatTime(output.duration)).frame(width: 30, alignment: .trailing)
-            // Numeric, so the year fits the narrow panel.
-            Text(output.date, format: .dateTime.day().month(.twoDigits).year(.twoDigits)).foregroundStyle(Theme.secondary)
-                .lineLimit(1).fixedSize().frame(width: 58, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let badge {
+                Text(badge)
+                    .font(.vcCaptionBold)
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 16, height: 16)
+                    .background(Theme.fill, in: .rect(cornerRadius: Radius.chip))
+                    .accessibilityLabel("Compare \(badge)")
+            }
         }
-        .font(.system(size: 13).monospacedDigit())
-        .padding(.horizontal, 6)
+        .padding(.trailing, 8)
         .frame(height: 44)
-        .background(selected ? Theme.selection : hovered == output.id ? Theme.hover : .clear, in: .rect(cornerRadius: 8))
-        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+        .background(selected ? Theme.selection : hovered == output.id ? Theme.hover : .clear, in: .rect(cornerRadius: Radius.row))
         .onHover { if $0 { hovered = output.id } else if hovered == output.id { hovered = nil } }
         .contentShape(.rect)
         .onTapGesture { pick(output.id) }
@@ -500,9 +546,15 @@ struct OutputsPane: View {
             if let line = output.usedBy {
                 Button("In use by line \(line)") {}.disabled(true)
             } else {
-                Button("Delete", role: .destructive) { projects.deleteOutput(output.id, in: project.id) }
+                Button("Move to Trash") { projects.deleteOutput(output.id, in: project.id) }
             }
         }
+    }
+
+    /// "WAV · 0:02 · 18 Nov 2026": the date with its year, in the user's own order.
+    static func details(_ output: Output) -> String {
+        [output.format, formatTime(output.duration), output.date.formatted(.dateTime.day().month(.abbreviated).year())]
+            .joined(separator: " \u{00B7} ")
     }
 
     private func pick(_ id: String) {
@@ -528,14 +580,14 @@ struct ExportSheet: View {
     @State private var running = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Export").font(.system(size: 22, weight: .bold))
+                Text("Export").font(.vcTitle)
                 if projects.project(projectID)?.edit != nil {
                     Text("Follows the timeline, with its cuts and settings.").foregroundStyle(Theme.secondary)
                 }
             }
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 14) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
                 GridRow {
                     Text("Format").foregroundStyle(Theme.secondary)
                     Picker("Format", selection: $options.format) {
@@ -555,18 +607,18 @@ struct ExportSheet: View {
                     .frame(width: 140)
                 }
             }
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle("File per line", isOn: $options.perLine)
                 Toggle("File per voice", isOn: $options.perVoice)
                 Toggle("SRT captions", isOn: $options.srt)
                 Toggle("Timing JSON", isOn: $options.timing)
             }
             .toggleStyle(.checkbox)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Cancel") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
                 Button(running ? "Exporting…" : "Export", action: run)
-                    .buttonStyle(.primary(height: 32))
+                    .buttonStyle(.vc(.primary, .m))
                     .keyboardShortcut(.defaultAction)
                     .disabled(running)
             }

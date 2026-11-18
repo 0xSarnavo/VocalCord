@@ -120,6 +120,9 @@ private let script = Timeline(project) { URL(filePath: "/tmp/\($0.id).wav") }
     // 26 pt type at 1.3× line height: the baseline is well below the cap height, and inside the first line.
     let line = ceil(NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: 26)) * 1.3)
     #expect(ReadLayout.firstBaseline > 20 && ReadLayout.firstBaseline < line)
+    // The playing paragraph's bar spans the first line's letters, inside the line.
+    let mark = ReadLayout.firstLineMark
+    #expect(mark.top >= 0 && mark.top < ReadLayout.firstBaseline && mark.height > 26 && mark.top + mark.height <= line)
 }
 
 // MARK: Off-screen snapshots
