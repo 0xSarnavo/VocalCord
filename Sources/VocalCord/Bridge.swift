@@ -118,7 +118,7 @@ final class ToolBridge {
 
     /// check_script is listed only while the Jev plugin is added. An agent session started before Jev was added sees
     /// it after a restart.
-    var tools: [[String: Any]] { Self.scriptTools + (jev.added ? [Self.checkTool] : []) + Self.takeTools }
+    var tools: [[String: Any]] { Self.scriptTools + (jev.added ? [Self.checkTool] : []) + Self.timelineTools + Self.takeTools }
 
     static let scriptTools: [[String: Any]] = [
         tool("get_voices", "Every voice with its takes per tone and its pronunciations. A tone with no takes still renders, from a written direction."),
@@ -155,6 +155,48 @@ final class ToolBridge {
     static let checkTool = tool("check_script", "Jev checks of each line: spoken (reads like something a person would say aloud), fits_tone (suits its tone) and, "
         + "after an agent rewrite, keeps_meaning (keeps the original's meaning). Each is yes, no or unsettled. A line with a pending "
         + "change is checked as proposed. Unchanged lines reuse their last result.")
+
+    static let timelineTools: [[String: Any]] = [
+        tool("get_timeline", "The Timeline tab's track for the open project, in seconds: each clip's number, its script line and "
+             + "the render's text, its start and duration on the timeline, the part of its render it plays (render_start to render_end), the "
+             + "gap after it, volume, fades and voice tools, and whether a newer render of its line waits to be swapped in; plus rendered "
+             + "lines not on the timeline and the changes of any pending proposal."),
+        tool("propose_timeline_edits", "Propose edits to the timeline. Nothing is applied: the edits wait in the Timeline tab for the user "
+             + "to accept or reject together, and each call replaces any earlier proposal, so send every edit in one call. Clip numbers are "
+             + "get_timeline's from before the call, even after a split, move or delete in it; a split's second half gets a number in the "
+             + "next get_timeline. An edit that fails is skipped and the rest still apply.",
+             properties: ["edits": [
+                 "type": "array", "minItems": 1,
+                 "items": ["type": "object", "required": ["op"], "properties": [
+                     "op": ["type": "string", "enum": ["split", "trim", "delete", "move", "gap", "volume", "fade", "voice", "swap_in", "add_line"],
+                            "description": "split {clip, at}, trim {clip, start, end}, delete {clip}, move {clip, to}, gap {clip, seconds}, "
+                                + "volume {clip, db}, fade {clip, in, out}, voice {clip, speed, pitch, warmth, brightness, denoise}: the "
+                                + "fields of trim, fade and voice left out keep their value. swap_in {line}: the line's chosen render, "
+                                + "whole, in place of its clips. add_line {line}: a rendered line that isn't on the timeline."],
+                     "clip": ["type": "integer", "minimum": 1, "description": "Clip number from get_timeline"],
+                     "line": ["type": "integer", "minimum": 1, "description": "Script line number"],
+                     "at": ["type": "number", "minimum": 0, "description": "Seconds into the clip on the timeline"],
+                     "start": ["type": "number", "minimum": 0, "description": "Seconds into the render where the clip starts"],
+                     "end": ["type": "number", "minimum": 0, "description": "Seconds into the render where the clip ends"],
+                     "to": ["type": "integer", "minimum": 1, "description": "The clip number whose place it takes: it goes before that "
+                            + "clip when moving earlier, after it when moving later"],
+                     "seconds": ["type": "number", "minimum": 0, "maximum": Edit.longest, "description": "Silence after the clip"],
+                     "db": ["type": "number", "minimum": Edit.gains.lowerBound, "maximum": Edit.gains.upperBound,
+                            "description": "Volume against the render; 0 is as rendered"],
+                     "in": ["type": "number", "minimum": 0, "maximum": Edit.longest, "description": "Fade-in seconds"],
+                     "out": ["type": "number", "minimum": 0, "maximum": Edit.longest, "description": "Fade-out seconds"],
+                     "speed": ["type": "number", "minimum": VoiceEffects.tempos.lowerBound, "maximum": VoiceEffects.tempos.upperBound,
+                               "description": "1 is as rendered; pitch stays"],
+                     "pitch": ["type": "number", "minimum": VoiceEffects.semitones.lowerBound, "maximum": VoiceEffects.semitones.upperBound,
+                               "description": "Semitones; 0 is as rendered"],
+                     "warmth": ["type": "number", "minimum": VoiceEffects.shelves.lowerBound, "maximum": VoiceEffects.shelves.upperBound,
+                                "description": "dB of low end; 0 is as rendered"],
+                     "brightness": ["type": "number", "minimum": VoiceEffects.shelves.lowerBound, "maximum": VoiceEffects.shelves.upperBound,
+                                    "description": "dB of high end; 0 is as rendered"],
+                     "denoise": ["type": "boolean", "description": "Remove background noise"],
+                 ]],
+             ]], required: ["edits"]),
+    ]
 
     static let takeTools: [[String: Any]] = [
         tool("get_takes", "The takes of the voice selected in Clone: each take's number, tone, transcript, length in seconds, like_you "
@@ -232,6 +274,8 @@ final class ToolBridge {
             case "check_script":
                 guard jev.added else { return ("Jev plugin not added", false) }
                 return (try json(await check(currentProject())), false)
+            case "get_timeline": return (try json(timeline(currentProject())), false)
+            case "propose_timeline_edits": return (try json(proposeEdits(arguments, in: currentProject())), false)
             case "get_takes": return (try json(takes(currentVoice())), false)
             case "propose_take_changes": return (try json(proposeTakes(arguments, for: currentVoice())), false)
             case "audition": return (try json(await audition(currentVoice())), false)
@@ -310,6 +354,44 @@ final class ToolBridge {
         var keepsMeaning: Verdict?
         var notes: [String]?
         var error: String?
+    }
+
+    private struct ClipInfo: Encodable {
+        var clip: Int
+        /// Left out if the line has left the script.
+        var line: Int?
+        var text: String
+        var start: Double
+        var duration: Double
+        var renderStart: Double
+        var renderEnd: Double
+        var renderDuration: Double
+        var gapAfter: Double
+        var volumeDb: Double
+        var fadeIn: Double
+        var fadeOut: Double
+        var speed: Double
+        var pitch: Double
+        var warmth: Double
+        var brightness: Double
+        var denoise: Bool
+        var newRenderWaiting: Bool
+    }
+
+    private struct TimelineInfo: Encodable {
+        struct Pending: Encodable { var changes: [String] }
+        var project: String
+        var clips: [ClipInfo]
+        var duration: Double
+        var linesNotOnTimeline: [Int]
+        var pendingProposal: Pending?
+    }
+
+    private struct EditsResult: Encodable {
+        var proposed = 0
+        var errors: [String] = []
+        var changes: [String] = []
+        var note = "Nothing is applied: the user accepts or rejects these changes in the Timeline tab."
     }
 
     private struct TakeInfo: Encodable {
@@ -539,6 +621,194 @@ final class ToolBridge {
     private func scores(_ arguments: [String: Any], in project: Project) throws -> ScoresResult {
         let (number, line) = try line(arguments, in: project)
         return ScoresResult(line: number, versions: line.versions.map { versionInfo($0, in: line) })
+    }
+
+    // MARK: Timeline
+
+    /// Seconds and dB to 2 decimals, without a negative zero.
+    private static func rounded(_ value: Double) -> Double { (value * 100).rounded() / 100 + 0 }
+
+    /// The same for the user: 1.4, not 1.40.
+    private static func plain(_ value: Double) -> String { String(format: "%g", rounded(value)) }
+
+    /// The project's timeline, opened first so its clips keep the same IDs, and so numbers, between calls.
+    private func openTimeline(_ project: Project) throws -> (project: Project, edit: Edit) {
+        guard project.edit?.clips.isEmpty == false || project.lines.contains(where: { $0.chosenVersion != nil }) else {
+            throw AppError("This project has no renders yet. Render its lines first: the timeline is made from them.")
+        }
+        projects.startEdit(project.id)
+        guard let project = projects.project(project.id), let edit = project.edit else { throw AppError("This project no longer exists.") }
+        return (project, edit)
+    }
+
+    /// Line ID → its number in the script.
+    private func lineNumbers(_ project: Project) -> [String: Int] {
+        Dictionary(project.lines.enumerated().map { ($1.id, $0 + 1) }) { first, _ in first }
+    }
+
+    private func timeline(_ project: Project) throws -> TimelineInfo {
+        let (project, edit) = try openTimeline(project)
+        let numbers = lineNumbers(project), waiting = projects.newRenders(project.id)
+        let clips = zip(edit.clips, edit.starts).enumerated().map { index, pair in
+            let (clip, start) = pair, render = project.version(clip.versionID), effects = clip.effects
+            return ClipInfo(clip: index + 1, line: numbers[clip.lineID], text: render?.text ?? "", start: Self.rounded(start),
+                            duration: Self.rounded(clip.duration), renderStart: Self.rounded(clip.start), renderEnd: Self.rounded(clip.end),
+                            renderDuration: Self.rounded(render?.duration ?? 0), gapAfter: Self.rounded(clip.gapAfter),
+                            volumeDb: Self.rounded(clip.gain), fadeIn: Self.rounded(clip.fadeIn), fadeOut: Self.rounded(clip.fadeOut),
+                            speed: Self.rounded(effects.tempo), pitch: Self.rounded(effects.pitch), warmth: Self.rounded(effects.warmth),
+                            brightness: Self.rounded(effects.brightness), denoise: effects.denoise, newRenderWaiting: waiting[clip.lineID] != nil)
+        }
+        return TimelineInfo(project: project.name, clips: clips, duration: Self.rounded(edit.duration),
+                            linesNotOnTimeline: projects.linesNotOnTimeline(project.id).compactMap { numbers[$0] },
+                            pendingProposal: project.editProposal.map { .init(changes: $0.changes) })
+    }
+
+    /// Applies the edits in order to a copy of the timeline as it is, not to an earlier proposal, which the result replaces.
+    /// An edit that fails is skipped and the rest still apply.
+    private func proposeEdits(_ arguments: [String: Any], in project: Project) throws -> EditsResult {
+        guard let edits = arguments["edits"] as? [[String: Any]], !edits.isEmpty else {
+            throw AppError("edits must be a list of {op, clip, …}.")
+        }
+        let (project, current) = try openTimeline(project)
+        let numbers = lineNumbers(project)
+        // Each number names the same clip for the whole call, whatever the edits before it do to the order.
+        let clips = current.clips.enumerated().map { index, clip in
+            (id: clip.id, name: "clip \(index + 1)" + (numbers[clip.lineID].map { " (line \($0))" } ?? ""))
+        }
+        var proposed = current, result = EditsResult()
+        for (index, item) in edits.enumerated() {
+            do {
+                var next = proposed
+                result.changes.append(try apply(item, to: &next, clips: clips, project: project))
+                proposed = next
+            } catch {
+                let label = [item["op"] as? String, item["clip"].map { "clip \($0)" } ?? item["line"].map { "line \($0)" }]
+                    .compactMap(\.self).joined(separator: " ")
+                result.errors.append("Edit \(index + 1)\(label.isEmpty ? "" : " (\(label))"): \(error.localizedDescription)")
+            }
+        }
+        if result.changes.isEmpty {
+            result.note = "Nothing was proposed; any earlier proposal still waits."
+        } else if projects.proposeEdit(EditProposal(edit: proposed, changes: result.changes), in: project.id) {
+            result.proposed = result.changes.count
+        } else {
+            result.changes = []
+            result.note = "These edits leave the timeline as it is, so nothing is pending."
+        }
+        return result
+    }
+
+    /// One edit on `edit`, and how it reads to the user. `clips` are the timeline's clips by number as the call found it.
+    private func apply(_ item: [String: Any], to edit: inout Edit, clips: [(id: String, name: String)], project: Project) throws -> String {
+        func double(_ key: String, _ range: ClosedRange<Double>? = nil, or kept: Double? = nil) throws -> Double {
+            if let kept, item[key] == nil { return kept }
+            guard let value = (item[key] as? NSNumber)?.doubleValue, value.isFinite else { throw AppError("\(key) must be a number.") }
+            if let range, !range.contains(value) {
+                throw AppError("\(key) must be from \(Self.plain(range.lowerBound)) to \(Self.plain(range.upperBound)).")
+            }
+            return value
+        }
+        func clip(_ key: String = "clip") throws -> (id: String, name: String) {
+            guard let number = (item[key] as? NSNumber)?.intValue, clips.indices.contains(number - 1) else {
+                throw AppError(clips.isEmpty ? "The timeline has no clips." : "\(key) must be a clip number from 1 to \(clips.count).")
+            }
+            return clips[number - 1]
+        }
+        func scriptLine() throws -> (number: Int, line: Line, render: Version) {
+            guard let number = (item["line"] as? NSNumber)?.intValue, project.lines.indices.contains(number - 1) else {
+                throw AppError("line must be from 1 to \(project.lines.count).")
+            }
+            guard let render = project.lines[number - 1].chosenVersion else { throw AppError("Line \(number) has no render yet.") }
+            return (number, project.lines[number - 1], render)
+        }
+        func capitalized(_ text: String) -> String { text.prefix(1).uppercased() + text.dropFirst() }
+
+        switch item["op"] as? String {
+        case "split":
+            let (id, name) = try clip(), at = try double("at")
+            try edit.split(clip: id, at: at)
+            return "Split \(name) at \(Self.plain(at)) s"
+        case "trim":
+            let (id, name) = try clip()
+            guard item["start"] != nil || item["end"] != nil else { throw AppError("Give start, end or both.") }
+            let old = edit.clips[try edit.index(of: id)]
+            guard let render = project.version(old.versionID) else { throw AppError("This clip's render no longer exists.") }
+            try edit.trim(clip: id, start: double("start", or: old.start), end: double("end", or: old.end), renderDuration: render.duration)
+            let new = edit.clips[try edit.index(of: id)]
+            return "Trim \(name) to " + String(format: "%.2f–%.2f s", new.start, new.end) + " of its render"
+        case "delete":
+            let (id, name) = try clip()
+            try edit.delete(clip: id)
+            return "Delete \(name)"
+        case "move":
+            // It takes the place of the clip `to` named, wherever that clip is now.
+            let (id, name) = try clip(), (target, place) = try clip("to")
+            guard id != target else { throw AppError("A clip can't take its own place.") }
+            let from = try edit.index(of: id)
+            guard let to = edit.clips.firstIndex(where: { $0.id == target }) else { throw AppError("\(capitalized(place)) is no longer on the timeline.") }
+            try edit.move(clip: id, to: to)
+            return "Move \(name) \(from < to ? "after" : "before") \(place)"
+        case "gap":
+            let (id, name) = try clip(), seconds = try double("seconds", 0...Edit.longest)
+            let old = edit.clips[try edit.index(of: id)].gapAfter
+            try edit.setGap(clip: id, to: seconds)
+            return "\(seconds < old ? "Shorten" : seconds > old ? "Lengthen" : "Set") the gap after \(name) to \(Self.plain(seconds)) s"
+        case "volume":
+            let (id, name) = try clip(), db = try double("db", Edit.gains)
+            let old = edit.clips[try edit.index(of: id)].gain
+            try edit.setGain(clip: id, to: db)
+            guard db != old else { return "Keep \(name) at \(Self.plain(db)) dB" }
+            return "Make \(name) \(Self.plain(abs(db - old))) dB \(db < old ? "quieter" : "louder")" + (old == 0 ? "" : ", to \(Self.plain(db)) dB")
+        case "fade":
+            let (id, name) = try clip()
+            guard item["in"] != nil || item["out"] != nil else { throw AppError("Give in, out or both.") }
+            let old = edit.clips[try edit.index(of: id)]
+            try edit.setFades(clip: id, fadeIn: double("in", 0...Edit.longest, or: old.fadeIn),
+                              fadeOut: double("out", 0...Edit.longest, or: old.fadeOut))
+            let new = edit.clips[try edit.index(of: id)]
+            return "Fade \(name): " + [new.fadeIn > 0 ? "in over \(Self.plain(new.fadeIn)) s" : "no fade in",
+                                       new.fadeOut > 0 ? "out over \(Self.plain(new.fadeOut)) s" : "no fade out"].joined(separator: ", ")
+        case "voice":
+            let (id, name) = try clip()
+            let keys = ["speed", "pitch", "warmth", "brightness", "denoise"].filter { item[$0] != nil }
+            guard !keys.isEmpty else { throw AppError("Give speed, pitch, warmth, brightness or denoise.") }
+            var effects = edit.clips[try edit.index(of: id)].effects
+            effects.tempo = try double("speed", VoiceEffects.tempos, or: effects.tempo)
+            effects.pitch = try double("pitch", VoiceEffects.semitones, or: effects.pitch)
+            effects.warmth = try double("warmth", VoiceEffects.shelves, or: effects.warmth)
+            effects.brightness = try double("brightness", VoiceEffects.shelves, or: effects.brightness)
+            if let flag = item["denoise"] {
+                guard let denoise = flag as? Bool else { throw AppError("denoise must be true or false.") }
+                effects.denoise = denoise
+            }
+            try edit.setEffects(clip: id, to: effects)
+            let parts = keys.map { key in
+                switch key {
+                case "speed": effects.tempo == 1 ? "normal speed"
+                    : "\(effects.tempo > 1 ? "speed up" : "slow down") to \(Int((effects.tempo * 100).rounded()))%"
+                case "pitch": effects.pitch == 0 ? "original pitch"
+                    : "pitch \(effects.pitch > 0 ? "up" : "down") \(Self.plain(abs(effects.pitch))) semitone\(abs(effects.pitch) == 1 ? "" : "s")"
+                case "warmth": effects.warmth == 0 ? "original warmth"
+                    : "\(Self.plain(abs(effects.warmth))) dB \(effects.warmth > 0 ? "warmer" : "less warm")"
+                case "brightness": effects.brightness == 0 ? "original brightness"
+                    : "\(Self.plain(abs(effects.brightness))) dB \(effects.brightness > 0 ? "brighter" : "duller")"
+                default: effects.denoise ? "background noise removed" : "no noise removal"
+                }
+            }
+            return capitalized(name) + ": " + parts.joined(separator: ", ")
+        case "swap_in":
+            let (number, line, render) = try scriptLine()
+            let new = !edit.clips.contains { $0.lineID == line.id && $0.versionID == render.id }
+            try edit.swapIn(line: line.id, version: render.id, duration: render.duration)
+            return new ? "Swap in line \(number)'s new render" : "Put line \(number)'s render back whole"
+        case "add_line":
+            let (number, line, render) = try scriptLine()
+            try edit.insert(line: line.id, version: render.id, duration: render.duration, gapAfter: line.pauseAfter,
+                            script: project.lines.map(\.id))
+            return "Add line \(number) to the timeline"
+        default:
+            throw AppError("op must be one of split, trim, delete, move, gap, volume, fade, voice, swap_in, add_line.")
+        }
     }
 
     // MARK: Takes

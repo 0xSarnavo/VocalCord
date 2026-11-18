@@ -40,6 +40,9 @@ class FakeEngine:
     def check_audio(self, request, job):
         return {"duration": 1.0, "warnings": []}
 
+    def edit_clip(self, request, job):
+        return {"path": request["out"], "duration": 1.0}
+
     def split(self, request, job):
         return {"clips": []}
 
@@ -147,5 +150,17 @@ def test_prepare_runs_beside_the_queue_and_cancels():
     s.send(id=1, cmd="cancel", target="p")
     assert s.until(1, "result")["cancelled"] is True
     assert s.until("p", "error")["code"] == "cancelled"
+    engine.release.set()
+    assert s.until("r", "result")["path"] == "out.wav"
+
+
+def test_edit_clip_answers_while_a_render_runs():
+    engine = FakeEngine()
+    s = Session(engine)
+    s.send(id="r", cmd="render", output="out.wav", lines=[{}])
+    s.until("r", "progress")
+    s.send(id="e", cmd="edit_clip", audio="a.wav", out="e.wav")
+    # The next reply, while the render is still held: had it queued, the render's result would come first.
+    assert s.read() == {"id": "e", "event": "result", "path": "e.wav", "duration": 1.0}
     engine.release.set()
     assert s.until("r", "result")["path"] == "out.wav"

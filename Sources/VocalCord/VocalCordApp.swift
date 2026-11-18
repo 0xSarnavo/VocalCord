@@ -39,7 +39,7 @@ struct VocalCordApp: App {
         _player = State(initialValue: player)
         _preview = State(initialValue: Preview(player: player))
         _jev = State(initialValue: jev)
-        // The agents' tools act on the project open in Generate and the voice selected in Clone.
+        // The agents' tools act on the project open in Generate and Timeline, and the voice selected in Clone.
         let tools = ToolBridge(projects: projects, voices: store, jev: jev,
                                projectID: { UserDefaults.standard.string(forKey: "project") },
                                voiceID: { UserDefaults.standard.string(forKey: "voice") })
@@ -66,7 +66,7 @@ struct VocalCordApp: App {
     }
 }
 
-enum Mode: String { case clone, generate }
+enum Mode: String { case clone, generate, timeline }
 
 struct RootView: View {
     @Environment(VoiceStore.self) private var store
@@ -100,6 +100,7 @@ struct RootView: View {
             switch mode {
             case .clone: CloneView()
             case .generate: GenerateView()
+            case .timeline: EditView()
             }
         }
         .toolbar {
@@ -107,10 +108,11 @@ struct RootView: View {
                 Picker("Mode", selection: $mode) {
                     Text("Clone").tag(Mode.clone)
                     Text("Generate").tag(Mode.generate)
+                    Text("Timeline").tag(Mode.timeline)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 300)
                 .focusEffectDisabled()
             }
         }

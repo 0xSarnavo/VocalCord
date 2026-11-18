@@ -1,7 +1,7 @@
 """JSON-lines worker on stdin/stdout. See PROTOCOL.md.
 
 The reader thread answers ping, status, cancel and shutdown at once, runs
-check_audio and prepare on their own threads, and queues every other command for a single job
+check_audio, edit_clip and prepare on their own threads, and queues every other command for a single job
 thread, which owns all MLX work. Only one large model (Breeze or Whisper) is in
 memory at a time; it is unloaded after IDLE_S seconds without use.
 """
@@ -28,8 +28,9 @@ IDLE_S = 120.0
 # 4-bit and made renders twice as slow on 8 GB through swapping (README).
 MLX_CACHE_LIMIT = 256 * 2**20
 JOB_COMMANDS = {"transcribe", "render", "score", "split", "group_speakers", "mix", "unload"}
-# Run at once on their own threads: neither touches MLX, and a long download must not hold up renders.
-SIDE_COMMANDS = {"check_audio", "prepare"}
+# Run at once on their own threads: none touches MLX, a timeline edit must not wait for a render, and a long
+# download must not hold up renders.
+SIDE_COMMANDS = {"check_audio", "edit_clip", "prepare"}
 
 
 class Cancelled(Exception):
@@ -54,7 +55,7 @@ def memory() -> dict:
 
 
 class Engine:
-    """The real backend. Every method except status, check_audio and prepare runs on the job thread."""
+    """The real backend. Every method except status, check_audio, edit_clip and prepare runs on the job thread."""
 
     def __init__(self):
         import mlx.core as mx
@@ -121,6 +122,10 @@ class Engine:
 
     def check_audio(self, request, job) -> dict:
         return audio.check_audio(_path(request, "audio"))
+
+    def edit_clip(self, request, job) -> dict:
+        from . import edit
+        return edit.edit_clip(request, job.check)
 
     def prepare(self, request, job) -> dict:
         from . import models

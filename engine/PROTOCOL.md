@@ -21,7 +21,7 @@ Every reply carries the request's `id` and an `event`:
 A line that is not a JSON object gets `{"id": null, "event": "error", "code": "invalid", ...}`.
 
 **Ordering.** `ping`, `status`, `cancel` and `shutdown` are answered at once.
-`check_audio` and `prepare` run immediately, each on its own thread. `transcribe`, `render`,
+`check_audio`, `edit_clip` and `prepare` run immediately, each on its own thread. `transcribe`, `render`,
 `score`, `split`, `group_speakers`, `mix` and `unload` queue and run one at a
 time in arrival order, so replies for different ids can interleave.
 
@@ -32,8 +32,8 @@ unloads the current one first (Breeze 8-bit loads in 3–8 s, 4-bit in about
 once. The large model unloads after 120 s without a job. The two scoring models
 (about 450 MB) stay loaded between scores and are freed before Breeze loads.
 
-**Paths** are absolute (or start with `~`). Inputs for `transcribe`, `split` and
-`check_audio` can be any file ffmpeg reads, audio or video (wav, m4a, mp3, mp4,
+**Paths** are absolute (or start with `~`). Inputs for `transcribe`, `split`,
+`check_audio` and `edit_clip` can be any file ffmpeg reads, audio or video (wav, m4a, mp3, mp4,
 mov...); the first audio stream is used.
 
 ## Commands
@@ -80,6 +80,42 @@ share of samples at or above 0.99 of full scale. `warnings` holds any of:
 | `clipped` | `clipping_ratio` ≥ 0.0001 |
 | `noisy` | `noise_floor_dbfs` > −50 |
 | `cut_off` | the first or last frame is within 20 dB of `speech_dbfs`: it starts or ends mid-word |
+
+### edit_clip
+
+One timeline clip: a span of a rendered line through the voice tools, with fades
+and volume, written as a file the app plays and passes to `mix` as a line. Loads no model.
+
+```json
+{"id": 7, "cmd": "edit_clip", "audio": "/Users/me/Projects/p1/renders/abc.wav",
+ "out": "/Users/me/Projects/p1/edits/9f2c.wav", "start": 0.0, "end": 3.2, "tempo": 1.0, "pitch": 0.0,
+ "warmth": 0.0, "brightness": 0.0, "denoise": false, "gain_db": 0.0, "fade_in": 0.0, "fade_out": 0.0}
+{"id": 7, "event": "result", "path": "/Users/me/Projects/p1/edits/9f2c.wav", "duration": 2.871}
+```
+
+| field | range (default) | meaning |
+|---|---|---|
+| `audio` | required | the source, usually a render (24 kHz WAV) |
+| `out` | required | the WAV to write; its folder is created, an existing file replaced |
+| `start` | ≥ 0 s (0) | where the clip starts in the source |
+| `end` | > `start` s, or null (null) | where it ends; null or past the end of the source means the source's end |
+| `tempo` | 0.5–2 (1) | speed, keeping the pitch (ffmpeg `atempo`) |
+| `pitch` | −12 to 12 semitones (0) | keeping the duration (`asetrate`, `aresample`, `atempo`) |
+| `warmth` | −12 to 12 dB (0) | low shelf at 200 Hz |
+| `brightness` | −12 to 12 dB (0) | high shelf at 5 kHz |
+| `denoise` | true or false (false) | ffmpeg `afftdn`, 12 dB of reduction, the noise floor taken from the clip's quietest frames |
+| `gain_db` | −24 to 12 (0) | volume |
+| `fade_in`, `fade_out` | 0–10 s (0) | raised-cosine fades, in seconds of the output (after `tempo`), shortened together when they would overlap |
+
+- Order: trim, denoise, warmth and brightness, pitch, tempo, fades, gain, then
+  clip to full scale. The result is mono 32-bit float WAV at 24 kHz, written to a
+  temporary file in the same folder and renamed, so a reader never sees half a file.
+- `duration` is the written file's length in seconds, exactly
+  `(min(end, source length) − start) / tempo` to the sample.
+- Without tempo, pitch, warmth, brightness or denoise it is plain arithmetic and
+  runs no ffmpeg for a 24 kHz WAV source; otherwise one ffmpeg pass.
+- `invalid` errors: a missing or out-of-range field, an unreadable source, or
+  nothing left after trimming (`start` at or past the end of the source).
 
 ### transcribe
 
@@ -244,6 +280,13 @@ as one file plus optional extras. Loads no model.
   the name becomes `<name> 2`, `<name> 3`… so nothing is overwritten. `/`, `:`
   and `\` in names become `-`.
 - `start`/`end` are seconds in the mix, end before `pause_after`.
+- Consecutive lines with the same `number` are pieces of one script line (the
+  timeline sends one entry per clip): they get one entry in the result's `lines`,
+  the timing file and the captions, and one per-line file, running from the first
+  piece's start to the last piece's end with the gaps between them. Its `index` is
+  the first piece's position. A number that comes back later, apart from its run,
+  gets its own entry, and its per-line file is `<name> line <number> (2).<format>`,
+  then `(3)`….
 - Files are made in a temporary folder and moved in at the end; a cancelled or
   failed mix leaves nothing.
 
@@ -287,7 +330,8 @@ setup and when Settings switches to a model for the first time.
 dropped when it reaches the front; a running `render` stops before its next line
 (a line in progress finishes first, up to about 30 s) and writes nothing,
 `transcribe` and `split` before their next chunk, `group_speakers` before its
-next clip, `mix` before its next file, `prepare` before its next 1 MB.
+next clip, `mix` before its next file, `prepare` before its next 1 MB,
+`edit_clip` before its ffmpeg pass and before it writes.
 
 ### unload
 

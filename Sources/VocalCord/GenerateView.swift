@@ -6,9 +6,6 @@ struct GenerateView: View {
     @Environment(ProjectStore.self) private var projects
     @Environment(Preview.self) private var preview
     @AppStorage("project") private var selection = ""
-    @State private var naming: NameRequest?
-    @State private var name = ""
-    @State private var deleting: String?
     @State private var exporting = false
     @AppStorage("terminalOpen") private var terminalOpen = false
     @AppStorage("terminalHeight") private var terminalHeight = 300.0
@@ -16,17 +13,9 @@ struct GenerateView: View {
     @AppStorage("generateSideOpen") private var sideOpen = true
     @State private var width = 1036.0
 
-    /// The New project and Rename alerts share one text field.
-    private enum NameRequest: Identifiable {
-        case new, rename(String)
-        var id: String { if case .rename(let id) = self { id } else { "new" } }
-    }
-
     var body: some View {
         SidebarLayout {
-            ProjectsSidebar(selection: $selection, onNew: { name = ""; naming = .new },
-                            onRename: { id in name = projects.project(id)?.name ?? ""; naming = .rename(id) },
-                            onDelete: { deleting = $0 })
+            ProjectsSidebar(selection: $selection)
         } detail: {
             Group {
                 if let project = projects.project(selection) {
@@ -65,25 +54,6 @@ struct GenerateView: View {
         }
         .toolbar { toolbar }
         .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
-        .onAppear { if projects.project(selection) == nil { selection = projects.projects.first?.id ?? "" } }
-        .alert(naming.map { if case .new = $0 { "New project" } else { "Rename project" } } ?? "",
-               isPresented: Binding(present: $naming), presenting: naming) { request in
-            TextField("Name", text: $name)
-            switch request {
-            case .new: Button("Create") { selection = projects.create(name: name) }
-            case .rename(let id): Button("Rename") { projects.rename(id, to: name) }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .confirmationDialog("Delete \u{201C}\(projects.project(deleting)?.name ?? "")\u{201D}?",
-                            isPresented: Binding(present: $deleting), titleVisibility: .visible, presenting: deleting) { id in
-            Button("Delete project", role: .destructive) {
-                projects.delete(id)
-                if selection == id { selection = projects.projects.first?.id ?? "" }
-            }
-        } message: { _ in
-            Text("Its renders move to the Trash.")
-        }
     }
 
     /// Native toolbar glass: Terminal, Render, then Export as the one off-white action, then the gear.
@@ -119,17 +89,24 @@ struct GenerateView: View {
     }
 }
 
+/// The projects list in Generate and Timeline, with its New, Rename and Delete; it keeps a project selected.
 struct ProjectsSidebar: View {
     @Environment(ProjectStore.self) private var projects
     @Binding var selection: String
-    let onNew: () -> Void
-    let onRename: (String) -> Void
-    let onDelete: (String) -> Void
+    @State private var naming: NameRequest?
+    @State private var name = ""
+    @State private var deleting: String?
+
+    /// The New project and Rename alerts share one text field.
+    private enum NameRequest: Identifiable {
+        case new, rename(String)
+        var id: String { if case .rename(let id) = self { id } else { "new" } }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Projects").font(.system(size: 17, weight: .bold)).padding(.horizontal, 8)
-            Button(action: onNew) { Label("New project", systemImage: "plus").frame(maxWidth: .infinity) }
+            Button { name = ""; naming = .new } label: { Label("New project", systemImage: "plus").frame(maxWidth: .infinity) }
                 .buttonStyle(.outline(height: 40))
             ScrollView {
                 VStack(spacing: 4) {
@@ -147,8 +124,8 @@ struct ProjectsSidebar: View {
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(selection == project.id ? .isSelected : [])
                         .contextMenu {
-                            Button("Rename…") { onRename(project.id) }
-                            Button("Delete…", role: .destructive) { onDelete(project.id) }
+                            Button("Rename…") { name = project.name; naming = .rename(project.id) }
+                            Button("Delete…", role: .destructive) { deleting = project.id }
                         }
                     }
                 }
@@ -157,6 +134,25 @@ struct ProjectsSidebar: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
+        .onAppear { if projects.project(selection) == nil { selection = projects.projects.first?.id ?? "" } }
+        .alert(naming.map { if case .new = $0 { "New project" } else { "Rename project" } } ?? "",
+               isPresented: Binding(present: $naming), presenting: naming) { request in
+            TextField("Name", text: $name)
+            switch request {
+            case .new: Button("Create") { selection = projects.create(name: name) }
+            case .rename(let id): Button("Rename") { projects.rename(id, to: name) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Delete \u{201C}\(projects.project(deleting)?.name ?? "")\u{201D}?",
+                            isPresented: Binding(present: $deleting), titleVisibility: .visible, presenting: deleting) { id in
+            Button("Delete project", role: .destructive) {
+                projects.delete(id)
+                if selection == id { selection = projects.projects.first?.id ?? "" }
+            }
+        } message: { _ in
+            Text("Its renders move to the Trash.")
+        }
     }
 }
 

@@ -98,6 +98,22 @@ struct MixResult: Sendable {
     var lufs: Double?
 }
 
+/// One clip for `edit_clip`: a stretch of a render with its gain, fades (seconds after the tempo change) and voice tools.
+struct ClipRequest: Sendable, Hashable {
+    var audio: URL
+    var start: Double
+    var end: Double
+    var gain = 0.0
+    var fadeIn = 0.0, fadeOut = 0.0
+    var effects = VoiceEffects()
+}
+
+extension ClipRequest {
+    init(_ clip: EditClip, audio: URL) {
+        self.init(audio: audio, start: clip.start, end: clip.end, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, effects: clip.effects)
+    }
+}
+
 /// What the app needs from the speech engine. Each call maps to one command in `engine/PROTOCOL.md`.
 protocol Engine: Sendable {
     /// `transcribe`: Whisper transcript of a clip.
@@ -115,6 +131,8 @@ protocol Engine: Sendable {
     func score(_ render: URL, reference: URL, text: String, hints: [String]) async throws -> Scores
     /// `mix`: the export.
     func mix(_ request: MixRequest) async throws -> MixResult
+    /// `edit_clip`: writes one timeline clip's audio. Runs while a render is busy. Returns the duration in seconds.
+    func editClip(_ request: ClipRequest, to output: URL) async throws -> Double
 }
 
 enum EngineSettings {
@@ -254,6 +272,16 @@ actor EngineClient: Engine {
             "per_line": options.perLine, "per_voice": options.perVoice, "srt": options.srt, "timing": options.timing,
         ], as: Result.self)
         return MixResult(files: result.files.map { URL(filePath: $0) }, duration: result.duration, lufs: result.lufs)
+    }
+
+    func editClip(_ request: ClipRequest, to output: URL) async throws -> Double {
+        struct Result: Decodable { var duration: Double }
+        let effects = request.effects
+        return try await call("edit_clip", [
+            "audio": request.audio.path, "out": output.path, "start": request.start, "end": request.end,
+            "tempo": effects.tempo, "pitch": effects.pitch, "warmth": effects.warmth, "brightness": effects.brightness,
+            "denoise": effects.denoise, "gain_db": request.gain, "fade_in": request.fadeIn, "fade_out": request.fadeOut,
+        ], as: Result.self).duration
     }
 
     // MARK: Worker
@@ -472,5 +500,24 @@ struct FakeEngine: Engine {
             .first { !FileManager.default.fileExists(atPath: $0.path) }!
         try FileManager.default.copyItem(at: request.lines[0].audio, to: url)
         return MixResult(files: [url], duration: request.lines.reduce(0) { $0 + audioDuration($1.audio) + $1.pauseAfter }, lufs: Double(request.options.lufs))
+    }
+
+    /// The trim, gain and fades for real. Tempo only changes the length (samples are dropped or repeated, so the pitch
+    /// moves too); the other voice tools need ffmpeg and are left out.
+    func editClip(_ request: ClipRequest, to output: URL) async throws -> Double {
+        let rate = 24000.0
+        let samples = try await loadSamples(request.audio, rate: rate)
+        let from = min(max(Int(request.start * rate), 0), samples.count), to = min(max(Int(request.end * rate), from), samples.count)
+        let tempo = request.effects.tempo.clamped(VoiceEffects.tempos), count = Int(Double(to - from) / tempo)
+        let gain = Float(pow(10, request.gain / 20)), length = Double(count) / rate
+        let out = (0..<count).map { index in
+            let time = Double(index) / rate
+            let fadeIn = request.fadeIn > 0 ? min(1, time / request.fadeIn) : 1
+            let fadeOut = request.fadeOut > 0 ? min(1, (length - time) / request.fadeOut) : 1
+            return samples[min(from + Int(Double(index) * tempo), to - 1)] * gain * Float(fadeIn * fadeOut)
+        }
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writeWAV(out[...], rate: rate, to: output)
+        return length
     }
 }

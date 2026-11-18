@@ -59,7 +59,7 @@ def file_names(job: dict, stem: str) -> dict:
     ext = job["format"]
     names = {"main": f"{stem}.{ext}"}
     if job["per_line"]:
-        names |= {f"line {line['number']}": f"{stem} line {line['number']}.{ext}" for line in job["lines"]}
+        names |= {role: f"{stem} {role}.{ext}" for role in line_roles(job)}
     if job["per_voice"]:
         names |= {f"voice {voice}": f"{stem} {_safe(voice)}.{ext}" for voice in voices(job)}
     if job["srt"]:
@@ -75,6 +75,25 @@ def unique_stem(job: dict) -> str:
         stem = job["name"] if count == 1 else f"{job['name']} {count}"
         if not any((job["out_dir"] / name).exists() for name in file_names(job, stem).values()):
             return stem
+
+
+def runs(job: dict) -> list[list[int]]:
+    """Line indexes grouped into script lines. The timeline sends one entry per clip, so a line cut into pieces
+    arrives as consecutive entries with the same number; captions, timing and per-line files treat them as one."""
+    return [[index for index, _ in group]
+            for _, group in itertools.groupby(enumerate(job["lines"]), key=lambda item: item[1]["number"])]
+
+
+def line_roles(job: dict) -> list[str]:
+    """A role per run: "line 3", then "line 3 (2)" when line 3 comes back later (a piece moved elsewhere),
+    so no per-line file overwrites another."""
+    seen: dict[int, int] = {}
+    roles = []
+    for run in runs(job):
+        number = job["lines"][run[0]]["number"]
+        seen[number] = seen.get(number, 0) + 1
+        roles.append(f"line {number}" + (f" ({seen[number]})" if seen[number] > 1 else ""))
+    return roles
 
 
 def voices(job: dict) -> list[str]:
@@ -137,18 +156,23 @@ def _write(path: Path, samples: np.ndarray, fmt: str) -> None:
 def mix(request: dict, progress=lambda **_: None, check=lambda: None) -> dict:
     """Write an export. `check` raises to cancel; nothing is left behind when it does."""
     job = prepare(request)
-    pieces, timing, elapsed = [], [], 0.0
+    pieces, spans, elapsed = [], [], 0.0
     for index, line in enumerate(job["lines"]):
         check()
         samples = audio.read_mono(line["audio"], RATE)
         pieces.append(samples)
-        timing.append({"index": index, "number": line["number"], "text": line["text"], "voice": line["voice"],
-                       "start": round(elapsed, 3), "end": round(elapsed + len(samples) / RATE, 3)})
+        spans.append((round(elapsed, 3), round(elapsed + len(samples) / RATE, 3)))
         elapsed += len(samples) / RATE
         if line["pause_after"] and index < len(job["lines"]) - 1:
             pieces.append(np.zeros(round(line["pause_after"] * RATE), dtype=np.float32))
             elapsed += len(pieces[-1]) / RATE
         progress(stage="read", done=index + 1, total=len(job["lines"]))
+    # A split line runs from its first piece's start to its last piece's end, the gaps between them included.
+    timing = []
+    for run in runs(job):
+        first = job["lines"][run[0]]
+        timing.append({"index": run[0], "number": first["number"], "text": first["text"], "voice": first["voice"],
+                       "start": spans[run[0]][0], "end": spans[run[-1]][1]})
 
     out_dir = job["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +191,7 @@ def mix(request: dict, progress=lambda **_: None, check=lambda: None) -> dict:
 
         audio_files = {"main": mixed}
         if job["per_line"]:
-            audio_files |= {f"line {line['number']}": mixed[span(line)] for line in timing}
+            audio_files |= {role: mixed[span(line)] for role, line in zip(line_roles(job), timing)}
         if job["per_voice"]:
             for voice in voices(job):
                 # The whole timeline with only this voice's lines, so stems line up with the mix.

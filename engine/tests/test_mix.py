@@ -85,6 +85,37 @@ def test_cancel_leaves_nothing(tmp_path):
     assert list((tmp_path / "out").iterdir()) == []
 
 
+def test_a_line_cut_into_pieces_stays_one_line(tmp_path):
+    # The timeline sends one entry per clip: line 1 cut in two arrives as two entries numbered 1.
+    piece = {"text": "Meet the [confident] next chapter.", "voice": "Me", "number": 1}
+    result = mix.mix(request(tmp_path, per_line=True, srt=True, timing=True, lines=[
+        {**piece, "audio": tone(tmp_path, "one-a", 1.0, 0.2), "pause_after": 0.25},
+        {**piece, "audio": tone(tmp_path, "one-b", 1.5, 0.2), "pause_after": 0.5},
+        {"audio": tone(tmp_path, "two", 2.0, 0.2), "text": "Everything is ready.", "voice": "Me", "number": 2}]))
+    out = tmp_path / "out"
+    assert [(line["index"], line["number"], line["start"], line["end"]) for line in result["lines"]] == [
+        (0, 1, 0.0, 2.75), (2, 2, 3.25, 5.25)]
+    assert sorted(p.name for p in out.iterdir()) == ["Launch- film line 1.wav", "Launch- film line 2.wav",
+                                                     "Launch- film.json", "Launch- film.srt", "Launch- film.wav"]
+    assert duration(out / "Launch- film line 1.wav") == pytest.approx(2.75, abs=0.01)   # both pieces and the gap
+    assert (out / "Launch- film.srt").read_text() == (
+        "1\n00:00:00,000 --> 00:00:02,750\nMeet the next chapter.\n\n"
+        "2\n00:00:03,250 --> 00:00:05,250\nEverything is ready.\n")
+    assert json.loads((out / "Launch- film.json").read_text()) == result["lines"]
+
+
+def test_a_line_that_comes_back_later_gets_its_own_entry_and_file(tmp_path):
+    lines = [{"audio": tone(tmp_path, name, 1.0, 0.2), "text": f"Line {number}.", "voice": "Me", "number": number}
+             for name, number in (("three", 3), ("four", 4), ("three-again", 3))]
+    result = mix.mix(request(tmp_path, per_line=True, lines=lines))
+    out = tmp_path / "out"
+    assert [(line["index"], line["number"], line["start"]) for line in result["lines"]] == [(0, 3, 0.0), (1, 4, 1.0),
+                                                                                          (2, 3, 2.0)]
+    assert result["files"] == [str(out / name) for name in (
+        "Launch- film.wav", "Launch- film line 3.wav", "Launch- film line 4.wav", "Launch- film line 3 (2).wav")]
+    assert all(duration(path) == pytest.approx(1.0, abs=0.01) for path in result["files"][1:])
+
+
 @pytest.mark.parametrize("change, message", [
     ({"format": "mp3"}, "format"),
     ({"lines": []}, "lines"),

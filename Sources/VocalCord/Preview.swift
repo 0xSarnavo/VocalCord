@@ -11,6 +11,8 @@ struct Timeline: Equatable {
         var audio: URL?
         var start: Double
         var duration: Double
+        /// The timeline clip this plays, when built from a project's edit.
+        var clipID: String? = nil
     }
 
     var projectID = ""
@@ -331,7 +333,7 @@ struct PreviewPane: View {
 }
 
 /// Its own view so only it redraws as the playhead moves.
-private struct PlayTime: View {
+struct PlayTime: View {
     @Environment(Preview.self) private var preview
 
     var body: some View {
@@ -512,7 +514,12 @@ struct ExportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Export").font(.system(size: 22, weight: .bold))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Export").font(.system(size: 22, weight: .bold))
+                if projects.project(projectID)?.edit != nil {
+                    Text("Follows the timeline, with its cuts and settings.").foregroundStyle(Theme.secondary)
+                }
+            }
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 14) {
                 GridRow {
                     Text("Format").foregroundStyle(Theme.secondary)

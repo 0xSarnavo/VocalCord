@@ -100,7 +100,8 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     // check_script is listed only once Jev is added.
     let tools = try #require((try await rpc(bridge, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(tools.compactMap { $0["name"] as? String }
-        == ["get_voices", "get_script", "update_script", "add_lines", "render_line", "get_scores", "get_takes", "propose_take_changes", "audition"])
+        == ["get_voices", "get_script", "update_script", "add_lines", "render_line", "get_scores", "get_timeline", "propose_timeline_edits",
+            "get_takes", "propose_take_changes", "audition"])
     let withJev = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys("k"), send: FakeTypeSafe([:]).send)) { open }
     let jevTools = try #require((try await rpc(withJev, "tools/list")?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
     #expect(jevTools.compactMap { $0["name"] as? String }.contains("check_script"))
@@ -181,6 +182,135 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     lines = try #require(projects.project(id)?.lines)
     #expect(lines.count == 2 && lines[0].text == "Every voice app wanted the same thing." && lines[0].added == nil && lines[0].proposal == nil)
     #expect(lines[1].added == true)
+}
+
+// MARK: Timeline tools
+
+@MainActor private func waitForRenders(_ projects: ProjectStore) async throws {
+    while projects.progress != nil { try await Task.sleep(for: .milliseconds(20)) }
+}
+
+/// The script fixture with a third line, every line rendered: 2 s each, with the default 0.5 s pause.
+@MainActor private func timelineFixture() async throws -> (ProjectStore, VoiceStore, String) {
+    let (projects, voices, id) = try scriptFixture()
+    projects.addLines(["Here's what changed."], to: id, voices: voices)
+    projects.renderNeeded(id, voices: voices)
+    try await waitForRenders(projects)
+    return (projects, voices, id)
+}
+
+/// Line 3 rendered again and a fourth line rendered, both after the timeline was made.
+@MainActor private func renderAfterTheTimeline(_ projects: ProjectStore, _ voices: VoiceStore, _ id: String) async throws {
+    projects.rerender(try #require(projects.project(id)?.lines[2].id), in: id, voices: voices)
+    try await waitForRenders(projects)
+    projects.addLines(["That's the plan."], to: id, voices: voices)
+    projects.renderNeeded(id, voices: voices)
+    try await waitForRenders(projects)
+}
+
+private func object(_ text: String) throws -> [String: Any] {
+    try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any], "\(text)")
+}
+
+@MainActor @Test func getTimelineReadsTheTrackFilledFromTheScript() async throws {
+    let (projects, voices, id) = try await timelineFixture()
+    let empty = projects.create(name: "Empty")
+    var open: String? = empty
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { open }
+
+    // A project with no renders has no timeline to read or edit, and none is made.
+    let message = "This project has no renders yet. Render its lines first: the timeline is made from them."
+    #expect(try await callTool(bridge, "get_timeline") == (message, true))
+    #expect(try await callTool(bridge, "propose_timeline_edits", ["edits": [["op": "delete", "clip": 1]]]) == (message, true))
+    #expect(projects.project(empty)?.edit == nil)
+
+    open = id
+    #expect(projects.project(id)?.edit == nil)
+    var timeline = try object(try await callTool(bridge, "get_timeline").text)
+    // Filled from the script on the first read; the next read finds the same clips.
+    let edit = try #require(projects.project(id)?.edit)
+    _ = try await callTool(bridge, "get_timeline")
+    #expect(projects.project(id)?.edit == edit)
+    #expect(timeline["project"] as? String == "Launch film" && timeline["duration"] as? Double == 7)
+    var clips = try #require(timeline["clips"] as? [[String: Any]])
+    #expect(clips.map { $0["clip"] as? Int } == [1, 2, 3] && clips.map { $0["line"] as? Int } == [1, 2, 3])
+    #expect(clips.map { $0["start"] as? Double } == [0, 2.5, 5] && clips[1]["text"] as? String == "Let's take a closer look.")
+    #expect(clips[0]["render_start"] as? Double == 0 && clips[0]["render_end"] as? Double == 2 && clips[0]["render_duration"] as? Double == 2)
+    #expect(clips[0]["duration"] as? Double == 2 && clips[0]["gap_after"] as? Double == 0.5 && clips[0]["volume_db"] as? Double == 0)
+    #expect(clips[0]["speed"] as? Double == 1 && clips[0]["pitch"] as? Double == 0 && clips[0]["denoise"] as? Bool == false)
+    #expect(clips.allSatisfy { $0["new_render_waiting"] as? Bool == false })
+    #expect(timeline["lines_not_on_timeline"] as? [Int] == [] && timeline["pending_proposal"] == nil)
+
+    // A line rendered again waits to be swapped in; a line rendered after the timeline was made waits to be added.
+    try await renderAfterTheTimeline(projects, voices, id)
+    timeline = try object(try await callTool(bridge, "get_timeline").text)
+    clips = try #require(timeline["clips"] as? [[String: Any]])
+    #expect(clips.map { $0["new_render_waiting"] as? Bool } == [false, false, true])
+    #expect(timeline["lines_not_on_timeline"] as? [Int] == [4])
+}
+
+@MainActor @Test func timelineEditsApplyInOrderToTheNumbersTheAgentRead() async throws {
+    let (projects, voices, id) = try await timelineFixture()
+    let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
+    _ = try await callTool(bridge, "get_timeline")
+    try await renderAfterTheTimeline(projects, voices, id)
+    let before = try #require(projects.project(id)?.edit)
+
+    let result = try await callTool(bridge, "propose_timeline_edits", ["edits": [
+        ["op": "split", "clip": 1, "at": 0.8],
+        ["op": "trim", "clip": 2, "start": 0.2, "end": 1.9],
+        ["op": "move", "clip": 2, "to": 1],
+        ["op": "volume", "clip": 1, "db": -3],
+        ["op": "trim", "clip": 9, "end": 1],
+        ["op": "gap", "clip": 2, "seconds": 12],
+        ["op": "voice", "clip": 2, "speed": 1.05, "pitch": -1],
+        ["op": "delete", "clip": 1],
+        ["op": "fade", "clip": 1, "out": 0.3],
+        ["op": "spin"],
+        ["op": "swap_in", "line": 3],
+        ["op": "add_line", "line": 4],
+        ["op": "gap", "clip": 3, "seconds": 0],
+        ["op": "move", "clip": 2, "to": 3],
+    ]])
+    #expect(!result.isError, "\(result.text)")
+    let json = try object(result.text)
+    let changes = [
+        "Split clip 1 (line 1) at 0.8 s", "Trim clip 2 (line 2) to 0.20–1.90 s of its render", "Move clip 2 (line 2) before clip 1 (line 1)",
+        "Make clip 1 (line 1) 3 dB quieter", "Clip 2 (line 2): speed up to 105%, pitch down 1 semitone", "Delete clip 1 (line 1)",
+        "Swap in line 3's new render", "Add line 4 to the timeline", "Shorten the gap after clip 3 (line 3) to 0 s",
+        "Move clip 2 (line 2) after clip 3 (line 3)",
+    ]
+    #expect(json["proposed"] as? Int == 10 && json["changes"] as? [String] == changes)
+    // Bad edits are skipped by name; clip 1 was deleted by an earlier edit in the same call.
+    #expect(json["errors"] as? [String] == [
+        "Edit 5 (trim clip 9): clip must be a clip number from 1 to 3.", "Edit 6 (gap clip 2): seconds must be from 0 to 10.",
+        "Edit 9 (fade clip 1): That clip is no longer on the timeline.",
+        "Edit 10 (spin): op must be one of split, trim, delete, move, gap, volume, fade, voice, swap_in, add_line.",
+    ])
+    #expect(json["note"] as? String == "Nothing is applied: the user accepts or rejects these changes in the Timeline tab.")
+
+    // Proposed only: the timeline is unchanged until the user accepts.
+    let project = try #require(projects.project(id))
+    #expect(project.edit == before)
+    let proposal = try #require(project.editProposal)
+    let clips = proposal.edit.clips, lines = project.lines
+    #expect(proposal.changes == changes && clips.map(\.lineID) == [lines[0].id, lines[2].id, lines[1].id, lines[3].id])
+    // The split's second half; the first half, made quieter, was deleted.
+    #expect(clips[0].start == 0.8 && clips[0].end == 2 && clips[0].gain == 0 && clips[0].id != before.clips[0].id)
+    #expect(clips[1].id == before.clips[2].id && clips[1].versionID == lines[2].chosen && clips[1].gapAfter == 0)
+    #expect(clips[2].start == 0.2 && clips[2].end == 1.9 && clips[2].effects == VoiceEffects(tempo: 1.05, pitch: -1))
+    #expect(try await callTool(bridge, "get_timeline").text.contains("\"pending_proposal\":{\"changes\":[\"Split clip 1 (line 1) at 0.8 s\","))
+
+    // A call where every edit fails leaves the earlier proposal waiting.
+    let failed = try object(try await callTool(bridge, "propose_timeline_edits", ["edits": [["op": "delete", "clip": 7]]]).text)
+    #expect(failed["proposed"] as? Int == 0 && failed["note"] as? String == "Nothing was proposed; any earlier proposal still waits.")
+    #expect(projects.project(id)?.editProposal == proposal)
+    // Each call starts from the timeline as it is and replaces the last proposal; one that leaves it as it is clears it.
+    let same = try object(try await callTool(bridge, "propose_timeline_edits", ["edits": [["op": "volume", "clip": 1, "db": 0]]]).text)
+    #expect(same["proposed"] as? Int == 0 && same["changes"] as? [String] == [])
+    #expect(same["note"] as? String == "These edits leave the timeline as it is, so nothing is pending.")
+    #expect(projects.project(id)?.editProposal == nil && projects.project(id)?.edit == before)
+    #expect(try await callTool(bridge, "propose_timeline_edits").isError)
 }
 
 // MARK: Take tools
