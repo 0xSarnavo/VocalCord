@@ -408,15 +408,6 @@ extension Terminals: @preconcurrency LocalProcessTerminalViewDelegate {
 
 // MARK: Panel
 
-/// Opens and closes the Terminal panel: native toolbar glass, filled grey while open.
-struct TerminalButton: View {
-    @AppStorage("terminalOpen") private var open = false
-
-    var body: some View {
-        Toggle("Terminal", isOn: $open).toggleStyle(.button)
-    }
-}
-
 /// The panel under the script: its top edge resizes it, then a tab per installed agent and the selected agent's terminal.
 struct TerminalPanel: View {
     @Environment(Terminals.self) private var terminals

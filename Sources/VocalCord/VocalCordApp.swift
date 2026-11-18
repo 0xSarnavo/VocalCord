@@ -173,9 +173,9 @@ struct PluginSettings: View {
                     Button("Remove") {
                         do { try jev.remove() } catch { self.error = error.localizedDescription }
                     }
-                    .buttonStyle(.outline)
+                    .buttonStyle(.vc(.secondary))
                 } else if !adding {
-                    Button("Add Jev") { adding = true }.buttonStyle(.outline)
+                    Button("Add Jev") { adding = true }.buttonStyle(.vc(.secondary))
                 }
             }
             if adding, !jev.added {
@@ -189,10 +189,10 @@ struct PluginSettings: View {
                         key = ""
                         error = nil
                     }
-                    .buttonStyle(.outline)
+                    .buttonStyle(.vc(.secondary))
                     .disabled(validating)
                     Button(validating ? "Checking key…" : "Add", action: add)
-                        .buttonStyle(.primary(height: 30))
+                        .buttonStyle(.vc(.primary))
                         .disabled(validating || key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }

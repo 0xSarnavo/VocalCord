@@ -75,22 +75,6 @@ extension ButtonStyle where Self == VCButtonStyle {
         VCButtonStyle(kind: kind, height: size.height, selected: selected)
     }
 
-    // The styles the views used before the refresh, mapped onto the new sizes: up to 26 → S, up to 31 → M,
-    // up to 40 → L; larger ones (the capture flows' big buttons) keep their height.
-    static var primary: VCButtonStyle { VCButtonStyle(kind: .primary, height: VCSize.l.height) }
-    static func primary(height: CGFloat) -> VCButtonStyle { VCButtonStyle(kind: .primary, height: legacyHeight(height)) }
-    static var outline: VCButtonStyle { VCButtonStyle(kind: .secondary, height: VCSize.m.height) }
-    static func outline(height: CGFloat) -> VCButtonStyle { VCButtonStyle(kind: .secondary, height: legacyHeight(height)) }
-    static var toolbarPrimary: VCButtonStyle { VCButtonStyle(kind: .primary, height: VCSize.m.height) }
-}
-
-private func legacyHeight(_ height: CGFloat) -> Double {
-    switch height {
-    case ...26: VCSize.s.height
-    case ...31: VCSize.m.height
-    case ...40: VCSize.l.height
-    default: height
-    }
 }
 
 /// An icon-only button: a square `size` tall, the glyph grey until the pointer is over it. `filled` gives it the

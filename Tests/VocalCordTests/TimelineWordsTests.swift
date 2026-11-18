@@ -38,12 +38,12 @@ private func placed(_ words: [StripWord]) -> [String] { words.map { "\($0.text)@
     #expect(TrackLayout.stripWords(["One"], times: times, clip: clip(), pointsPerSecond: 100, measure: measure).isEmpty)
 }
 
-@Test func stripThinsOutWhenZoomedOut() {
-    // At 20 points a second words are 12 points apart: "two" would run into "One", so the strip stops there.
+@Test func stripFlowsInOrderWhenZoomedOut() {
+    // At 20 points a second the clip is 52 points wide: "two", pushed past "One", wouldn't end inside it.
     #expect(placed(strip(clip(), zoom: 20)) == ["One@6.0"])
-    // It stops rather than skipping: at 30 points a second "three" would fit after "One", but without "two" between
-    // them the strip would read as other words ("Meet next of your"), so it shows "One" alone.
-    #expect(placed(strip(clip(), zoom: 30)) == ["One@6.0"])
+    // At 30 points a second "two" is said at 24 but "One" ends at 24 + its gap, so it sits just after, at 30; "three"
+    // would run past the clip's end. The strip reads as the line's words in order, never every other one.
+    #expect(placed(strip(clip(), zoom: 30)) == ["One@6.0", "two@30.0"])
     // A clip under 40 points shows none.
     #expect(strip(clip(), zoom: 15).isEmpty && !strip(clip(), zoom: 16).isEmpty)
     // At any zoom, the words are the first ones in order, no label touches the one before it, and every label ends

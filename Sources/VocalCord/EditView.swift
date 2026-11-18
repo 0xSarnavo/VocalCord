@@ -156,10 +156,11 @@ enum TrackLayout {
     static let stripInset = 6.0, stripGap = 6.0
 
     /// The words a clip plays, for the strip under its waveform: each one mostly inside the trim (`start`–`end` of the
-    /// render), placed where it starts, `(word.start − clip.start) / tempo × pointsPerSecond` from the clip's left edge.
-    /// The strip stops at the first word whose label would run into the one before it, or past the clip's end, so
-    /// zoomed out it shows the first words in order ("Meet the…") rather than every other one ("Meet next of"); a clip
-    /// under 40 points shows none. `texts` and `times` are the render's display words.
+    /// render), placed where it starts, `(word.start − clip.start) / tempo × pointsPerSecond` from the clip's left edge,
+    /// or just after the word before it when that one's label is still in the way. So the strip reads as the line's
+    /// words in order ("Meet the next chapter"), a little ahead of the audio when zoomed out and under it when zoomed
+    /// in, rather than every other word ("Meet next of") or only the first. It stops at the first word that would run
+    /// past the clip's end; a clip under 40 points shows none. `texts` and `times` are the render's display words.
     static func stripWords(_ texts: [String], times: [WordTime], clip: EditClip, pointsPerSecond: Double,
                            measure: (String) -> Double) -> [StripWord] {
         let width = clip.duration * pointsPerSecond
@@ -170,9 +171,10 @@ enum TrackLayout {
             // Words trimmed off the front are skipped; the first one inside the trim starts the strip.
             guard middle >= clip.start else { continue }
             guard middle <= clip.end else { break }
-            let x = max(stripInset, (max(time.start, clip.start) - clip.start) / clip.effects.tempo * pointsPerSecond)
+            let spoken = (max(time.start, clip.start) - clip.start) / clip.effects.tempo * pointsPerSecond
+            let x = max(next, spoken)
             let label = measure(texts[token])
-            guard x >= next, x + label <= width - stripInset else { break }
+            guard x + label <= width - stripInset else { break }
             words.append(StripWord(token: token, text: texts[token], x: x))
             next = x + label + stripGap
         }
