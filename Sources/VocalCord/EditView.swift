@@ -61,6 +61,38 @@ struct TrimDraft: Equatable {
 
 /// The track's layout and gestures as plain numbers, so they can be tested without a window.
 enum TrackLayout {
+    /// The track's rows, top to bottom: the ruler, a gap, the clips, and the scroll bar's own room under them.
+    static let ruler = 24.0, rulerGap = 8.0, scrollBar = 16.0
+    /// The clips' height: the smallest still fits the header band, some waveform and the words strip; past the largest
+    /// a taller clip only shows the same waveform bigger.
+    static let lanes = 96.0...240.0
+
+    /// The clips' height in a track area `available` points tall.
+    static func lane(available: Double) -> Double { (available - height(lane: 0)).clamped(lanes) }
+
+    /// The whole track for clips `lane` tall, the scroll bar's room included.
+    static func height(lane: Double) -> Double { content(lane: lane) + scrollBar }
+
+    /// What the scroll view's content draws: the ruler and the clips, never the scroll bar's room, so the scroll bar
+    /// (always shown with a mouse) has nothing under it.
+    static func content(lane: Double) -> Double { ruler + rulerGap + lane }
+
+    /// The grab zone inside each edge of a clip `width` points wide: 12 points, less on a narrow clip so its middle
+    /// can still be dragged to move it.
+    static func trimZone(_ width: Double) -> Double { min(12, width / 4) }
+
+    /// The playhead's head in the ruler: flat along the top, pointing down at the clips.
+    static let playheadHead = (width: 11.0, height: 10.0)
+
+    /// Ruler labels sit this far right of their tick: clear of the playhead's head when it rests on a tick.
+    static let rulerLabelInset = 6.0
+
+    /// Whether the label of a tick at `x`, `width` points wide, shows whole between `left` and `right` (the stretch in
+    /// view, within the track); one that would be cut by either edge isn't drawn.
+    static func rulerLabelFits(tick x: Double, width: Double, left: Double, right: Double) -> Bool {
+        x + rulerLabelInset >= left && x + rulerLabelInset + width <= right
+    }
+
     /// Each clip's frame. A trim in progress moves the edge being dragged: an end pushes the clips after it along, as
     /// the edit will once released; a start leaves the rest in place until then, so the edge stays under the pointer.
     static func frames(_ edit: Edit, scale: TrackScale, trim: TrimDraft? = nil) -> [ClipFrame] {
@@ -119,13 +151,15 @@ enum TrackLayout {
     /// The words a render speaks, without tags such as `[confident]` or `[pause 0.3]`.
     static func words(_ text: String) -> String { Marks.plain(text) }
 
-    /// Room inside a clip's rounded ends before the first word and after the last, and between words.
-    static let stripInset = 4.0, stripGap = 6.0
+    /// Room inside a clip's ends before the first word and after the last (the clip header's inset, so the first word
+    /// lines up under "Line 3"), and between words.
+    static let stripInset = 6.0, stripGap = 6.0
 
     /// The words a clip plays, for the strip under its waveform: each one mostly inside the trim (`start`–`end` of the
     /// render), placed where it starts, `(word.start − clip.start) / tempo × pointsPerSecond` from the clip's left edge.
-    /// A word whose label would run into the one before it, or past the clip's end, is left out, so zoomed out the strip
-    /// thins rather than overlaps; a clip under 40 points shows none. `texts` and `times` are the render's display words.
+    /// The strip stops at the first word whose label would run into the one before it, or past the clip's end, so
+    /// zoomed out it shows the first words in order ("Meet the…") rather than every other one ("Meet next of"); a clip
+    /// under 40 points shows none. `texts` and `times` are the render's display words.
     static func stripWords(_ texts: [String], times: [WordTime], clip: EditClip, pointsPerSecond: Double,
                            measure: (String) -> Double) -> [StripWord] {
         let width = clip.duration * pointsPerSecond
@@ -133,10 +167,12 @@ enum TrackLayout {
         var words: [StripWord] = [], next = stripInset
         for (token, time) in times.enumerated() {
             let middle = (time.start + time.end) / 2
-            guard middle >= clip.start, middle <= clip.end else { continue }
+            // Words trimmed off the front are skipped; the first one inside the trim starts the strip.
+            guard middle >= clip.start else { continue }
+            guard middle <= clip.end else { break }
             let x = max(stripInset, (max(time.start, clip.start) - clip.start) / clip.effects.tempo * pointsPerSecond)
             let label = measure(texts[token])
-            guard x >= next, x + label <= width - stripInset else { continue }
+            guard x >= next, x + label <= width - stripInset else { break }
             words.append(StripWord(token: token, text: texts[token], x: x))
             next = x + label + stripGap
         }
@@ -187,6 +223,11 @@ struct EditView: View {
     @State private var selected: String?
     @State private var exporting = false
 
+    /// `selected` opens with that clip chosen (the snapshot tests use it).
+    init(selected: String? = nil) {
+        _selected = State(initialValue: selected)
+    }
+
     /// Opens the timeline when a project has a render to put on it, including one rendered while the tab is open.
     private struct Opening: Equatable {
         var projectID: String
@@ -200,19 +241,23 @@ struct EditView: View {
             Group {
                 if let project = projects.project(selection) {
                     let rendered = project.lines.contains { $0.chosenVersion != nil }
-                    HStack(spacing: 8) {
+                    // Edge to edge: the work pane, a hairline, the Inspector on the window's colour.
+                    HStack(spacing: 0) {
                         GeometryReader { proxy in
-                            VStack(spacing: 8) {
+                            VStack(spacing: 0) {
                                 Group {
                                     if project.edit != nil {
                                         EditorPane(project: project, selected: $selected).id(project.id)
                                     } else if !rendered {
-                                        VStack(spacing: 12) {
-                                            Text("Render lines in Generate first.").foregroundStyle(Theme.secondary)
-                                            Button("Open Generate") { mode = .generate }.buttonStyle(.outline)
+                                        VStack(spacing: 0) {
+                                            PanelHeader("Timeline") {}
+                                            EmptyState(title: "Nothing to edit yet",
+                                                       message: "Render lines in Generate, then cut and polish them here.") {
+                                                Button("Open Generate") { mode = .generate }
+                                                    .buttonStyle(.vc(.secondary, .m))
+                                                    .help("Open Generate (⌘2)")
+                                            }
                                         }
-                                        .font(.system(size: 14))
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     } else {
                                         Color.clear  // the timeline opens on the next update
                                     }
@@ -220,12 +265,14 @@ struct EditView: View {
                                 .frame(maxHeight: .infinity)
                                 .panel()
                                 if terminalOpen {
-                                    // The track keeps room for its header, questions, transport and clips.
-                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 376)
+                                    // The track keeps room for its header, a question, the transport and the smallest clips.
+                                    // The panel draws its own resizable top edge.
+                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - EditorPane.minimumHeight)
                                 }
                             }
                         }
                         if project.edit != nil {
+                            PaneDivider()
                             if sideOpen {
                                 InspectorPane(project: project, clipID: selected) { sideOpen = false }.frame(width: 280)
                             } else {
@@ -236,30 +283,29 @@ struct EditView: View {
                     .onChange(of: Opening(projectID: project.id, rendered: rendered), initial: true) { _, opening in
                         if opening.rendered { projects.startEdit(opening.projectID) }
                     }
+                    .focusedSceneValue(\.toggleSidePanel, project.edit != nil ? { sideOpen.toggle() } : nil)
                 } else {
-                    Text("No projects").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
+                    VStack(spacing: 0) {
+                        PanelHeader("Timeline") {}
+                        EmptyState(title: "No projects yet", message: "A project holds one script, its voices and its renders.")
+                    }
+                    .panel()
                 }
             }
             .onDisappear { preview.pause() }
         }
-        .toolbar { toolbar }
+        .toolbar {
+            // Export is the one off-white action; WorkspaceToolbar adds Terminal and the gear after it.
+            WorkspaceToolbar {
+                Button("Export") { exporting = true }
+                    .buttonStyle(.vc(.primary, .m))
+                    .disabled(!canExport)
+                    .help(canExport ? "Export (⇧⌘E)" : "Render a line first")
+            }
+        }
+        .focusedSceneValue(\.exportAction, canExport ? { exporting = true } : nil)
         .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
         .onChange(of: selection) { selected = nil }
-    }
-
-    /// As in Generate, without Render: Terminal, Export as the one off-white action, then the gear.
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) { TerminalButton() }
-        ToolbarSpacer(.fixed, placement: .primaryAction)
-        ToolbarItem(placement: .primaryAction) {
-            Button { exporting = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
-                .labelStyle(.titleAndIcon)
-                .buttonStyle(.toolbarPrimary)
-                .disabled(!canExport)
-        }
-        .sharedBackgroundVisibility(.hidden)
-        ToolbarSpacer(.fixed, placement: .primaryAction)
-        ToolbarItem(placement: .primaryAction) { SettingsButton() }
     }
 
     private var canExport: Bool {
@@ -292,25 +338,30 @@ struct EditorPane: View {
     private var edit: Edit { project.edit ?? Edit() }
     private var scale: TrackScale { TrackScale(pointsPerSecond: zoom.clamped(TrackScale.zooms)) }
 
+    static let transportHeight = 44.0
+    /// Header 40, transport 44 and its rule, one question card with its spacing, and the track at its smallest: what
+    /// the pane keeps when the Terminal opens under it.
+    static let minimumHeight = 40 + transportHeight + 1 + 56 + TrackLayout.height(lane: TrackLayout.lanes.lowerBound)
+
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader("Timeline") { zoomButtons }
             banners
             transport
-            Theme.line.frame(height: 1).padding(.horizontal, 8)
-            // The clips grow with the panel up to a point; the rest stays empty below, as under a short script. The
-            // smallest still has room for its name, some waveform and its words.
-            GeometryReader { proxy in
-                let lane = min(216, max(64, proxy.size.height - Track.height(lane: 0) - 40))
-                VStack(alignment: .leading, spacing: 4) {
+            Theme.line.frame(height: 1)
+            if edit.clips.isEmpty {
+                EmptyState(title: "The timeline is empty", message: "Put each line\u{2019}s chosen render back with Reset from script.") {
+                    Button("Reset from script\u{2026}") { resetting = true }
+                        .buttonStyle(.vc(.secondary, .m))
+                        .help("Put each line's chosen render back whole, in script order")
+                }
+            } else {
+                // The clips grow with the pane between the lane limits, from the top like any timeline; below them is
+                // the canvas. The track reserves its own room for the scroll bar, so nothing is drawn under it.
+                GeometryReader { proxy in
+                    let lane = TrackLayout.lane(available: proxy.size.height)
                     Track(project: project, edit: edit, scale: scale, lane: lane, peaks: peaks, selected: $selected, scroll: $scroll,
                           visible: $visible) { focused = true }
-                    Text("Click a clip to select it and move the playhead there. Drag its edges to trim it, its middle to move it.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 16)
-                    Spacer(minLength: 0)
                 }
             }
         }
@@ -318,6 +369,8 @@ struct EditorPane: View {
         // Plain keys only while the track has focus, so typing in the terminal never splits or deletes.
         .focusable(interactions: .edit)
         .focused($focused)
+        // It focuses itself on appear; a ring around the whole editor would say nothing.
+        .focusEffectDisabled()
         .onKeyPress(phases: .down, action: key)
         .onAppear {
             focused = true
@@ -351,7 +404,7 @@ struct EditorPane: View {
             building = false
         } catch is CancellationError {
         } catch {
-            buildError = "Couldn't prepare the audio. \(error.localizedDescription)"
+            buildError = "Couldn\u{2019}t prepare the audio. \(error.localizedDescription) Try Reset from script\u{2026}, or render the line again."
             building = false
         }
     }
@@ -394,41 +447,46 @@ struct EditorPane: View {
 
     // MARK: Header, banners and transport
 
-    @ViewBuilder private var zoomButtons: some View {
-        Group {
-            Button { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: false)) } label: { Image(systemName: "minus.magnifyingglass") }
-                .keyboardShortcut("-", modifiers: .command)
-                .disabled(scale.pointsPerSecond <= TrackScale.zooms.lowerBound)
-                .help("Zoom out (⌘−)")
-                .accessibilityLabel("Zoom out")
-            Button { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: true)) } label: { Image(systemName: "plus.magnifyingglass") }
-                .keyboardShortcut("+", modifiers: .command)
-                .disabled(scale.pointsPerSecond >= TrackScale.zooms.upperBound)
-                .help("Zoom in (⌘+)")
-                .accessibilityLabel("Zoom in")
-                // ⌘= is ⌘+ without Shift on most keyboards.
-                .background {
-                    Button("") { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: true)) }
-                        .keyboardShortcut("=", modifiers: .command)
-                        .opacity(0)
-                        .accessibilityHidden(true)
-                }
+    /// Zoom out and in as icons, then Fit: S controls, the icons 4 apart as a pair.
+    private var zoomButtons: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Button { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: false)) } label: { Image(systemName: "minus.magnifyingglass") }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .disabled(scale.pointsPerSecond <= TrackScale.zooms.lowerBound)
+                    .help("Zoom out (⌘−)")
+                    .accessibilityLabel("Zoom out")
+                Button { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: true)) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .keyboardShortcut("+", modifiers: .command)
+                    .disabled(scale.pointsPerSecond >= TrackScale.zooms.upperBound)
+                    .help("Zoom in (⌘+)")
+                    .accessibilityLabel("Zoom in")
+                    // ⌘= is ⌘+ without Shift on most keyboards.
+                    .background {
+                        Button("") { setZoom(TrackScale.zoomed(scale.pointsPerSecond, in: true)) }
+                            .keyboardShortcut("=", modifiers: .command)
+                            .opacity(0)
+                            .accessibilityHidden(true)
+                    }
+            }
+            .buttonStyle(.icon(.s))
             Button("Fit") {
                 zoom = TrackScale.fitting(edit.duration, in: visible.upperBound - visible.lowerBound)
                 Task { @MainActor in scroll.scrollTo(x: 0) }
             }
+            .buttonStyle(.vc(.ghost, .s))
+            .disabled(edit.clips.isEmpty)
             .help("Show the whole timeline")
             .accessibilityLabel("Zoom to fit")
         }
-        .buttonStyle(.outline(height: 28))
     }
 
-    /// One row per question: a new render to swap in, a line left off, and an agent's proposed changes.
+    /// One card per question: a new render to swap in, a line left off, and an agent's proposed changes.
     @ViewBuilder private var banners: some View {
         let renders = projects.newRenders(project.id), missing = Set(projects.linesNotOnTimeline(project.id))
         let numbered = Array(project.lines.enumerated()).filter { renders[$0.element.id] != nil || missing.contains($0.element.id) }
         if project.editProposal != nil || !numbered.isEmpty {
-            let rows = VStack(spacing: 6) {
+            let rows = VStack(spacing: 8) {
                 if let proposal = project.editProposal { proposalBanner(proposal) }
                 ForEach(numbered, id: \.element.id) { index, line in
                     if renders[line.id] != nil {
@@ -443,11 +501,11 @@ struct EditorPane: View {
                     }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            // As tall as the rows, scrolling only once they'd squeeze the clips under about 120 points.
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            // As tall as the cards, scrolling only once they'd squeeze the clips under about 120 points.
             ScrollView {
-                rows.padding(.bottom, 2).onGeometryChange(for: Double.self) { $0.size.height } action: { bannersHeight = $0 }
+                rows.onGeometryChange(for: Double.self) { $0.size.height } action: { bannersHeight = $0 }
             }
             .scrollBounceBehavior(.basedOnSize)
             .frame(height: min(bannersHeight, max(120, height - 300)))
@@ -456,17 +514,17 @@ struct EditorPane: View {
 
     private func banner(_ text: String, icon: String, tint: Color, @ViewBuilder actions: () -> some View) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(tint).accessibilityHidden(true)
-            Text(text).lineLimit(1)
+            Image(systemName: icon).font(.vcBody).foregroundStyle(tint).accessibilityHidden(true)
+            Text(text).foregroundStyle(Theme.text).lineLimit(1)
             Spacer(minLength: 8)
-            actions().buttonStyle(.outline(height: 26))
+            actions().buttonStyle(.vc(.secondary, .s))
         }
-        .font(.system(size: 13))
+        .font(.vcBody)
         .padding(.leading, 12)
-        .padding(.trailing, 7)
-        .frame(height: 40)
-        .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.line))
+        .padding(.trailing, 6)
+        .frame(height: 36)
+        .background(Theme.fill, in: .rect(cornerRadius: Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
         .accessibilityElement(children: .contain)
     }
 
@@ -474,9 +532,8 @@ struct EditorPane: View {
         let before = formatTime(edit.duration), after = formatTime(proposal.edit.duration)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: "text.bubble").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.secondary)
-                    .accessibilityHidden(true)
-                Text("Claude proposed changes").fontWeight(.semibold)
+                Image(systemName: "text.bubble").font(.vcBody).foregroundStyle(Theme.secondary).accessibilityHidden(true)
+                Text("Claude proposed changes").font(.vcBodyBold)
                 if before != after { Text("\(before) \u{2192} \(after)").foregroundStyle(Theme.secondary).monospacedDigit() }
                 Spacer(minLength: 8)
                 Button("Reject") { projects.rejectEditProposal(project.id) }
@@ -484,38 +541,49 @@ struct EditorPane: View {
                 Button("Accept") { projects.acceptEditProposal(project.id) }
                     .accessibilityLabel("Accept the proposed timeline changes")
             }
-            .buttonStyle(.outline(height: 26))
+            .buttonStyle(.vc(.secondary, .s))
+            .frame(height: 24)
             ForEach(Array(proposal.changes.enumerated()), id: \.offset) { _, change in
                 Text("\u{2022} \(change)").foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.leading, 20)
+            // Under the title, past the icon.
+            .padding(.leading, 21)
         }
-        .font(.system(size: 13))
+        .font(.vcBody)
         .padding(.leading, 12)
-        .padding(.trailing, 7)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.selection.opacity(0.6), in: .rect(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.outline.opacity(0.5)))
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+        .background(Theme.fill, in: .rect(cornerRadius: Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
         .accessibilityElement(children: .contain)
     }
 
+    /// Play and the time on the left; Split and Delete, Undo and Redo, then Reset, in groups 12 apart on the right.
     private var transport: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             PlayToggle()
-            PlayTime().padding(.leading, 4)
-            if building {
-                ProgressView().controlSize(.small).padding(.leading, 6)
-                Text("Preparing audio\u{2026}").font(.system(size: 12)).foregroundStyle(Theme.secondary).lineLimit(1)
-            } else if let buildError {
-                Warning(text: buildError).lineLimit(1).help(buildError).padding(.leading, 6)
-            }
-            Spacer(minLength: 8)
-            SplitButton(edit: edit, action: splitAtPlayhead)
-            Button(action: deleteSelected) { Label("Delete", systemImage: "trash") }
-                .disabled(!edit.clips.contains { $0.id == selected })
-                .help("Delete the selected clip (\u{232B})")
+            PlayTime().padding(.leading, 12)
             Group {
+                if building {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Preparing audio\u{2026}").font(.vcCaption).foregroundStyle(Theme.secondary).lineLimit(1)
+                    }
+                } else if let buildError {
+                    Warning(text: buildError).lineLimit(1).help(buildError)
+                }
+            }
+            .padding(.leading, 12)
+            Spacer(minLength: 12)
+            HStack(spacing: 8) {
+                SplitButton(edit: edit, action: splitAtPlayhead)
+                Button(action: deleteSelected) { IconLabel(title: "Delete", systemImage: "trash") }
+                    .buttonStyle(.vc(.secondary, .s))
+                    .disabled(!edit.clips.contains { $0.id == selected })
+                    .help(edit.clips.contains { $0.id == selected } ? "Delete the selected clip (\u{232B})" : "Select a clip to delete it (\u{232B})")
+            }
+            HStack(spacing: 4) {
                 Button { projects.undoEdit(project.id) } label: { Image(systemName: "arrow.uturn.backward") }
                     .keyboardShortcut("z", modifiers: .command)
                     .disabled(!projects.canUndoEdit(project.id))
@@ -527,19 +595,19 @@ struct EditorPane: View {
                     .help("Redo (⇧⌘Z)")
                     .accessibilityLabel("Redo")
             }
-            .padding(.leading, 6)
+            .buttonStyle(.icon(.s))
+            .padding(.leading, 12)
             Button("Reset from script\u{2026}") { resetting = true }
-                .padding(.leading, 6)
+                .buttonStyle(.vc(.ghost, .s))
+                .padding(.leading, 12)
                 .help("Put each line's chosen render back whole, in script order")
         }
-        .buttonStyle(.outline(height: 28))
-        .labelStyle(.titleAndIcon)
-        .padding(.horizontal, 12)
-        .frame(height: 52)
+        .padding(.horizontal, 16)
+        .frame(height: Self.transportHeight)
     }
 }
 
-/// Play and pause, the round button the preview uses, on the track and in the Read view. On the track Space does the
+/// Play and pause, the transport's square button, on the track and in the Read view. On the track Space does the
 /// same while it has focus.
 struct PlayToggle: View {
     @Environment(Preview.self) private var preview
@@ -547,17 +615,22 @@ struct PlayToggle: View {
     var spaceKey = true
 
     var body: some View {
-        Button { preview.toggle() } label: {
-            Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 13))
-                .frame(width: 34, height: 34)
-                .background(Color.white.opacity(0.08), in: .circle)
-                .contentShape(.circle)
+        TransportPlayButton(playing: preview.isPlaying) { preview.toggle() }
+            .disabled(preview.timeline.duration == 0)
+            .help((preview.isPlaying ? "Pause" : "Play") + (spaceKey ? " (Space)" : ""))
+    }
+}
+
+/// An icon and its label 6 apart, for the text buttons that carry a glyph (Split, Delete).
+private struct IconLabel: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage).accessibilityHidden(true)
+            Text(title)
         }
-        .buttonStyle(.plain)
-        .disabled(preview.timeline.duration == 0)
-        .help((preview.isPlaying ? "Pause" : "Play") + (spaceKey ? " (space)" : ""))
-        .accessibilityLabel(preview.isPlaying ? "Pause" : "Play")
     }
 }
 
@@ -568,9 +641,11 @@ private struct SplitButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) { Label("Split", systemImage: "scissors") }
-            .disabled(TrackLayout.split(at: preview.position, in: edit) == nil)
-            .help("Split the clip at the playhead (S)")
+        let possible = TrackLayout.split(at: preview.position, in: edit) != nil
+        Button(action: action) { IconLabel(title: "Split", systemImage: "scissors") }
+            .buttonStyle(.vc(.secondary, .s))
+            .disabled(!possible)
+            .help(possible ? "Split the clip at the playhead (S)" : "Move the playhead into a clip to split it (S)")
     }
 }
 
@@ -598,24 +673,21 @@ private struct Track: View {
         var offset: Double
     }
 
-    static let ruler = 26.0, spacing = 10.0, scrollBar = 16.0
-
-    /// The ruler, the clips and room under them for a scroll bar.
-    static func height(lane: Double) -> Double { ruler + spacing + lane + scrollBar }
-
     var body: some View {
         GeometryReader { proxy in
             let frames = TrackLayout.frames(edit, scale: scale, trim: trim)
             let width = max(proxy.size.width, (frames.map(\.maxX).max() ?? scale.x(0)) + 200)
             ScrollView(.horizontal) {
                 ZStack(alignment: .topLeading) {
-                    VStack(alignment: .leading, spacing: Self.spacing) {
-                        Ruler(scale: scale, visible: visible).frame(width: width, height: Self.ruler)
+                    VStack(alignment: .leading, spacing: TrackLayout.rulerGap) {
+                        Ruler(scale: scale, visible: visible).frame(width: width, height: TrackLayout.ruler)
                         lanes(frames, height: lane).frame(width: width, height: lane)
                     }
-                    Playhead(scale: scale, height: Self.ruler + Self.spacing + lane)
+                    Playhead(scale: scale, height: TrackLayout.content(lane: lane))
                 }
-                .frame(width: width, height: Self.height(lane: lane), alignment: .topLeading)
+                // Only the ruler and clips: the 16 points under them stay free, so the scroll bar has its own room
+                // instead of landing on whatever is drawn below the track.
+                .frame(width: width, height: TrackLayout.content(lane: lane), alignment: .topLeading)
                 .coordinateSpace(.named(Self.space))
             }
             .scrollIndicators(.automatic)
@@ -625,7 +697,8 @@ private struct Track: View {
             } action: { _, range in visible = range }
             .background { PlayheadFollower(scale: scale, visible: visible, scroll: $scroll) }
         }
-        .frame(height: Self.height(lane: lane))
+        .frame(height: TrackLayout.height(lane: lane))
+        .clipped()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Timeline")
     }
@@ -656,12 +729,8 @@ private struct Track: View {
                 let center = edit.starts[index] + edit.clips[index].duration / 2 + moving.offset / scale.pointsPerSecond
                 let drop = TrackLayout.dropIndex(center: center, moving: index, in: edit)
                 if drop != index, let x = TrackLayout.insertionX(drop, moving: index, frames: frames) {
-                    Capsule().fill(Theme.primary).frame(width: 3, height: height + 8).offset(x: x - 1.5, y: -4).allowsHitTesting(false)
+                    Rectangle().fill(Theme.primary).frame(width: 2, height: height + 8).offset(x: x - 1, y: -4).allowsHitTesting(false)
                 }
-            }
-            if edit.clips.isEmpty {
-                Text("The timeline is empty.").font(.system(size: 13)).foregroundStyle(Theme.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
             }
         }
     }
@@ -681,9 +750,10 @@ private struct Track: View {
             }
         } ?? []
         let isMoving = moving?.clipID == clip.id
-        let handle = min(8, frame.width / 4)
-        return ZStack {
-            ClipBlock(clip: shown, name: name, words: words, selected: selected == clip.id, newRender: newRender,
+        let handle = TrackLayout.trimZone(frame.width)
+        // Hover is tracked over the clip and its trim zones together, so the grips stay while the pointer is on an edge.
+        return Hovering { hovered in ZStack {
+            ClipBlock(clip: shown, name: name, words: words, selected: selected == clip.id, hovered: hovered, newRender: newRender,
                       peaks: url.flatMap { peaks.peaks[$0] }, project: project, strip: strip)
                 .contentShape(.rect)
                 .onTapGesture { location in
@@ -717,9 +787,9 @@ private struct Track: View {
                 Spacer(minLength: 0)
                 trimHandle(clip, .end, render: render, width: handle, name: name)
             }
-        }
+        } }
         .frame(width: max(2, frame.width), height: height)
-        .shadow(color: .black.opacity(isMoving ? 0.5 : 0), radius: 8, y: 2)
+        // Flat while it moves: it's selected, so it's the opaque selection grey over whatever it passes.
         .offset(x: frame.x + (isMoving ? moving?.offset ?? 0 : 0))
         .zIndex(isMoving || trim?.clipID == clip.id ? 1 : 0)
         .task(id: url) { if let url { await peaks.load(url) } }
@@ -756,56 +826,150 @@ private struct Track: View {
     }
 }
 
-/// One clip: its waveform for the trimmed stretch, shaped by its volume and fades, under "Line N" and its first words,
-/// with its words along the bottom where they're said.
+/// A clip's bands, top to bottom, and its waveform as numbers, so they can be tested without a window.
+enum ClipLayout {
+    /// "Line 3" and its first words, on a darker band along the top.
+    static let header = 20.0
+    /// Text inside a clip starts this far from its edge.
+    static let inset = 6.0
+    /// The words strip along the bottom, and the room under it.
+    static let strip = 16.0, stripBottom = 2.0
+    /// The waveform's room between the header and the strip: 2 in from the sides, 4 from the bands.
+    static let waveInset = (horizontal: 2.0, vertical: 4.0)
+    /// Narrower clips show no header text.
+    static let labelWidth = 40.0
+    /// The drag grips on each edge: 2 × 16, 4 in from the edge.
+    static let grip = (width: 2.0, height: 16.0, inset: 4.0)
+    /// The "new render" badge in the top-right corner: a 16-point rounded square, 4 in.
+    static let badge = 16.0, badgeInset = 4.0
+
+    /// Where the waveform sits in a clip `height` tall: its top and its height.
+    static func waveform(height: Double) -> (y: Double, height: Double) {
+        let top = header + waveInset.vertical
+        return (top, max(0, height - top - waveInset.vertical - strip - stripBottom))
+    }
+
+    /// Each 1-point column's level, 0 to 1, across a waveform `width` points wide: the loudest peak under the column (so
+    /// a zoomed-out clip keeps its loud parts), scaled by the clip's volume and fades. `peaks` cover the whole render,
+    /// `perSecond` of them a second.
+    static func levels(_ peaks: [Float], clip: EditClip, width: Double, perSecond: Double) -> [Double] {
+        let count = Int(width.rounded(.down)), length = clip.end - clip.start
+        guard count > 0, !peaks.isEmpty, length > 0 else { return [] }
+        // A little under full scale, so the loudest peak doesn't touch the bands.
+        let gain = pow(10, clip.gain / 20) * 0.85
+        return (0..<count).map { index in
+            let left = Double(index)
+            let from = clip.start + left / width * length, to = clip.start + (left + 1) / width * length
+            let low = min(max(0, Int(from * perSecond)), peaks.count - 1)
+            let high = min(max(low + 1, Int((to * perSecond).rounded(.up))), peaks.count)
+            let peak = Double(peaks[low..<high].max() ?? 0)
+            let time = (left + 0.5) / width * clip.duration
+            let fadeIn = clip.fadeIn > 0 ? time / clip.fadeIn : 1, fadeOut = clip.fadeOut > 0 ? (clip.duration - time) / clip.fadeOut : 1
+            return min(1, peak * gain * max(0, min(1, fadeIn, fadeOut)))
+        }
+    }
+
+    /// Below this half-height, in points, a column is silence and draws nothing.
+    static let silence = 0.25
+
+    /// The filled outline of `levels` drawn `height` tall, mirrored about the middle: one closed shape per stretch of
+    /// sound, none for silence, so a pause is just the baseline.
+    static func envelope(_ levels: [Double], height: Double) -> Path {
+        let middle = height / 2
+        var path = Path(), index = 0
+        while index < levels.count {
+            guard levels[index] * middle >= silence else { index += 1; continue }
+            var end = index
+            while end + 1 < levels.count, levels[end + 1] * middle >= silence { end += 1 }
+            // Quiet sound still shows as a sliver a point tall.
+            let halves = levels[index...end].map { max(0.5, $0 * middle) }
+            path.move(to: CGPoint(x: Double(index), y: middle))
+            for (offset, half) in halves.enumerated() { path.addLine(to: CGPoint(x: Double(index + offset) + 0.5, y: middle - half)) }
+            path.addLine(to: CGPoint(x: Double(end + 1), y: middle))
+            for (offset, half) in halves.enumerated().reversed() { path.addLine(to: CGPoint(x: Double(index + offset) + 0.5, y: middle + half)) }
+            path.closeSubpath()
+            index = end + 1
+        }
+        return path
+    }
+}
+
+/// Whether the pointer is over `content`, handed to it to draw with.
+private struct Hovering<Content: View>: View {
+    @ViewBuilder let content: (Bool) -> Content
+    @State private var hovered = false
+
+    var body: some View {
+        content(hovered).onHover { hovered = $0 }
+    }
+}
+
+/// One clip: "Line N" and its first words on a band along the top, its waveform for the trimmed stretch shaped by its
+/// volume and fades, and its words along the bottom where they're said.
 private struct ClipBlock: View {
     let clip: EditClip
     let name: String
     let words: String
     let selected: Bool
+    /// The pointer is over the clip or one of its trim zones.
+    let hovered: Bool
     let newRender: Bool
     let peaks: [Float]?
     let project: Project
     let strip: [StripWord]
-    @State private var hovered = false
-
-    /// The words' row along the bottom, kept even when they aren't timed yet so every clip's waveform lines up.
-    static let stripHeight = 16.0, stripBottom = 4.0
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 8)
+        let shape = RoundedRectangle(cornerRadius: Radius.clip)
         GeometryReader { proxy in
+            let wave = ClipLayout.waveform(height: proxy.size.height)
             ZStack(alignment: .topLeading) {
-                shape.fill(selected ? Theme.selection : Color.white.opacity(hovered ? 0.075 : 0.055))
-                waveform.padding(.top, 24).padding(.bottom, Self.stripHeight + Self.stripBottom + 2).padding(.horizontal, 3)
+                shape.fill(selected ? Theme.selection : hovered ? Theme.control : Theme.fill)
+                Color.black.opacity(0.2).frame(height: ClipLayout.header)
+                ClipWaveform(clip: clip, peaks: peaks ?? [], color: selected ? Theme.text.opacity(0.9) : Theme.secondary.opacity(0.85))
+                    .frame(height: wave.height)
+                    .padding(.top, wave.y)
+                    .padding(.horizontal, ClipLayout.waveInset.horizontal)
+                FadeMarks(clip: clip).padding(.top, ClipLayout.header)
+                // The strip's room is kept even when the words aren't timed yet, so every clip's waveform lines up.
                 if !strip.isEmpty {
                     ClipWords(project: project, clipID: clip.id, words: strip)
-                        .frame(height: Self.stripHeight)
+                        .frame(height: ClipLayout.strip)
                         .frame(maxHeight: .infinity, alignment: .bottom)
-                        .padding(.bottom, Self.stripBottom)
+                        .padding(.bottom, ClipLayout.stripBottom)
                 }
-                if proxy.size.width >= 40 {
-                    HStack(spacing: 5) {
-                        Text(name).fontWeight(.semibold).foregroundStyle(Theme.text).layoutPriority(1)
-                        Text(words).foregroundStyle(Theme.secondary)
+                if proxy.size.width >= ClipLayout.labelWidth {
+                    let trailing = newRender ? ClipLayout.badgeInset + ClipLayout.badge + ClipLayout.inset : ClipLayout.inset
+                    // The first words only with room for a few letters and the ellipsis, never a sliver of one glyph.
+                    let room = proxy.size.width - ClipLayout.inset - trailing - Self.nameWidth(name) - 6
+                    HStack(spacing: 6) {
+                        Text(name).font(.vcCaptionBold).foregroundStyle(Theme.text).layoutPriority(1)
+                        if room >= 24 { Text(words).font(.vcCaption).foregroundStyle(Theme.secondary) }
                     }
-                    .font(.system(size: 11))
                     .lineLimit(1)
-                    .padding(.leading, 8)
-                    .padding(.trailing, newRender ? 26 : 8)
-                    .padding(.top, 6)
+                    .truncationMode(.tail)
+                    .padding(.leading, ClipLayout.inset)
+                    .padding(.trailing, trailing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: ClipLayout.header)
                 }
             }
             .clipShape(shape)
-            .overlay(shape.strokeBorder(selected ? Theme.primary : hovered ? Theme.outline : Theme.line, lineWidth: selected ? 1.5 : 1))
+            .overlay {
+                // Selected: a 2-point inner border in the off-white; otherwise a hairline that firms up under the pointer.
+                if selected {
+                    shape.strokeBorder(Theme.primary, lineWidth: 2)
+                } else {
+                    shape.strokeBorder(hovered ? Theme.strong : Theme.line, lineWidth: 1)
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if newRender && proxy.size.width >= 24 {
                     Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Theme.onPrimary)
-                        .frame(width: 16, height: 16)
-                        .background(Theme.amber, in: .circle)
-                        .padding(5)
+                        .frame(width: ClipLayout.badge, height: ClipLayout.badge)
+                        .background(Theme.amber, in: .rect(cornerRadius: Radius.chip))
+                        .padding(ClipLayout.badgeInset)
                         .help("This line has a new render")
                 }
             }
@@ -817,38 +981,74 @@ private struct ClipBlock: View {
                         Spacer(minLength: 0)
                         grip
                     }
-                    .padding(.horizontal, 3)
+                    .padding(.horizontal, ClipLayout.grip.inset)
+                    .allowsHitTesting(false)
                 }
             }
         }
-        .onHover { hovered = $0 }
     }
 
-    private var grip: some View { Capsule().fill(Theme.text.opacity(0.7)).frame(width: 3, height: 20) }
+    private var grip: some View {
+        RoundedRectangle(cornerRadius: 1).fill(Theme.text.opacity(0.7)).frame(width: ClipLayout.grip.width, height: ClipLayout.grip.height)
+    }
 
-    private var waveform: some View {
-        let clip = clip, peaks = peaks ?? [], color = selected ? Theme.text : Theme.secondary
-        return Canvas { context, size in
-            let bar = 3.0, count = Int(size.width / bar), length = clip.end - clip.start
-            guard count > 0, size.width > 0 else { return }
-            let gain = pow(10, clip.gain / 20) * 0.85
-            for index in 0..<count {
-                let left = Double(index) * bar
-                var peak: Float = 0
-                if !peaks.isEmpty {
-                    // The loudest peak under the bar, so a zoomed-out clip keeps its loud parts.
-                    let from = clip.start + left / size.width * length, to = clip.start + (left + bar) / size.width * length
-                    let low = min(max(0, Int(from * RenderPeaks.perSecond)), peaks.count - 1)
-                    let high = min(max(low + 1, Int((to * RenderPeaks.perSecond).rounded(.up))), peaks.count)
-                    peak = peaks[low..<high].max() ?? 0
-                }
-                let time = (left + bar / 2) / size.width * clip.duration
-                let fadeIn = clip.fadeIn > 0 ? time / clip.fadeIn : 1, fadeOut = clip.fadeOut > 0 ? (clip.duration - time) / clip.fadeOut : 1
-                let level = min(1, Double(peak) * gain * max(0, min(1, fadeIn, fadeOut)))
-                let height = max(1, level * size.height)
-                context.fill(Path(CGRect(x: left, y: (size.height - height) / 2, width: 1.5, height: height)), with: .color(color))
+    @MainActor private static var nameWidths: [String: Double] = [:]
+
+    /// "Line 3" in the header's 11-point semibold, measured once.
+    private static func nameWidth(_ name: String) -> Double {
+        if let width = nameWidths[name] { return width }
+        let width = ceil((name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold)]).width)
+        nameWidths[name] = width
+        return width
+    }
+}
+
+/// A clip's waveform: a continuous filled envelope over a hairline baseline. Silence draws nothing but the baseline.
+private struct ClipWaveform: View {
+    let clip: EditClip
+    let peaks: [Float]
+    let color: Color
+
+    var body: some View {
+        let clip = clip, peaks = peaks, color = color
+        Canvas { context, size in
+            guard size.width > 0, size.height > 0 else { return }
+            context.fill(Path(CGRect(x: 0, y: (size.height / 2 - 0.5).rounded(), width: size.width, height: 1)), with: .color(Theme.line))
+            let levels = ClipLayout.levels(peaks, clip: clip, width: size.width, perSecond: RenderPeaks.perSecond)
+            context.fill(ClipLayout.envelope(levels, height: size.height), with: .color(color))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A clip's fades: a line from the silent corner to where the fade ends, the part it quietens shaded.
+private struct FadeMarks: View {
+    let clip: EditClip
+
+    var body: some View {
+        let clip = clip
+        Canvas { context, size in
+            guard clip.duration > 0, size.width > 0 else { return }
+            let width = size.width, height = size.height
+            let fadeIn = min(1, clip.fadeIn / clip.duration) * width, fadeOut = min(1, clip.fadeOut / clip.duration) * width
+            if fadeIn >= 1 {
+                var shade = Path()
+                shade.addLines([CGPoint(x: 0, y: 0), CGPoint(x: fadeIn, y: 0), CGPoint(x: 0, y: height)])
+                shade.closeSubpath()
+                context.fill(shade, with: .color(.black.opacity(0.25)))
+                context.stroke(Path { $0.addLines([CGPoint(x: 0, y: height), CGPoint(x: fadeIn, y: 0)]) },
+                               with: .color(Theme.text.opacity(0.5)), lineWidth: 1)
+            }
+            if fadeOut >= 1 {
+                var shade = Path()
+                shade.addLines([CGPoint(x: width, y: 0), CGPoint(x: width - fadeOut, y: 0), CGPoint(x: width, y: height)])
+                shade.closeSubpath()
+                context.fill(shade, with: .color(.black.opacity(0.25)))
+                context.stroke(Path { $0.addLines([CGPoint(x: width - fadeOut, y: 0), CGPoint(x: width, y: height)]) },
+                               with: .color(Theme.text.opacity(0.5)), lineWidth: 1)
             }
         }
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 }
@@ -914,16 +1114,16 @@ private struct GapMark: View {
         if width > 6 {
             ZStack {
                 Path { path in
-                    path.move(to: CGPoint(x: 3, y: 0))
-                    path.addLine(to: CGPoint(x: max(3, width - 3), y: 0))
+                    path.move(to: CGPoint(x: 3, y: 0.5))
+                    path.addLine(to: CGPoint(x: max(3, width - 3), y: 0.5))
                 }
-                .stroke(Theme.outline.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .stroke(Theme.strong.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 .frame(width: width, height: 1)
                 if width >= 34 {
                     Text(seconds.formatted(.number.precision(.fractionLength(0...2))) + "s")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.vcCaption.monospacedDigit())
                         .foregroundStyle(Theme.secondary)
-                        .padding(.horizontal, 3)
+                        .padding(.horizontal, 4)
                         .background(Theme.content)
                 }
             }
@@ -935,6 +1135,9 @@ private struct GapMark: View {
     }
 }
 
+/// To the nearest half point, so a 1-point line centred there covers whole pixels on a Retina screen.
+private func crisp(_ x: Double) -> Double { (x * 2).rounded() / 2 }
+
 /// Seconds along the top, drawn only for the stretch in view so a long timeline zoomed in stays light. Click or drag to seek.
 private struct Ruler: View {
     @Environment(Preview.self) private var preview
@@ -942,17 +1145,23 @@ private struct Ruler: View {
     let visible: ClosedRange<Double>
 
     var body: some View {
+        let scale = scale, visible = visible
         Canvas { context, size in
             let step = scale.tickStep()
             let first = max(0, Int((scale.time(at: visible.lowerBound) / step).rounded(.down)) - 1)
             let last = Int((scale.time(at: visible.upperBound) / step).rounded(.up)) + 1
             guard last >= first else { return }
+            // Labels show whole or not at all: never cut by the edge of the view or the end of the track.
+            let measured = visible.upperBound > visible.lowerBound
+            let left = measured ? visible.lowerBound : 0, right = min(size.width, measured ? visible.upperBound : size.width)
             for tick in first...last {
-                let time = Double(tick) * step, x = scale.x(time), half = scale.x(time + step / 2)
-                context.fill(Path(CGRect(x: x, y: size.height - 9, width: 1, height: 9)), with: .color(Theme.outline))
-                context.fill(Path(CGRect(x: half, y: size.height - 4, width: 1, height: 4)), with: .color(Theme.line))
-                context.draw(Text(TrackScale.label(time, step: step)).font(.system(size: 10).monospacedDigit()).foregroundStyle(Theme.secondary),
-                             at: CGPoint(x: x + 4, y: 3), anchor: .topLeading)
+                let time = Double(tick) * step, x = crisp(scale.x(time)), half = crisp(scale.x(time + step / 2))
+                context.fill(Path(CGRect(x: x - 0.5, y: size.height - 8, width: 1, height: 8)), with: .color(Theme.strong))
+                context.fill(Path(CGRect(x: half - 0.5, y: size.height - 4, width: 1, height: 4)), with: .color(Theme.stroke))
+                let label = context.resolve(Text(TrackScale.label(time, step: step)).font(.vcCaption.monospacedDigit())
+                    .foregroundStyle(Theme.secondary))
+                guard TrackLayout.rulerLabelFits(tick: x, width: label.measure(in: size).width, left: left, right: right) else { continue }
+                context.draw(label, at: CGPoint(x: x + TrackLayout.rulerLabelInset, y: 2), anchor: .topLeading)
             }
         }
         .contentShape(.rect)
@@ -961,7 +1170,19 @@ private struct Ruler: View {
     }
 }
 
-/// The line at the play position, over the ruler and clips. Its own view, so only it redraws as playback moves.
+/// The playhead's head: flat along the top of the ruler, pointing down at the clips.
+private struct PlayheadHead: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.addLines([CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.maxX, y: rect.midY),
+                           CGPoint(x: rect.midX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.midY)])
+            path.closeSubpath()
+        }
+    }
+}
+
+/// The line at the play position, over the ruler and clips, its head in the ruler. Its own view, so only it redraws as
+/// playback moves.
 private struct Playhead: View {
     @Environment(Preview.self) private var preview
     let scale: TrackScale
@@ -969,13 +1190,13 @@ private struct Playhead: View {
     let height: Double
 
     var body: some View {
-        let position = preview.position, duration = preview.timeline.duration
-        VStack(spacing: 0) {
-            Circle().fill(Theme.text).frame(width: 9, height: 9)
-            Rectangle().fill(Theme.text).frame(width: 1.5)
+        let position = preview.position, duration = preview.timeline.duration, head = TrackLayout.playheadHead
+        ZStack(alignment: .top) {
+            Rectangle().fill(Theme.text).frame(width: 1)
+            PlayheadHead().fill(Theme.text).frame(width: head.width, height: head.height)
         }
-        .frame(width: 9, height: height - 12)
-        .offset(x: scale.x(min(position, duration)) - 4.5, y: 12)
+        .frame(width: head.width, height: height)
+        .offset(x: crisp(scale.x(min(position, duration))) - head.width / 2)
         .allowsHitTesting(false)
         .accessibilityElement()
         .accessibilityLabel("Playhead")
@@ -1009,6 +1230,10 @@ private struct InspectorPane: View {
     let clipID: String?
     let onFold: () -> Void
 
+    /// What the track can do, said where it's read: in place of settings until a clip is chosen.
+    static let hint = "Click a clip to edit its volume, fades and voice. Drag its edges to trim it, its middle to move it. "
+        + "S splits at the playhead."
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PanelHeader("Inspector") { FoldButton(label: "inspector", action: onFold) }
@@ -1020,12 +1245,10 @@ private struct InspectorPane: View {
                 }
                 .scrollBounceBehavior(.basedOnSize)
             } else {
-                Text("Select a clip to set its volume, fades and voice.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(24)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Its own height, at the top of the column where the settings will appear, not floating mid-column.
+                EmptyState(title: "No clip selected", message: Self.hint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 16)
             }
         }
         .sidePanel()
@@ -1045,16 +1268,19 @@ private struct ClipSettings: View {
             line.visibleVersions.firstIndex { $0.id == clip.versionID }.map { "v\($0 + 1) of \(line.visibleVersions.count)" }
         }
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(number.map { "Line \($0)" } ?? "Line").font(.system(size: 15, weight: .semibold))
-                    Spacer()
-                    Text(([take, version?.tone].compactMap(\.self)).joined(separator: " \u{00B7} ")).foregroundStyle(Theme.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(number.map { "Line \($0)" } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text)
+                    Spacer(minLength: 0)
+                    Text(([take, version?.tone].compactMap(\.self)).joined(separator: " \u{00B7} "))
+                        .font(.vcCaption.monospacedDigit())
+                        .foregroundStyle(Theme.secondary)
+                        .lineLimit(1)
                 }
                 Text(version?.text ?? line?.text ?? "").foregroundStyle(Theme.secondary).fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 Text(String(format: "%.2f s on the timeline, from %.2f\u{2013}%.2f s of the render", clip.duration, clip.start, clip.end))
-                    .font(.system(size: 12).monospacedDigit())
+                    .font(.vcCaption.monospacedDigit())
                     .foregroundStyle(Theme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1089,10 +1315,11 @@ private struct ClipSettings: View {
             Toggle("Remove noise", isOn: Binding(get: { clip.effects.denoise }, set: { value in effects { $0.denoise = value } }))
                 .toggleStyle(.checkbox)
             Button("Reset voice tools") { projects.setClipEffects(VoiceEffects(), clip: clip.id, in: project.id) }
-                .buttonStyle(.outline(height: 28))
+                .buttonStyle(.vc(.secondary, .s))
                 .disabled(clip.effects.isNeutral)
+                .help(clip.effects.isNeutral ? "The voice tools are at their defaults" : "Set speed, pitch, warmth, brightness and noise back")
         }
-        .font(.system(size: 13))
+        .font(.vcBody)
     }
 
     private func effects(_ change: (inout VoiceEffects) -> Void) {
@@ -1101,11 +1328,13 @@ private struct ClipSettings: View {
         projects.setClipEffects(effects, clip: clip.id, in: project.id)
     }
 
+    /// A section's name under a hairline: 16 above the line (the rows' 12 plus 4), 8 between it and the name.
     private func section(_ title: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Theme.line.frame(height: 1)
-            Text(title).font(.system(size: 13, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            Text(title).font(.vcCaptionBold).foregroundStyle(Theme.secondary).accessibilityAddTraits(.isHeader)
         }
+        .padding(.top, 4)
     }
 
     private func seconds(_ value: Double) -> String { String(format: "%.2f s", value) }
@@ -1115,6 +1344,21 @@ private struct ClipSettings: View {
 private func signed(_ value: Double, _ unit: String) -> String {
     let rounded = (value * 10).rounded() / 10
     return (rounded == 0 ? "0.0" : String(format: "%+.1f", rounded).replacing("-", with: "\u{2212}")) + " \(unit)"
+}
+
+/// The amber triangle and a note at caption size, for a slider's hint once the value goes past it. (`Warning` is
+/// body size.)
+private struct CaptionWarning: View {
+    let text: String
+
+    var body: some View {
+        Label {
+            Text(text).foregroundStyle(Theme.text)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
+        }
+        .font(.vcCaption)
+    }
 }
 
 /// A labelled slider that shows its value while dragging and calls `commit` once, on release, with the value rounded to
@@ -1133,12 +1377,13 @@ private struct CommitSlider: View {
 
     var body: some View {
         let shown = draft ?? value
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title).foregroundStyle(Theme.secondary)
                 Spacer()
-                Text(format(shown)).monospacedDigit()
+                Text(format(shown)).foregroundStyle(Theme.text).monospacedDigit()
             }
+            .font(.vcBody)
             Slider(value: Binding(get: { shown.clamped(range) }, set: { draft = $0 }), in: range) { editing in
                 guard !editing, let draft else { return }
                 self.draft = nil
@@ -1154,9 +1399,9 @@ private struct CommitSlider: View {
             }
             if let hint {
                 if warns(shown) {
-                    Warning(text: hint).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                    CaptionWarning(text: hint).fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text(hint).font(.system(size: 12)).foregroundStyle(Theme.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(hint).font(.vcCaption).foregroundStyle(Theme.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

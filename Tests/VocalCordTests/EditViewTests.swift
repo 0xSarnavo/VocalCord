@@ -129,3 +129,67 @@ private func clip(_ id: String, length: Double = 2, gap: Double = 0.5, tempo: Do
     #expect(1.26.snapped(0.5) == 1.5 && (-3.2).snapped(0.5) == -3 && 0.3.snapped(0.05) == 0.3)
     #expect(0.1234.snapped(0.05) == 0.1 && 1.04.snapped(0.05) == 1.05 && 7.0.snapped(1) == 7)
 }
+
+// MARK: Track and clip drawing
+
+@Test func clipsGrowWithThePaneBetweenTheLimits() {
+    // The ruler, its gap and the scroll bar's room come off first; the clips take the rest, 96 to 240 points.
+    #expect(TrackLayout.height(lane: 0) == 48 && TrackLayout.lanes == 96...240)
+    #expect(TrackLayout.lane(available: 600) == 240 && TrackLayout.lane(available: 200) == 152 && TrackLayout.lane(available: 100) == 96)
+    // The scroll view's content stops above the scroll bar's 16 points, so the bar never lands on anything drawn.
+    for lane in [96.0, 150, 240] { #expect(TrackLayout.height(lane: lane) - TrackLayout.content(lane: lane) == TrackLayout.scrollBar) }
+    // Whenever there's room for the smallest clips, the whole track fits where it's put.
+    for available in stride(from: 144.0, through: 800, by: 13) {
+        #expect(TrackLayout.height(lane: TrackLayout.lane(available: available)) <= available)
+    }
+}
+
+@Test func clipBandsFitAtEveryLaneHeight() {
+    for lane in [TrackLayout.lanes.lowerBound, 160, TrackLayout.lanes.upperBound] {
+        let wave = ClipLayout.waveform(height: lane)
+        // The waveform starts under the header band and ends above the words strip, with room to read it.
+        #expect(wave.y >= ClipLayout.header + ClipLayout.waveInset.vertical)
+        #expect(wave.y + wave.height + ClipLayout.waveInset.vertical + ClipLayout.strip + ClipLayout.stripBottom <= lane)
+        #expect(wave.height >= 40)
+    }
+    // Trim zones: 12 points inside each edge, a quarter of a narrow clip so its middle still moves it.
+    #expect(TrackLayout.trimZone(200) == 12 && TrackLayout.trimZone(48) == 12 && TrackLayout.trimZone(20) == 5)
+}
+
+@Test func waveformIsAnEnvelopeAndSilenceDrawsNothing() {
+    // A second of render at 100 peaks a second: silence, sound, silence.
+    let peaks = [Float](repeating: 0, count: 30) + [Float](repeating: 0.8, count: 40) + [Float](repeating: 0, count: 30)
+    let plain = EditClip(id: "x", lineID: "a", versionID: "a1", start: 0, end: 1, gapAfter: 0)
+    let levels = ClipLayout.levels(peaks, clip: plain, width: 100, perSecond: 100)
+    #expect(levels.count == 100)
+    #expect(levels[..<28].allSatisfy { $0 == 0 } && levels[72...].allSatisfy { $0 == 0 })
+    #expect(levels[31..<69].allSatisfy { abs($0 - 0.8 * 0.85) < 1e-6 })
+    // One closed shape over the sound, mirrored about the middle; nothing at all over silence.
+    let shape = ClipLayout.envelope(levels, height: 40).boundingRect
+    #expect(shape.minX >= 27 && shape.maxX <= 73)
+    #expect(abs(shape.midY - 20) < 1e-6 && shape.height > 20)
+    #expect(ClipLayout.envelope([Double](repeating: 0, count: 50), height: 40).isEmpty)
+    #expect(ClipLayout.envelope([Double](repeating: 0.001, count: 50), height: 40).isEmpty)
+    // A fade in quietens the start; the volume scales it all.
+    var faded = plain
+    faded.fadeIn = 0.5
+    faded.gain = -6
+    let shaped = ClipLayout.levels(peaks, clip: faded, width: 100, perSecond: 100)
+    #expect(shaped[35] < shaped[60] && shaped[60] < levels[60])
+    // Zoomed out, a column keeps the loudest peak under it.
+    #expect(ClipLayout.levels(peaks, clip: plain, width: 10, perSecond: 100)[3...6].allSatisfy { $0 > 0.6 })
+    #expect(ClipLayout.levels([], clip: plain, width: 100, perSecond: 100).isEmpty)
+}
+
+@Test func rulerLabelsShowWholeOrNotAtAll() {
+    // A 26-point label sits 6 right of its tick, clear of the playhead's head (5.5 either side) resting on the tick.
+    #expect(TrackLayout.playheadHead.width == 11 && TrackLayout.playheadHead.height == 10)
+    #expect(TrackLayout.rulerLabelInset > TrackLayout.playheadHead.width / 2)
+    #expect(TrackLayout.rulerLabelFits(tick: 16, width: 26, left: 0, right: 718))
+    // At the right edge of the view (where "0:" used to be cut off) it waits until it fits whole.
+    #expect(!TrackLayout.rulerLabelFits(tick: 700, width: 26, left: 0, right: 718))
+    #expect(TrackLayout.rulerLabelFits(tick: 686, width: 26, left: 0, right: 718))
+    #expect(!TrackLayout.rulerLabelFits(tick: 687, width: 26, left: 0, right: 718))
+    // Scrolled along, one cut by the left edge isn't drawn either.
+    #expect(!TrackLayout.rulerLabelFits(tick: 90, width: 26, left: 100, right: 818))
+}

@@ -32,20 +32,25 @@ private func placed(_ words: [StripWord]) -> [String] { words.map { "\($0.text)@
     // "four" would run into "three".
     #expect(placed(strip(clip(tempo: 2), zoom: 200)) == ["One@20.0", "two@80.0", "three@140.0", "four@200.0"])
     #expect(placed(strip(clip(tempo: 2), zoom: 100)) == ["One@10.0", "two@40.0", "three@70.0"])
-    // A word mostly inside a trimmed edge stays, inside the clip's rounded corner; one mostly outside goes.
-    #expect(placed(strip(clip(start: 0.9, end: 2.1), zoom: 100)) == ["two@4.0", "three@50.0"])
+    // A word mostly inside a trimmed edge stays, at the clip's text inset (under "Line 3"); one mostly outside goes.
+    #expect(placed(strip(clip(start: 0.9, end: 2.1), zoom: 100)) == ["two@6.0", "three@50.0"])
     // Times that don't match the words, as for a render whose words aren't timed for this text: none.
     #expect(TrackLayout.stripWords(["One"], times: times, clip: clip(), pointsPerSecond: 100, measure: measure).isEmpty)
 }
 
 @Test func stripThinsOutWhenZoomedOut() {
-    // At 20 points a second words are 12 points apart: "two" would run into "One", and "three" past the clip's end.
-    #expect(placed(strip(clip(), zoom: 20)) == ["One@4.0"])
+    // At 20 points a second words are 12 points apart: "two" would run into "One", so the strip stops there.
+    #expect(placed(strip(clip(), zoom: 20)) == ["One@6.0"])
+    // It stops rather than skipping: at 30 points a second "three" would fit after "One", but without "two" between
+    // them the strip would read as other words ("Meet next of your"), so it shows "One" alone.
+    #expect(placed(strip(clip(), zoom: 30)) == ["One@6.0"])
     // A clip under 40 points shows none.
     #expect(strip(clip(), zoom: 15).isEmpty && !strip(clip(), zoom: 16).isEmpty)
-    // At any zoom, no label touches the one before it and every label ends inside the clip.
+    // At any zoom, the words are the first ones in order, no label touches the one before it, and every label ends
+    // inside the clip.
     for zoom in stride(from: 4.0, through: 200, by: 7) {
         let clip = clip(start: 0.3), words = strip(clip, zoom: zoom)
+        #expect(words.map(\.token) == Array(0..<words.count))
         for (before, word) in zip(words, words.dropFirst()) {
             #expect(word.x >= before.x + measure(before.text) + TrackLayout.stripGap)
         }
