@@ -59,6 +59,9 @@ struct VocalCordApp: App {
                 .environment(setup)
         }
         .defaultSize(width: 1280, height: 800)
+        // A slim bar without the app's name (it's in the Dock and the Window menu): the switcher and actions only.
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        .commands { WorkspaceCommands() }
 
         Settings {
             SettingsView().environment(jev).environment(setup).preferredColorScheme(.dark)
@@ -66,7 +69,7 @@ struct VocalCordApp: App {
     }
 }
 
-enum Mode: String { case clone, generate, timeline }
+enum Mode: String, CaseIterable { case clone, generate, timeline }
 
 struct RootView: View {
     @Environment(VoiceStore.self) private var store
@@ -80,8 +83,6 @@ struct RootView: View {
         }
         // Wide enough for every script column beside the sidebar and an open side column.
         .frame(minWidth: 1200, minHeight: 640)
-        // The blue focus ring clashes with the grey design; text fields turn it back on.
-        .focusEffectDisabled()
         .containerBackground(Theme.base, for: .window)
         // The toolbar sits on the window's colour; the panels below give the structure.
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
@@ -103,75 +104,12 @@ struct RootView: View {
             case .timeline: EditView()
             }
         }
+        // The hairline between the toolbar band and the panes.
+        .overlay(alignment: .top) { Theme.line.frame(height: 1) }
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("Mode", selection: $mode) {
-                    Text("Clone").tag(Mode.clone)
-                    Text("Generate").tag(Mode.generate)
-                    Text("Timeline").tag(Mode.timeline)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 300)
-                .focusEffectDisabled()
-            }
+            ToolbarItem(placement: .principal) { ModeSwitcher(mode: $mode) }
+                .sharedBackgroundVisibility(.hidden)
         }
-    }
-}
-
-/// The gear, last in each mode's toolbar so it stays in the same corner.
-struct SettingsButton: View {
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        Button("Settings", systemImage: "gearshape") { openSettings() }
-    }
-}
-
-/// A mode's sidebar as one glass panel, resizable from its edge, beside the mode's own panels. Every column sits on the
-/// window's base colour with 8 pt between them. Not NavigationSplitView: its sidebar splits into two boxes in full
-/// screen and opened at 148 pt on a first launch.
-struct SidebarLayout<Sidebar: View, Detail: View>: View {
-    @AppStorage("sidebarWidth") private var width = 220.0
-    @State private var dragStart: Double?
-    @ViewBuilder let sidebar: Sidebar
-    @ViewBuilder let detail: Detail
-
-    private static var range: ClosedRange<Double> { 220...360 }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: clamp(width))
-                .frame(maxHeight: .infinity, alignment: .top)
-                .glassEffect(.regular, in: .rect(cornerRadius: 18))
-                .padding(8)
-                .overlay(alignment: .trailing) { handle }
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.vertical, 8)
-                .padding(.trailing, 8)
-        }
-    }
-
-    private func clamp(_ value: Double) -> Double { min(max(value, Self.range.lowerBound), Self.range.upperBound) }
-
-    private var handle: some View {
-        Color.clear
-            .frame(width: 8)
-            .contentShape(.rect)
-            .pointerStyle(.frameResize(position: .trailing))
-            .gesture(DragGesture(coordinateSpace: .global)
-                .onChanged { value in
-                    let start = dragStart ?? clamp(width)
-                    dragStart = start
-                    width = clamp(start + value.translation.width)
-                }
-                .onEnded { _ in dragStart = nil })
-            .accessibilityElement()
-            .accessibilityLabel("Resize sidebar")
-            .accessibilityValue("\(Int(clamp(width))) points")
-            .accessibilityAdjustableAction { direction in width = clamp(clamp(width) + (direction == .increment ? 20 : -20)) }
     }
 }
 
@@ -282,213 +220,10 @@ struct PluginSettings: View {
     }
 }
 
-enum Theme {
-    static let base = Color(hex: 0x070809)
-    static let content = Color(hex: 0x0E0F10)
-    static let selection = Color(hex: 0x2C2F33)
-    /// A row under the pointer: fainter than `selection`.
-    static let hover = Color.white.opacity(0.035)
-    static let primary = Color(hex: 0xE8E9EA)
-    static let onPrimary = Color(hex: 0x0E0F10)
-    static let text = Color(hex: 0xF1F3F0)
-    static let secondary = Color(hex: 0x9A9EA3)
-    static let line = Color.white.opacity(0.09)
-    /// Table row separator: fainter than `line`, so a table reads as rows, not a grid.
-    static let rule = Color(hex: 0x1E2023)
-    static let outline = Color.white.opacity(0.32)
-    static let amber = Color(hex: 0xF2B544)
-}
-
-extension View {
-    /// The main column: solid, so text and tables read on a flat surface.
-    func panel() -> some View {
-        background(Theme.content)
-            .clipShape(.rect(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.line))
-    }
-
-    /// A side column's glass panel; `fill` stretches it to the column's full height.
-    func sidePanel(fill: Bool = true) -> some View {
-        frame(maxHeight: fill ? .infinity : nil, alignment: .top)
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
-    }
-}
-
-/// The chevron in a side column's header that folds the column away.
-struct FoldButton: View {
-    /// What is folded, for VoiceOver: "Hide pronunciations".
-    let label: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) { Image(systemName: "chevron.right").padding(6).contentShape(.rect) }
-            .buttonStyle(.plain)
-            .help("Hide")
-            .accessibilityLabel("Hide \(label)")
-    }
-}
-
-/// A folded side column: a slim full-height strip whose chevron opens it again, so the column never leaves a hole.
-struct FoldedSidePanel: View {
-    /// The column's title, shown on hover and read by VoiceOver.
-    let title: String
-    let onOpen: () -> Void
-
-    var body: some View {
-        Button(action: onOpen) { Image(systemName: "chevron.left").padding(8).contentShape(.rect) }
-            .buttonStyle(.plain)
-            .help(title)
-            .accessibilityLabel("Show \(title.lowercased())")
-            .frame(width: 44, height: 52)
-            .sidePanel()
-    }
-}
-
-/// A panel's title row, its actions on the right, and the hairline under it.
-struct PanelHeader<Title: View, Actions: View>: View {
-    @ViewBuilder let title: Title
-    @ViewBuilder let actions: Actions
-
-    var body: some View {
-        HStack(spacing: 8) {
-            title.font(.system(size: 17, weight: .bold)).lineLimit(1)
-            Spacer(minLength: 8)
-            actions
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 12)
-        .frame(height: 52)
-        .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
-    }
-}
-
-extension PanelHeader where Title == Text {
-    init(_ title: String, @ViewBuilder actions: () -> Actions) {
-        self.init(title: { Text(title) }, actions: actions)
-    }
-}
-
-extension Color {
-    init(hex: UInt32) {
-        self.init(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
-    }
-}
-
 extension Binding where Value == Bool {
     /// True while the optional has a value; setting false clears it.
     init<T: Sendable>(present: Binding<T?>) {
         self.init(get: { present.wrappedValue != nil }, set: { if !$0 { present.wrappedValue = nil } })
-    }
-}
-
-/// The one off-white action on a screen.
-struct PrimaryButtonStyle: ButtonStyle {
-    var height: CGFloat = 34
-
-    func makeBody(configuration: Configuration) -> some View {
-        Styled(configuration: configuration, height: height)
-    }
-
-    private struct Styled: View {
-        let configuration: Configuration
-        let height: CGFloat
-        @Environment(\.isEnabled) private var isEnabled
-
-        var body: some View {
-            configuration.label
-                .font(.system(size: height > 50 ? 26 : 14, weight: .semibold))
-                .foregroundStyle(Theme.onPrimary)
-                .padding(.horizontal, height > 50 ? 40 : 16)
-                .frame(height: height)
-                .background(Theme.primary.opacity(configuration.isPressed ? 0.8 : 1),
-                            in: .rect(cornerRadius: height > 50 ? 20 : 9))
-                .opacity(isEnabled ? 1 : 0.4)
-                .contentShape(.rect)
-        }
-    }
-}
-
-/// Every other button: a thin outline.
-struct OutlineButtonStyle: ButtonStyle {
-    var height: CGFloat = 30
-
-    func makeBody(configuration: Configuration) -> some View {
-        Styled(configuration: configuration, height: height)
-    }
-
-    private struct Styled: View {
-        let configuration: Configuration
-        let height: CGFloat
-        @Environment(\.isEnabled) private var isEnabled
-
-        var body: some View {
-            configuration.label
-                .font(.system(size: height > 40 ? 17 : 13, weight: .medium))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, height > 40 ? 26 : 12)
-                .frame(height: height)
-                .background(Color.white.opacity(configuration.isPressed ? 0.1 : 0), in: .rect(cornerRadius: height > 40 ? 11 : 8))
-                .overlay(RoundedRectangle(cornerRadius: height > 40 ? 11 : 8).strokeBorder(Theme.outline))
-                .opacity(isEnabled ? 1 : 0.4)
-                .contentShape(.rect)
-        }
-    }
-}
-
-/// The off-white action in the toolbar: a capsule at the height of the native toolbar buttons beside it. Drawn here,
-/// not as tinted glass, so it stays off-white when the window is in the background.
-struct ToolbarPrimaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        Styled(configuration: configuration)
-    }
-
-    private struct Styled: View {
-        let configuration: Configuration
-        @Environment(\.isEnabled) private var isEnabled
-
-        var body: some View {
-            configuration.label
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.onPrimary)
-                .padding(.horizontal, 14)
-                .frame(height: 36)
-                .background(Theme.primary.opacity(configuration.isPressed ? 0.8 : 1), in: .capsule)
-                .opacity(isEnabled ? 1 : 0.4)
-                .contentShape(.capsule)
-        }
-    }
-}
-
-extension ButtonStyle where Self == ToolbarPrimaryButtonStyle {
-    static var toolbarPrimary: ToolbarPrimaryButtonStyle { ToolbarPrimaryButtonStyle() }
-}
-
-extension ButtonStyle where Self == PrimaryButtonStyle {
-    static var primary: PrimaryButtonStyle { PrimaryButtonStyle() }
-    static func primary(height: CGFloat) -> PrimaryButtonStyle { PrimaryButtonStyle(height: height) }
-}
-
-extension ButtonStyle where Self == OutlineButtonStyle {
-    static var outline: OutlineButtonStyle { OutlineButtonStyle() }
-    static func outline(height: CGFloat) -> OutlineButtonStyle { OutlineButtonStyle(height: height) }
-}
-
-/// Red dot used on every Record button.
-struct RecordDot: View {
-    var size: CGFloat = 9
-    var body: some View { Circle().fill(.red).frame(width: size, height: size) }
-}
-
-/// Amber triangle and label, shown only when there is a problem.
-struct Warning: View {
-    let text: String
-    var body: some View {
-        Label {
-            Text(text).foregroundStyle(Theme.text)
-        } icon: {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
-        }
-        .font(.system(size: 13, weight: .medium))
     }
 }
 
