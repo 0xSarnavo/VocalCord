@@ -251,10 +251,10 @@ struct SetupView: View {
                 .frame(width: 96, height: 96)
                 .accessibilityHidden(true)
             Text("Set up VocalCord")
-                .font(.system(size: 30, weight: .bold))
+                .font(.vcTitle)
                 .padding(.top, 16)
             Text("VocalCord runs on this Mac. Setup downloads the voice engine and its models once.")
-                .font(.system(size: 14))
+                .font(.vcBody)
                 .foregroundStyle(Theme.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.top, 8)
@@ -264,42 +264,43 @@ struct SetupView: View {
                 } else if !setup.blockers.isEmpty {
                     VStack(alignment: .leading, spacing: 16) {
                         ForEach(setup.blockers, id: \.self) { Warning(text: $0).fixedSize(horizontal: false, vertical: true) }
-                        Button("Check again") { setup.check() }.buttonStyle(.outline)
+                        Button("Check again") { setup.check() }.buttonStyle(.vc(.secondary, .m))
                     }
                 } else if let error = setup.error {
                     VStack(spacing: 16) {
                         Warning(text: error).fixedSize(horizontal: false, vertical: true)
-                        Button("Retry", action: setup.start).buttonStyle(.primary)
+                        Button("Retry", action: setup.start).buttonStyle(.vc(.primary, .l))
                     }
                 } else if setup.paused {
                     VStack(spacing: 16) {
                         Text("Setup paused. Retry continues from where it stopped.").foregroundStyle(Theme.secondary)
-                        Button("Retry", action: setup.start).buttonStyle(.primary)
+                        Button("Retry", action: setup.start).buttonStyle(.vc(.primary, .l))
                     }
                 } else {
-                    Button("Download (about \(setup.downloadSize))", action: setup.start).buttonStyle(.primary(height: 40))
+                    Button("Download (about \(setup.downloadSize))", action: setup.start).buttonStyle(.vc(.primary, .l))
                 }
             }
-            .font(.system(size: 13))
+            .font(.vcBody)
             // A fixed height keeps the title still as the content below changes.
             .frame(height: 150, alignment: .top)
-            .padding(.top, 40)
+            .padding(.top, 32)
         }
         .frame(width: 460)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Edge to edge under the toolbar, like every mode's panes, with the same hairline between them.
         .panel()
-        .padding(8)
+        .overlay(alignment: .top) { Theme.line.frame(height: 1) }
         .onAppear { setup.check() }
     }
 
     private func working(_ progress: Setup.Progress) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(progress.step).font(.system(size: 15, weight: .semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            Text(progress.step).font(.vcBodyBold)
             ProgressView(value: progress.fraction)
-            HStack {
+            HStack(spacing: 8) {
                 Text(progress.detail).monospacedDigit().foregroundStyle(Theme.secondary).lineLimit(1)
                 Spacer()
-                Button("Cancel", action: setup.cancel).buttonStyle(.outline)
+                Button("Cancel", action: setup.cancel).buttonStyle(.vc(.secondary, .s))
             }
         }
     }

@@ -240,6 +240,8 @@ final class Terminals {
     @ObservationIgnored private var looking: Task<Void, Never>?
     /// A prompt `ask` holds while the agents are looked for; the first session started takes it as its first prompt.
     @ObservationIgnored private var waiting: String?
+    /// False when the agents were handed in (`found:`): sessions draw an empty terminal and start no CLI.
+    @ObservationIgnored private var launches = true
     private let socket: String
 
     init(tools: ToolBridge, support: URL = Terminals.support) {
@@ -260,10 +262,18 @@ final class Terminals {
         }
     }
 
+    /// For tests: these agents count as found, so no shell looks for them, and their sessions never start a process.
+    convenience init(tools: ToolBridge, support: URL, found: [Agent: String]) {
+        self.init(tools: tools, support: support)
+        installed = found
+        selected = Self.target(selected: nil, installed: found)
+        launches = false
+    }
+
     /// Looks for the CLIs again while none are found. Calls during a look wait for it.
     func detect() async {
         if let looking { return await looking.value }
-        guard installed?.isEmpty ?? true else { return }
+        guard launches, installed?.isEmpty ?? true else { return }
         let look = Task {
             let found = await Agent.detect()
             installed = found
@@ -354,7 +364,7 @@ final class Terminals {
         view.selectedTextBackgroundColor = NSColor(Theme.selection)
         view.processDelegate = self
         sessions[agent] = view
-        guard let path = installed?[agent] else { return view }
+        guard launches, let path = installed?[agent] else { return view }
         do {
             let bridge = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "vocalcord-mcp").path
             let launch = try agent.launch(path: path, bridge: bridge, socket: socket,
@@ -407,58 +417,37 @@ struct TerminalButton: View {
     }
 }
 
-/// The panel under the script: a resize handle, a tab per installed agent and the selected agent's terminal.
+/// The panel under the script: its top edge resizes it, then a tab per installed agent and the selected agent's terminal.
 struct TerminalPanel: View {
     @Environment(Terminals.self) private var terminals
     @AppStorage("terminalOpen") private var open = false
     @Binding var height: Double
     let maxHeight: Double
     @State private var dragStart: Double?
+    @State private var hovered = false
 
     static let minHeight = 140.0
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule().fill(Theme.outline).frame(width: 52, height: 4)
-                .frame(maxWidth: .infinity).frame(height: 14)
-                .contentShape(.rect)
-                .pointerStyle(.frameResize(position: .top))
-                .gesture(DragGesture(coordinateSpace: .global)
-                    .onChanged { value in
-                        let start = dragStart ?? height
-                        dragStart = start
-                        height = clamp(start - value.translation.height)
-                    }
-                    .onEnded { _ in dragStart = nil })
-                .accessibilityElement()
-                .accessibilityLabel("Resize terminal")
-                .accessibilityValue("\(Int(height)) points")
-                .accessibilityAdjustableAction { direction in
-                    height = clamp(height + (direction == .increment ? 40 : -40))
-                }
+            // The pane divider above the panel is its resize handle, lit under the pointer and while dragged.
+            PaneDivider(axis: .horizontal, highlighted: hovered || dragStart != nil)
+                .overlay { resizeHandle }
+                .zIndex(1)
             HStack(spacing: 4) {
                 ForEach(Agent.allCases.filter { terminals.installed?[$0] != nil }) { agent in
-                    Button { terminals.selected = agent } label: {
-                        Text(agent.title)
-                            .font(.system(size: 14, weight: .medium))
-                            .padding(.horizontal, 14)
-                            .frame(height: 30)
-                            .background(terminals.selected == agent ? Theme.selection : .clear, in: .rect(cornerRadius: 8))
-                            .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(terminals.selected == agent ? .isSelected : [])
+                    Button(agent.title) { terminals.selected = agent }
+                        .buttonStyle(.vc(.ghost, .s, selected: terminals.selected == agent))
+                        .accessibilityAddTraits(terminals.selected == agent ? .isSelected : [])
                 }
                 Spacer()
-                Button { open = false } label: {
-                    Image(systemName: "xmark").font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28).contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .help("Close")
-                .accessibilityLabel("Close terminal")
+                Button { open = false } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.icon(.s))
+                    .help("Hide Terminal (\u{2303}`)")
+                    .accessibilityLabel("Hide Terminal")
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 12)
+            .frame(height: 32)
             Theme.line.frame(height: 1)
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -469,6 +458,28 @@ struct TerminalPanel: View {
     }
 
     private func clamp(_ value: Double) -> Double { min(max(value, Self.minHeight), max(Self.minHeight, maxHeight)) }
+
+    /// 8 pt tall, centred on the 1 pt line, so the edge is easy to grab.
+    private var resizeHandle: some View {
+        Color.clear
+            .frame(height: 8)
+            .contentShape(.rect)
+            .pointerStyle(.frameResize(position: .top))
+            .onHover { hovered = $0 }
+            .gesture(DragGesture(coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStart ?? height
+                    dragStart = start
+                    height = clamp(start - value.translation.height)
+                }
+                .onEnded { _ in dragStart = nil })
+            .accessibilityElement()
+            .accessibilityLabel("Resize terminal")
+            .accessibilityValue("\(Int(height)) points")
+            .accessibilityAdjustableAction { direction in
+                height = clamp(height + (direction == .increment ? 40 : -40))
+            }
+    }
 
     @ViewBuilder private var content: some View {
         if let error = terminals.bridgeError {
@@ -482,21 +493,22 @@ struct TerminalPanel: View {
                     .padding(.vertical, 8)
                     .id(agent)
                 if terminals.ended.contains(agent) {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
                         Text("Session ended").foregroundStyle(Theme.secondary)
-                        Button("Restart") { terminals.restart(agent) }.buttonStyle(.outline(height: 30))
+                        Button("Restart") { terminals.restart(agent) }.buttonStyle(.vc(.secondary, .m))
                     }
-                    .padding(20)
-                    .background(Theme.content.opacity(0.92), in: .rect(cornerRadius: 12))
+                    .padding(24)
+                    .background(Theme.content.opacity(0.92), in: .rect(cornerRadius: Radius.card))
+                    .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
                 }
             }
         } else {
-            VStack(spacing: 6) {
-                Text("No agents found").font(.system(size: 15, weight: .semibold))
+            VStack(spacing: 4) {
+                Text("No agents found").font(.vcTitle)
                 Text("Install Claude Code, Codex or OpenCode, then open Terminal again.").foregroundStyle(Theme.secondary)
             }
             .multilineTextAlignment(.center)
-            .padding(16)
+            .padding(24)
         }
     }
 }

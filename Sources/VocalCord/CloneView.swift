@@ -17,27 +17,28 @@ struct CloneView: View {
     @Environment(VoiceStore.self) private var store
     /// Stored, so the agents' tools know the voice selected here.
     @AppStorage("voice") private var selection: String?
+    @AppStorage("pronunciationsOpen") private var pronunciationsOpen = true
     @State private var flow: Flow?
     @State private var showNew = false
     @State private var renaming: String?
     @State private var newName = ""
     @State private var deleting: String?
 
+    /// The voice page is on screen: not during a clone, and only with a voice selected.
+    private var showsVoice: Bool { flow == nil && store.voice(selection) != nil }
+
     var body: some View {
         SidebarLayout {
-            Sidebar(selection: $selection, newIsPrimary: flow == nil, onNew: { showNew = true },
-                    onRename: startRename, onDelete: { deleting = $0 })
+            Sidebar(selection: $selection, onNew: { showNew = true }, onRename: startRename, onDelete: { deleting = $0 })
         } detail: {
             detail
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                // The panel opens under the voice page, so not during a clone.
-                TerminalButton().disabled(flow != nil || store.voice(selection) == nil)
-            }
-            ToolbarSpacer(.fixed, placement: .primaryAction)
-            ToolbarItem(placement: .primaryAction) { SettingsButton() }
-        }
+        // The Terminal opens under the voice page, so not during a clone.
+        .toolbar { WorkspaceToolbar(terminalEnabled: showsVoice) }
+        .focusedSceneValue(\.terminalAvailable, showsVoice)
+        .focusedSceneValue(\.newItemAction, { showNew = true })
+        .focusedSceneValue(\.newItemTitle, "New Voice\u{2026}")
+        .focusedSceneValue(\.toggleSidePanel, showsVoice ? { pronunciationsOpen.toggle() } : nil)
         .onAppear { if store.voice(selection) == nil { selection = store.voices.first?.id } }
         .onChange(of: selection) { if flow?.voiceID != selection { flow = nil } }
         .sheet(isPresented: $showNew) {
@@ -85,8 +86,13 @@ struct CloneView: View {
             if let voice = store.voice(selection) {
                 VoicePage(voice: voice, onResume: { flow = .full(voice.id) }, onRename: startRename, onDelete: { deleting = $0 })
                     .id(voice.id)
+            } else if store.voices.isEmpty {
+                EmptyState(title: "No voices yet", message: "Record a few short takes and VocalCord clones your voice on this Mac.") {
+                    Button("New voice") { showNew = true }.buttonStyle(.vc(.primary, .l))
+                }
+                .panel()
             } else {
-                Text("No voices").foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, maxHeight: .infinity).panel()
+                EmptyState(title: "No voice selected", message: "Choose a voice in the sidebar.").panel()
             }
         }
     }
@@ -108,49 +114,37 @@ struct VoiceMenu: View {
     }
 }
 
+/// The voices, under a "Voices" header whose + starts a new one.
 struct Sidebar: View {
     @Environment(VoiceStore.self) private var store
     @Binding var selection: String?
-    let newIsPrimary: Bool
     let onNew: () -> Void
     let onRename: (String) -> Void
     let onDelete: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Group {
-                if newIsPrimary {
-                    Button(action: onNew) { newLabel }.buttonStyle(.primary(height: 40))
-                } else {
-                    Button(action: onNew) { newLabel }.buttonStyle(.outline(height: 40))
-                }
+        VStack(spacing: 0) {
+            PanelHeader("Voices") {
+                Button(action: onNew) { Image(systemName: "plus") }
+                    .buttonStyle(.icon(.s))
+                    .help("New voice (⌘N)")
+                    .accessibilityLabel("New voice")
             }
             ScrollView {
-                VStack(spacing: 4) {
+                VStack(spacing: 0) {
                     ForEach(store.voices) { voice in
                         Button { selection = voice.id } label: {
-                            Label(voice.name, systemImage: "waveform")
-                                .font(.system(size: 14))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .frame(height: 38)
-                                .background(selection == voice.id ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
-                                .contentShape(.rect)
+                            SidebarRow(title: voice.name, systemImage: "waveform", selected: selection == voice.id)
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(selection == voice.id ? .isSelected : [])
                         .contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
                     }
                 }
+                .padding(8)
             }
             .scrollIndicators(.never)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-    }
-
-    private var newLabel: some View {
-        Label("New voice", systemImage: "plus").frame(maxWidth: .infinity)
     }
 }
 
@@ -174,19 +168,19 @@ struct VoicePage: View {
     @AppStorage("terminalHeight") private var terminalHeight = 300.0
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             GeometryReader { proxy in
-                VStack(spacing: 8) {
+                VStack(spacing: 0) {
                     VStack(spacing: 0) {
                         PanelHeader {
                             Text(voice.name).contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
                         } actions: {
                             decideAll
                             if voice.session != nil {
-                                Button("Resume session", action: onResume).buttonStyle(.primary(height: 30))
+                                Button("Resume session", action: onResume).buttonStyle(.vc(.primary, .s))
                             }
                             Button("Voice check\u{2026}") { checkingVoice = true }
-                                .buttonStyle(.outline)
+                                .buttonStyle(.vc(.secondary, .s))
                                 .disabled(voice.takes.isEmpty)
                                 .help("Render test lines, retrying each until it passes, and see how the voice holds up")
                             auditionButton
@@ -202,6 +196,7 @@ struct VoicePage: View {
                     }
                 }
             }
+            PaneDivider()
             PronunciationsPanel(voice: voice, open: $inspectorOpen)
         }
         .sheet(isPresented: Binding(present: $recordTone)) {
@@ -231,16 +226,17 @@ struct VoicePage: View {
                 store.acceptTakes(takes, voiceID: voice.id)
                 store.acceptPronunciations(words, voiceID: voice.id)
             }
-            .buttonStyle(.outline)
+            .buttonStyle(.vc(.secondary, .s))
             Button("Reject all") {
                 store.rejectTakes(takes, voiceID: voice.id)
                 store.rejectPronunciations(words, voiceID: voice.id)
             }
-            .buttonStyle(.outline)
+            .buttonStyle(.vc(.secondary, .s))
         }
     }
 
-    /// Also shows an audition an agent started.
+    /// Also shows an audition an agent started. While it runs a small progress ring stands in for the play glyph, so
+    /// the button keeps its width.
     private var auditionButton: some View {
         Button {
             Task {
@@ -250,16 +246,19 @@ struct VoicePage: View {
                 catch { store.error = error.localizedDescription }
             }
         } label: {
-            if auditioning.active || store.auditioning == voice.id {
-                HStack(spacing: 8) {
-                    ProgressView(value: auditioning.active ? auditioning.value : nil).frame(width: 70)
-                    Text("Audition")
+            HStack(spacing: 6) {
+                if auditioning.active || store.auditioning == voice.id {
+                    ProgressView(value: auditioning.active ? auditioning.value : nil)
+                        .progressViewStyle(.circular)
+                        .controlSize(.mini)
+                        .frame(width: 13, height: 13)
+                } else {
+                    Image(systemName: "play.fill").frame(width: 13, height: 13)
                 }
-            } else {
-                Label("Audition", systemImage: "play.fill")
+                Text("Audition")
             }
         }
-        .buttonStyle(.outline)
+        .buttonStyle(.vc(.secondary, .s))
         .disabled(auditioning.active || store.busy != nil || voice.takes.isEmpty)
     }
 
@@ -275,16 +274,23 @@ struct VoicePage: View {
 // MARK: Takes table
 
 private enum Column {
-    static let tone: CGFloat = 130
+    static let tone: CGFloat = 128
     static let length: CGFloat = 64
     static let like: CGFloat = 72
-    static let main: CGFloat = 58
-    static let gutter: CGFloat = 36
-    static let row: CGFloat = 44
-    static let emptyRow: CGFloat = 40
-    /// Between a number and its column's right edge.
-    static let inset: CGFloat = 12
-    static let fixed = tone + length + like + main + gutter
+    static let main: CGFloat = 56
+    static let gutter: CGFloat = 32
+    static let header: CGFloat = 28
+    static let row: CGFloat = 40
+    static let emptyRow: CGFloat = 32
+    /// The pane edge to the tone names and the "Tone" header.
+    static let leading: CGFloat = 16
+    /// After the gutter, so its button ends 12 from the pane edge like the panel header's actions.
+    static let trailing: CGFloat = 8
+    /// Between a cell's content and its column edge.
+    static let inset: CGFloat = 8
+
+    /// Everything but the Take column. "Like you" is left out until a take has a score.
+    static func fixed(like: Bool) -> CGFloat { tone + length + (like ? self.like : 0) + main + gutter + trailing }
 }
 
 struct TakesTable: View {
@@ -295,138 +301,163 @@ struct TakesTable: View {
     let onUpload: (String) -> Void
     @State private var collapsed: Set<String> = []
     @State private var hovered: String?
-    @State private var takeWidth: CGFloat = 300
+    @State private var width: CGFloat = 0
 
     var body: some View {
+        // Audition scores the takes; before that the column would be empty in every row.
+        let showsLike = voice.takes.contains { $0.score != nil }
+        let takeWidth = max(120, width - Column.fixed(like: showsLike))
         ScrollView {
             // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
             LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
                     ForEach(Tone.all, id: \.self) { tone in
-                        group(tone)
+                        group(tone, showsLike: showsLike, takeWidth: takeWidth)
                         Theme.rule.frame(height: 1)
                     }
                 } header: {
-                    VStack(spacing: 0) {
-                        HStack(spacing: 0) {
-                            cell("Tone", width: Column.tone, alignment: .leading)
-                            cell("Take", width: takeWidth, alignment: .leading)
-                            cell("Length", width: Column.length, alignment: .trailing)
-                            cell("Like you", width: Column.like, alignment: .trailing)
-                            cell("Main", width: Column.main)
-                            Color.clear.frame(width: Column.gutter)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.secondary)
-                        .frame(height: 32)
-                        Theme.line.frame(height: 1)
-                    }
-                    .background(Theme.content)
+                    header(showsLike: showsLike, takeWidth: takeWidth)
                 }
             }
             // Measures the width the rows get, not their own, so the columns can shrink again.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { takeWidth = max(120, $0 - Column.fixed) }
-            .padding(.horizontal, 8)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         }
         .scrollIndicators(.automatic)
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private func cell(_ title: String, width: CGFloat, alignment: Alignment = .center) -> some View {
-        Text(title)
-            .lineLimit(1)
-            .padding(.leading, alignment == .leading ? Column.inset : 0)
-            .padding(.trailing, alignment == .trailing ? Column.inset : 0)
-            .frame(width: width, alignment: alignment)
+    private func header(showsLike: Bool, takeWidth: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Text("Tone").padding(.leading, Column.leading).frame(width: Column.tone, alignment: .leading)
+            Text("Take").padding(.leading, Column.inset).frame(width: takeWidth, alignment: .leading)
+            Text("Length").padding(.trailing, Column.inset).frame(width: Column.length, alignment: .trailing)
+            if showsLike {
+                Text("Like you").padding(.trailing, Column.inset).frame(width: Column.like, alignment: .trailing)
+            }
+            Text("Main").frame(width: Column.main)
+            Color.clear.frame(width: Column.gutter)
+        }
+        .lineLimit(1)
+        .font(.vcCaptionBold)
+        .foregroundStyle(Theme.secondary)
+        .padding(.trailing, Column.trailing)
+        .frame(maxWidth: .infinity, minHeight: Column.header, maxHeight: Column.header, alignment: .leading)
+        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+        .background(Theme.content)
     }
 
-    private func group(_ tone: String) -> some View {
+    /// A tone's rows: one per take with the tone's name in the first, or one row for a tone with no take or folded
+    /// away. Separators run the full width; the whole group shares one hover.
+    private func group(_ tone: String, showsLike: Bool, takeWidth: CGFloat) -> some View {
         let takes = voice.takes(tone)
         // A pending change stays in view.
         let isCollapsed = collapsed.contains(tone) && !takes.contains { $0.proposal != nil }
-        let collapsible = takes.count > 1
-        let height = takes.isEmpty ? Column.emptyRow : Column.row
-        let label = HStack(spacing: 6) {
-            // Hidden, not removed, so every tone name starts at the same x.
-            Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .bold))
-                .rotationEffect(.degrees(isCollapsed ? -90 : 0))
-                .foregroundStyle(Theme.secondary)
-                .opacity(collapsible ? 1 : 0)
-            Text(tone)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(takes.isEmpty ? Theme.secondary : Theme.text)
-            if collapsible {
-                Text("(\(takes.count))").font(.system(size: 14)).foregroundStyle(Theme.secondary)
-            }
-        }
-        .lineLimit(1)
-        .padding(.leading, 10)
-        .frame(width: Column.tone, height: height, alignment: .leading)
-        .contentShape(.rect)
-        return HStack(alignment: .top, spacing: 0) {
-            if collapsible {
-                Button {
-                    if isCollapsed { collapsed.remove(tone) } else { collapsed.insert(tone) }
-                } label: { label }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(tone), \(takes.count) takes, \(isCollapsed ? "collapsed" : "expanded")")
+        // Dimmed at rest, so every tone shows what you can do with it without the actions crowding the takes.
+        let actionOpacity = hovered == tone || importingTone == tone ? 1 : 0.7
+        return VStack(spacing: 0) {
+            if takes.isEmpty {
+                HStack(spacing: 0) {
+                    toneCell(tone, takes: takes, collapsed: false)
+                    emptyActions(tone).opacity(actionOpacity)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: Column.emptyRow)
+            } else if isCollapsed {
+                HStack(spacing: 0) {
+                    toneCell(tone, takes: takes, collapsed: true)
+                    Spacer(minLength: 0)
+                    addMenu(tone).opacity(actionOpacity).frame(width: Column.gutter)
+                }
+                .padding(.trailing, Column.trailing)
+                .frame(height: Column.row)
             } else {
-                label.accessibilityElement(children: .combine)
-            }
-
-            VStack(spacing: 0) {
-                if isCollapsed || takes.isEmpty {
-                    // A tone with no take shows only its name; Record and Upload appear on hover.
-                    blankRow(height: height)
-                } else {
-                    ForEach(Array(takes.enumerated()), id: \.element.id) { index, take in
-                        TakeRow(take: take, voice: voice, showsMain: takes.count > 1, takeWidth: takeWidth)
-                            .overlay(alignment: .top) { if index > 0 { Theme.rule.frame(height: 1) } }
+                ForEach(Array(takes.enumerated()), id: \.element.id) { index, take in
+                    HStack(spacing: 0) {
+                        // ZStacks, not Groups: an empty Group would drop the column's fixed width.
+                        ZStack(alignment: .leading) {
+                            if index == 0 { toneCell(tone, takes: takes, collapsed: false) }
+                        }
+                        .frame(width: Column.tone)
+                        .frame(maxHeight: .infinity)
+                        TakeRow(take: take, voice: voice, showsMain: takes.count > 1, showsLike: showsLike, takeWidth: takeWidth)
+                        ZStack {
+                            if index == 0 { addMenu(tone).opacity(actionOpacity) }
+                        }
+                        .frame(width: Column.gutter)
+                        .frame(maxHeight: .infinity)
                     }
+                    .padding(.trailing, Column.trailing)
+                    // Lets the fixed columns stretch to a wrapped transcript's height.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .overlay(alignment: .top) { if index > 0 { Theme.rule.frame(height: 1) } }
                 }
             }
-
-            ZStack {
-                if !takes.isEmpty {
-                    addMenu(tone).opacity(hovered == tone || importingTone == tone ? 1 : 0)
-                }
-            }
-            .frame(width: Column.gutter, height: height)
         }
-        .overlay(alignment: .topTrailing) {
-            if takes.isEmpty { emptyActions(tone).opacity(hovered == tone || importingTone == tone ? 1 : 0) }
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(hovered == tone ? Theme.hover : .clear)
         .onHover { hovering in
             if hovering { hovered = tone } else if hovered == tone { hovered = nil }
         }
     }
 
+    /// The tone's name, with a chevron that folds a tone of two or more takes. The chevron sits in the leading margin,
+    /// so every name lines up with the "Tone" header.
+    @ViewBuilder private func toneCell(_ tone: String, takes: [Take], collapsed isCollapsed: Bool) -> some View {
+        let collapsible = takes.count > 1
+        let label = HStack(spacing: 2) {
+            // Hidden, not removed, so every tone name starts at the same x.
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .semibold))
+                .rotationEffect(.degrees(isCollapsed ? -90 : 0))
+                .foregroundStyle(Theme.secondary)
+                .frame(width: 12)
+                .opacity(collapsible ? 1 : 0)
+            HStack(spacing: 4) {
+                Text(tone)
+                    .font(takes.isEmpty ? .vcBody : .vcBodyBold)
+                    .foregroundStyle(takes.isEmpty ? Theme.secondary : Theme.text)
+                if collapsible {
+                    Text("(\(takes.count))").font(.vcBody.monospacedDigit()).foregroundStyle(Theme.secondary)
+                }
+            }
+        }
+        .lineLimit(1)
+        .padding(.leading, Column.leading - 14)
+        .frame(width: Column.tone, alignment: .leading)
+        .frame(maxHeight: .infinity)
+        .contentShape(.rect)
+        if collapsible {
+            Button {
+                if isCollapsed { collapsed.remove(tone) } else { collapsed.insert(tone) }
+            } label: { label }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(tone), \(takes.count) takes, \(isCollapsed ? "collapsed" : "expanded")")
+        } else {
+            label.accessibilityElement(children: .combine)
+        }
+    }
+
     @ViewBuilder private func addMenu(_ tone: String) -> some View {
         if importingTone == tone {
-            ProgressView(value: importProgress).frame(width: 34)
+            ProgressView(value: importProgress).frame(width: 24)
         } else {
             Menu {
                 Button("Record") { onRecord(tone) }
                 Button("Upload") { onUpload(tone) }
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 26, height: 26)
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.outline))
-                    .contentShape(.rect)
+                IconMenuLabel(systemImage: "plus")
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
+            .help("Add a take")
             .accessibilityLabel("Add take to \(tone)")
         }
     }
 
-    /// Record and Upload for a tone with no take, shown on hover at the row end.
+    /// Record and Upload for a tone with no take, where its first take will go.
     private func emptyActions(_ tone: String) -> some View {
         HStack(spacing: 8) {
             if importingTone == tone {
@@ -435,17 +466,30 @@ struct TakesTable: View {
                 Button { onRecord(tone) } label: {
                     HStack(spacing: 6) { RecordDot(size: 8); Text("Record") }
                 }
-                .buttonStyle(.outline(height: 26))
-                Button("Upload") { onUpload(tone) }.buttonStyle(.outline(height: 26))
+                .accessibilityLabel("Record a \(tone) take")
+                Button("Upload") { onUpload(tone) }
+                    .accessibilityLabel("Upload a \(tone) take")
             }
         }
+        .buttonStyle(.vc(.secondary, .s))
         .fixedSize()
-        .padding(.horizontal, 8)
-        .frame(height: Column.emptyRow)
+        .padding(.leading, Column.inset)
     }
+}
 
-    private func blankRow(height: CGFloat) -> some View {
-        Color.clear.frame(width: takeWidth + Column.length + Column.like + Column.main, height: height)
+/// An Icon S button's look for a menu's label: a menu takes no custom button style, so the hover is drawn here.
+private struct IconMenuLabel: View {
+    let systemImage: String
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.vcBody)
+            .foregroundStyle(hovered ? Theme.text : Theme.secondary)
+            .frame(width: VCSize.s.height, height: VCSize.s.height)
+            .background(hovered ? Theme.hover : .clear, in: .rect(cornerRadius: VCSize.s.radius))
+            .contentShape(.rect)
+            .onHover { hovered = $0 }
     }
 }
 
@@ -454,30 +498,27 @@ struct TakeRow: View {
     let take: Take
     let voice: Voice
     let showsMain: Bool
+    var showsLike = true
     let takeWidth: CGFloat
     @State private var text = ""
-    @FocusState private var editing: Bool
+    /// The transcript reads as text, cut with an ellipsis, until clicked; then it's a field.
+    @State private var editing = false
+    @FocusState private var focused: Bool
 
     var body: some View {
         let url = store.audioURL(take, voiceID: voice.id)
         let isMain = voice.mainTake(take.tone)?.id == take.id
         HStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 PlayButton(url: url)
-                SmallWaveform(url: url).frame(width: 54, height: 18)
+                SmallWaveform(url: url).frame(width: 56, height: 20)
                 if let proposal = take.proposal {
                     TakeProposalText(take: take, proposal: proposal).frame(maxWidth: .infinity, alignment: .leading)
                     DecisionButtons(label: "change to this take",
                                     onAccept: { store.acceptTakes([take.id], voiceID: voice.id) },
                                     onReject: { store.rejectTakes([take.id], voiceID: voice.id) })
                 } else {
-                    TextField("Transcript", text: $text, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .lineLimit(editing ? nil : 2)
-                        .help(take.transcript)
-                        .focused($editing)
-                        .onSubmit(commit)
-                        .onChange(of: editing) { if !editing { commit() } }
+                    transcript
                 }
                 if !take.issues.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -486,7 +527,7 @@ struct TakeRow: View {
                         .accessibilityLabel(take.issues.map(\.label).joined(separator: ", "))
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, Column.inset)
             .padding(.vertical, 8)
             .frame(width: takeWidth, alignment: .leading)
 
@@ -494,18 +535,21 @@ struct TakeRow: View {
                 .padding(.trailing, Column.inset)
                 .frame(width: Column.length, alignment: .trailing)
                 .frame(maxHeight: .infinity)
-            // No score yet leaves the cell blank.
-            Text(take.score.map { "\(Int(($0 * 100).rounded()))%" } ?? "")
-                .padding(.trailing, Column.inset)
-                .frame(width: Column.like, alignment: .trailing)
-                .frame(maxHeight: .infinity)
+            if showsLike {
+                // No score yet leaves the cell blank.
+                Text(take.score.map { "\(Int(($0 * 100).rounded()))%" } ?? "")
+                    .padding(.trailing, Column.inset)
+                    .frame(width: Column.like, alignment: .trailing)
+                    .frame(maxHeight: .infinity)
+            }
             // ZStack, not Group: an empty Group would drop the column's fixed width.
             ZStack {
                 if showsMain {
                     Button { store.setMain(take, voiceID: voice.id) } label: {
                         Image(systemName: isMain ? "largecircle.fill.circle" : "circle")
-                            .font(.system(size: 17))
-                            .frame(width: 30, height: 30)
+                            .font(.system(size: 15))
+                            .foregroundStyle(isMain ? Theme.text : Theme.secondary)
+                            .frame(width: VCSize.s.height, height: VCSize.s.height)
                             .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
@@ -516,9 +560,8 @@ struct TakeRow: View {
             .frame(width: Column.main)
             .frame(maxHeight: .infinity)
         }
-        .font(.system(size: 14).monospacedDigit())
+        .font(.vcBody.monospacedDigit())
         .frame(minHeight: Column.row)
-        // Lets the fixed columns stretch to a wrapped transcript's height.
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(.rect)
         .contextMenu {
@@ -526,6 +569,40 @@ struct TakeRow: View {
         }
         .onAppear { text = take.transcript }
         .onChange(of: take.transcript) { text = take.transcript }
+    }
+
+    @ViewBuilder private var transcript: some View {
+        if editing {
+            TextField("Transcript", text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onSubmit { focused = false }
+                .onExitCommand {
+                    text = take.transcript
+                    focused = false
+                }
+                .onChange(of: focused) {
+                    if !focused {
+                        commit()
+                        editing = false
+                    }
+                }
+                // After the field is in the window, or the focus has nowhere to go.
+                .onAppear { Task { focused = true } }
+        } else {
+            Button { editing = true } label: {
+                Text(take.transcript)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .help(take.transcript)
+            .accessibilityLabel(take.transcript)
+            .accessibilityHint("Edit the transcript")
+        }
     }
 
     private func commit() {
@@ -541,7 +618,7 @@ private struct TakeProposalText: View {
 
     var body: some View {
         let changes = [proposal.tone.map { "\(take.tone) → \($0)" }, proposal.main == true ? "Set as main take" : nil].compactMap(\.self)
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             if let transcript = proposal.transcript {
                 Text(take.transcript).strikethrough().foregroundStyle(Theme.secondary)
                 Text(transcript)
@@ -549,7 +626,7 @@ private struct TakeProposalText: View {
                 Text(take.transcript)
             }
             if !changes.isEmpty {
-                Text(changes.joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(Theme.secondary)
+                Text(changes.joined(separator: " · ")).font(.vcCaption).foregroundStyle(Theme.secondary)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -558,40 +635,37 @@ private struct TakeProposalText: View {
     }
 }
 
+/// Plays a take or clip: the transport's play button at S.
 struct PlayButton: View {
     @Environment(Player.self) private var player
     let url: URL
 
     var body: some View {
-        Button { player.toggle(url) } label: {
-            Image(systemName: player.playing == url ? "stop.fill" : "play.fill")
-                .font(.system(size: 11))
-                .frame(width: 30, height: 24)
-                .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 6))
-                .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(player.playing == url ? "Stop" : "Play")
+        TransportPlayButton(playing: player.playing == url, size: .s) { player.toggle(url) }
     }
 }
 
+/// A take's loudness as one continuous mirrored shape, a point per column.
 struct SmallWaveform: View {
     @Environment(Waveforms.self) private var waveforms
     let url: URL
 
     var body: some View {
         Canvas { context, size in
-            let bars = waveforms.bars[url] ?? []
-            guard !bars.isEmpty else { return }
-            let step = size.width / CGFloat(bars.count)
-            for (index, bar) in bars.enumerated() {
-                let height = max(2, CGFloat(bar) * size.height)
-                let rect = CGRect(x: CGFloat(index) * step + step * 0.25, y: (size.height - height) / 2,
-                                  width: max(1, step * 0.5), height: height)
-                context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(Theme.secondary))
-            }
+            let peaks = waveforms.bars[url] ?? []
+            guard peaks.count > 1 else { return }
+            let middle = size.height / 2
+            let step = size.width / CGFloat(peaks.count - 1)
+            // Half a point at least, so silence still draws a line through the middle.
+            let reach = peaks.map { max(0.5, CGFloat($0) * middle) }
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: middle - reach[0]))
+            for index in reach.indices.dropFirst() { path.addLine(to: CGPoint(x: CGFloat(index) * step, y: middle - reach[index])) }
+            for index in reach.indices.reversed() { path.addLine(to: CGPoint(x: CGFloat(index) * step, y: middle + reach[index])) }
+            path.closeSubpath()
+            context.fill(path, with: .color(Theme.secondary))
         }
-        .task(id: url) { await waveforms.load(url) }
+        .task(id: url) { await waveforms.load(url, count: 56) }
         .accessibilityHidden(true)
     }
 }
@@ -602,16 +676,34 @@ struct PronunciationsPanel: View {
     @Environment(VoiceStore.self) private var store
     let voice: Voice
     @Binding var open: Bool
-    @State private var adding = false
+    /// Which Add button the form opens from: the header's + or the empty state's.
+    @State private var adding: AddButton?
     @State private var word = ""
     @State private var respelling = ""
+
+    private enum AddButton { case header, empty }
 
     var body: some View {
         Group {
             if open {
-                VStack(alignment: .leading, spacing: 0) {
-                    PanelHeader("Pronunciations") { FoldButton(label: "pronunciations") { open = false } }
-                    ScrollView { list }.scrollBounceBehavior(.basedOnSize)
+                VStack(spacing: 0) {
+                    PanelHeader("Pronunciations") {
+                        Button { adding = .header } label: { Image(systemName: "plus") }
+                            .buttonStyle(.icon(.s))
+                            .help("Add a pronunciation")
+                            .accessibilityLabel("Add pronunciation")
+                            .popover(isPresented: presenting(.header), arrowEdge: .bottom) { addForm }
+                        FoldButton(label: "pronunciations") { open = false }
+                    }
+                    if voice.pronunciations.isEmpty && (voice.proposedPronunciations ?? []).isEmpty {
+                        EmptyState(title: "No pronunciations", message: "Add a word the voice says wrong and how it should sound.") {
+                            Button("Add") { adding = .empty }
+                                .buttonStyle(.vc(.secondary, .s))
+                                .popover(isPresented: presenting(.empty), arrowEdge: .bottom) { addForm }
+                        }
+                    } else {
+                        ScrollView { list }.scrollBounceBehavior(.basedOnSize)
+                    }
                 }
                 .frame(width: 240)
                 .sidePanel()
@@ -622,53 +714,60 @@ struct PronunciationsPanel: View {
         .onChange(of: voice.proposedPronunciations?.count ?? 0, initial: true) { _, count in if count > 0 { open = true } }
     }
 
-    /// Each word and how to say it, then Add.
+    private func presenting(_ button: AddButton) -> Binding<Bool> {
+        Binding(get: { adding == button }, set: { if !$0 { adding = nil } })
+    }
+
+    /// Each word and how to say it, then an agent's proposals.
     private var list: some View {
         VStack(spacing: 0) {
             ForEach(voice.pronunciations) { item in
-                HStack(spacing: 10) {
+                HStack(spacing: 6) {
                     Text(item.word)
-                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                    arrow
                     Text(item.respelling)
                 }
-                .font(.system(size: 14))
+                .font(.vcBody)
+                .lineLimit(1)
                 .padding(.horizontal, 16)
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                 .contentShape(.rect)
+                .help("\(item.word) \u{2192} \(item.respelling)")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(item.word), said \(item.respelling)")
                 .contextMenu {
                     Button("Delete", role: .destructive) { store.removePronunciation(item.id, voiceID: voice.id) }
                 }
             }
             // Two lines, so the word and its respelling don't break mid-word beside the buttons.
             ForEach(voice.proposedPronunciations ?? []) { item in
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.word)
                         HStack(spacing: 6) {
-                            Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                            arrow
                             Text(item.respelling)
                         }
                     }
+                    .lineLimit(1)
                     .accessibilityElement(children: .combine)
                     Spacer(minLength: 4)
                     DecisionButtons(label: "pronunciation of \(item.word)",
                                     onAccept: { store.acceptPronunciations([item.id], voiceID: voice.id) },
                                     onReject: { store.rejectPronunciations([item.id], voiceID: voice.id) })
                 }
-                .font(.system(size: 14))
+                .font(.vcBody)
                 .padding(.leading, 16)
                 .padding(.trailing, 12)
-                .padding(.vertical, 6)
+                .padding(.vertical, 4)
                 .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1).padding(.horizontal, 8) }
             }
-            Button { adding = true } label: { Label("Add", systemImage: "plus") }
-                .buttonStyle(.outline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .popover(isPresented: $adding, arrowEdge: .bottom) { addForm }
         }
+        .padding(.vertical, 8)
+    }
+
+    private var arrow: some View {
+        Image(systemName: "arrow.right").font(.vcCaption).foregroundStyle(Theme.tertiary).accessibilityHidden(true)
     }
 
     private var addForm: some View {
@@ -676,7 +775,7 @@ struct PronunciationsPanel: View {
             TextField("Word", text: $word)
             TextField("Say as", text: $respelling).onSubmit(add)
             Button("Add", action: add)
-                .buttonStyle(.primary(height: 30))
+                .buttonStyle(.vc(.primary, .m))
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .disabled(word.trimmingCharacters(in: .whitespaces).isEmpty || respelling.trimmingCharacters(in: .whitespaces).isEmpty)
         }
@@ -690,7 +789,7 @@ struct PronunciationsPanel: View {
         store.addPronunciation(word: word, respelling: respelling, voiceID: voice.id)
         word = ""
         respelling = ""
-        adding = false
+        adding = nil
     }
 }
 
@@ -706,8 +805,8 @@ struct NewVoiceSheet: View {
     @State private var consent = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("New voice").font(.system(size: 22, weight: .bold))
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New voice").font(.vcTitle)
             TextField("Name", text: $name, prompt: Text("Untitled voice"))
                 .textFieldStyle(.roundedBorder)
                 .focusEffectDisabled(false)
@@ -718,17 +817,18 @@ struct NewVoiceSheet: View {
             }
             Toggle("This is my voice, or I have the speaker's permission.", isOn: $consent)
                 .toggleStyle(.checkbox)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Cancel") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
                 Button("Start") {
                     onStart(name, kind)
                     dismiss()
                 }
-                .buttonStyle(.primary(height: 32))
+                .buttonStyle(.vc(.primary, .m))
                 .keyboardShortcut(.defaultAction)
                 .disabled(!consent)
             }
+            .padding(.top, 8)
         }
         .padding(24)
         .frame(width: 580)
@@ -737,17 +837,18 @@ struct NewVoiceSheet: View {
         .focusEffectDisabled()
     }
 
+    /// A card: the selection grey and a stronger border when chosen.
     private func choice(_ title: String, detail: String, kind: Kind) -> some View {
         let selected = self.kind == kind
         return Button { self.kind = kind } label: {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 15, weight: .semibold))
-                Text(detail).font(.system(size: 13)).foregroundStyle(Theme.secondary)
+                Text(title).font(.vcBodyBold)
+                Text(detail).font(.vcBody).foregroundStyle(Theme.secondary)
             }
-            .padding(14)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Theme.selection : .clear, in: .rect(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? Theme.outline : Theme.line))
+            .background(selected ? Theme.selection : Theme.hover, in: .rect(cornerRadius: Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(selected ? Theme.strong : Theme.line))
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -802,13 +903,13 @@ struct FileCloneView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
             Text(title)
-                .font(.system(size: 34, weight: .semibold))
+                .font(.vcDisplay)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
-            Spacer().frame(height: 52)
+            Spacer().frame(height: 48)
             content()
             Spacer(minLength: 32).frame(maxHeight: 72)
-            Button(bottom, action: action).buttonStyle(.outline(height: 44))
+            Button(bottom, action: action).buttonStyle(.vc(.secondary, .l))
             Spacer(minLength: 24)
         }
         .frame(maxWidth: 880)
@@ -818,9 +919,11 @@ struct FileCloneView: View {
     private var pickView: some View {
         screen("Drop audio or video files", bottom: "Cancel", action: { onDone(nil) }) {
             Button { picking = true } label: { Text("Choose files").frame(minWidth: 260) }
-                .buttonStyle(.primary(height: 76))
+                .buttonStyle(VCButtonStyle(kind: .primary, height: 76))
         }
-        .background(dropping ? Theme.selection.opacity(0.5) : .clear, in: .rect(cornerRadius: 18))
+        // The whole pane takes the drop; it lights up while files are over it.
+        .background(dropping ? Theme.selection.opacity(0.5) : .clear, in: .rect(cornerRadius: Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(dropping ? Theme.strong : .clear))
         .padding(8)
         .dropDestination(for: URL.self) { urls, _ in start(urls) } isTargeted: { dropping = $0 }
     }
@@ -846,17 +949,15 @@ struct FileCloneView: View {
         let kept = clips.filter(\.keep)
         let ready = !kept.isEmpty && !kept.contains { $0.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 12) {
+        return VStack(spacing: 0) {
+            PanelHeader {
                 Text(title.isEmpty ? "Untitled voice" : title)
-                    .font(.system(size: 30, weight: .bold))
-                    .lineLimit(1)
-                Spacer()
+            } actions: {
                 if groups.count > 1 {
-                    Button("Back") { stage = .speakers }.buttonStyle(.outline(height: 34))
+                    Button("Back") { stage = .speakers }.buttonStyle(.vc(.secondary, .s))
                 }
-                Button("Cancel") { onDone(nil) }.buttonStyle(.outline(height: 34))
-                Button("Create voice", action: create).buttonStyle(.primary).disabled(!ready)
+                Button("Cancel") { onDone(nil) }.buttonStyle(.vc(.secondary, .s))
+                Button("Create voice", action: create).buttonStyle(.vc(.primary, .s)).disabled(!ready)
             }
             ScrollView {
                 // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
@@ -867,29 +968,24 @@ struct FileCloneView: View {
                             Theme.rule.frame(height: 1)
                         }
                     } header: {
-                        VStack(spacing: 0) {
-                            HStack(spacing: 12) {
-                                Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
-                                Color.clear.frame(width: FileColumn.issues)
-                                Text("Length").frame(width: FileColumn.length)
-                                Text("Tone").frame(width: FileColumn.tone, alignment: .leading)
-                            }
-                            .font(.system(size: 13, weight: .medium).monospacedDigit())
-                            .foregroundStyle(Theme.secondary)
-                            .padding(.horizontal, 10)
-                            .frame(height: 34)
-                            Theme.rule.frame(height: 1)
+                        HStack(spacing: 12) {
+                            Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
+                            Color.clear.frame(width: FileColumn.issues)
+                            Text("Length").frame(width: FileColumn.length, alignment: .trailing)
+                            Text("Tone").padding(.leading, 6).frame(width: FileColumn.tone, alignment: .leading)
                         }
+                        .font(.vcCaptionBold.monospacedDigit())
+                        .foregroundStyle(Theme.secondary)
+                        .padding(.horizontal, 16)
+                        .frame(height: 28)
+                        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
                         .background(Theme.content)
                     }
                 }
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.horizontal, 24)
-        .padding(.top, 22)
-        .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// Cuts the files, then groups the clips by speaker. Returns false when nothing dropped is audio or video.
@@ -964,11 +1060,11 @@ struct SpeakerRow: View {
     var body: some View {
         // The clean clip nearest 8 s says the most about the voice.
         let sample = clips.filter(\.issues.isEmpty).min { abs($0.duration - 8) < abs($1.duration - 8) } ?? clips[0]
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             PlayButton(url: sample.url)
             Button(action: onChoose) {
-                HStack(spacing: 10) {
-                    Text("Speaker \(number)").font(.system(size: 15, weight: .semibold))
+                HStack(spacing: 8) {
+                    Text("Speaker \(number)").font(.vcBodyBold)
                     Spacer()
                     Text(clips.count == 1 ? "1 clip" : "\(clips.count) clips").foregroundStyle(Theme.secondary).monospacedDigit()
                     Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondary)
@@ -978,10 +1074,10 @@ struct SpeakerRow: View {
             }
             .buttonStyle(.plain)
         }
-        .font(.system(size: 14))
-        .padding(.horizontal, 14)
-        .frame(height: 52)
-        .background(hovered ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
+        .font(.vcBody)
+        .padding(.horizontal, 8)
+        .frame(height: 40)
+        .background(hovered ? Theme.hover : .clear, in: .rect(cornerRadius: Radius.row))
         .onHover { hovered = $0 }
     }
 }
@@ -994,7 +1090,7 @@ struct FileClipRow: View {
         HStack(spacing: 12) {
             Toggle("Use clip", isOn: $clip.keep).toggleStyle(.checkbox).labelsHidden()
             PlayButton(url: clip.url)
-            SmallWaveform(url: clip.url).frame(width: 54, height: 18)
+            SmallWaveform(url: clip.url).frame(width: 56, height: 20)
             TextField("Transcript", text: $clip.transcript, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...3)
@@ -1007,7 +1103,7 @@ struct FileClipRow: View {
                 }
             }
             .frame(width: FileColumn.issues, alignment: .leading)
-            Text(formatTime(clip.duration)).monospacedDigit().frame(width: FileColumn.length)
+            Text(formatTime(clip.duration)).monospacedDigit().frame(width: FileColumn.length, alignment: .trailing)
             Menu {
                 Picker("Tone", selection: $clip.tone) {
                     ForEach(Tone.all, id: \.self) { Text($0) }
@@ -1015,22 +1111,17 @@ struct FileClipRow: View {
                 .pickerStyle(.inline)
                 .labelsHidden()
             } label: {
-                HStack(spacing: 5) {
-                    Text(clip.tone)
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondary)
-                }
-                .contentShape(.rect)
+                InlinePopupLabel(title: clip.tone)
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .fixedSize()
             .frame(width: FileColumn.tone, alignment: .leading)
             .accessibilityLabel("Tone, \(clip.tone)")
         }
-        .font(.system(size: 14))
-        .padding(.horizontal, 10)
+        .font(.vcBody)
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .frame(minHeight: 44)
+        .frame(minHeight: 40)
     }
 }

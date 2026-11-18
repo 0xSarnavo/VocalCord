@@ -121,9 +121,9 @@ struct VoiceCheckSheet: View {
     @State private var test = VoiceTest.range
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Voice check").font(.system(size: 22, weight: .bold))
+                Text("Voice check").font(.vcTitle)
                 Text("Renders test lines in \u{201C}\(voice.name)\u{201D}. A line that fails a check renders again, up to \(Version.tries) "
                      + "times, and keeps its best version.")
                     .foregroundStyle(Theme.secondary)
@@ -137,12 +137,12 @@ struct VoiceCheckSheet: View {
                 Theme.line.frame(height: 1)
                 VoiceCheckReport(voiceID: voice.id, report: report)
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Close") { dismiss() }.buttonStyle(.outline(height: 32)).keyboardShortcut(.cancelAction)
+                Button("Close") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
                 if store.checking != voice.id {
                     Button("Start check") { store.startCheck(voice.id, test: test, busyElsewhere: projects.progress != nil) }
-                        .buttonStyle(.primary(height: 32))
+                        .buttonStyle(.vc(.primary, .m))
                         .keyboardShortcut(.defaultAction)
                         .disabled(store.busy != nil || projects.progress != nil)
                 }
@@ -158,12 +158,13 @@ struct VoiceCheckSheet: View {
     private var picker: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(VoiceTest.allCases) { option in
+                let selected = test == option
                 Button { test = option } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: test == option ? "largecircle.fill.circle" : "circle")
-                            .foregroundStyle(test == option ? Theme.text : Theme.secondary)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(option.title).font(.system(size: 14, weight: .semibold))
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(selected ? Theme.text : Theme.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(option.title).font(.vcBodyBold)
                             Text(option.detail).foregroundStyle(Theme.secondary)
                         }
                         Spacer()
@@ -174,12 +175,14 @@ struct VoiceCheckSheet: View {
                             .help("On this Mac with the \(EngineSettings.titles[EngineSettings.model] ?? EngineSettings.model) model, "
                                   + "from how fast it has rendered so far. Lines that need retries take longer.")
                     }
-                    .padding(10)
-                    .background(test == option ? Theme.selection : .clear, in: .rect(cornerRadius: 10))
+                    .padding(12)
+                    // A choice tile: the selection grey and a stronger border when chosen.
+                    .background(selected ? Theme.selection : Theme.hover, in: .rect(cornerRadius: Radius.card))
+                    .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(selected ? Theme.strong : Theme.line))
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(test == option ? .isSelected : [])
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
     }
@@ -188,10 +191,10 @@ struct VoiceCheckSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 ProgressView(value: store.checkProgress)
-                Button("Cancel") { store.cancelCheck() }.buttonStyle(.outline(height: 28))
+                Button("Cancel") { store.cancelCheck() }.buttonStyle(.vc(.secondary, .s))
             }
             Text(store.checkStatus).foregroundStyle(Theme.secondary).monospacedDigit()
-            Text("You can close this window; the check keeps running.").font(.system(size: 12)).foregroundStyle(Theme.secondary)
+            Text("You can close this window; the check keeps running.").font(.vcCaption).foregroundStyle(Theme.secondary)
         }
     }
 }
@@ -203,13 +206,13 @@ private struct VoiceCheckReport: View {
     let report: VoiceCheck
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(summary).font(.system(size: 14, weight: .semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            Text(summary).font(.vcBodyBold)
             if report.test == .consistency { Text(spread).foregroundStyle(Theme.secondary).monospacedDigit() }
             ScrollView {
                 VStack(spacing: 0) {
                     row(["", "Tone", "Line", "Like you", "Human", "Words", "Pitch", "Pace", "Tries", ""].map { Text($0) })
-                        .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.secondary).frame(height: 26)
+                        .font(.vcCaptionBold).foregroundStyle(Theme.secondary).frame(height: 28)
                     ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
                         let version = line.version, scores = version.scores
                         HStack(spacing: 0) {
@@ -233,8 +236,8 @@ private struct VoiceCheckReport: View {
                             .help(version.passes ? "Passed" : version.flags.joined(separator: "\n"))
                             .accessibilityLabel(version.passes ? "Passed" : version.flags.joined(separator: ", "))
                         }
-                        .font(.system(size: 13).monospacedDigit())
-                        .frame(height: 34)
+                        .font(.vcBody.monospacedDigit())
+                        .frame(height: 32)
                         Theme.rule.frame(height: 1)
                     }
                 }

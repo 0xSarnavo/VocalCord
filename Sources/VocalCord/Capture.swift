@@ -12,14 +12,15 @@ struct LevelMeter: View {
                 let height = max(5, CGFloat(level) * size.height)
                 let rect = CGRect(x: CGFloat(index) * step + step * 0.3, y: (size.height - height) / 2,
                                   width: max(2, step * 0.4), height: height)
-                context.fill(Path(roundedRect: rect, cornerRadius: 1.5), with: .color(.white.opacity(0.72)))
+                context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(Theme.text.opacity(0.72)))
             }
         }
         .accessibilityLabel("Input level")
     }
 }
 
-/// Large primary Record button that turns into Stop with a timer.
+/// Large primary Record button that turns into Stop with a timer: 76 pt tall in the clone flows (radius 8), 48 in the
+/// record sheet (radius 7).
 struct RecordButton: View {
     let recording: Bool
     let elapsed: Double
@@ -30,9 +31,12 @@ struct RecordButton: View {
         Button(action: action) {
             HStack(spacing: large ? 16 : 10) {
                 if recording {
-                    RoundedRectangle(cornerRadius: 3).fill(.red).frame(width: large ? 18 : 12, height: large ? 18 : 12)
+                    // A quarter of its side, like the chips: 4 at 18 pt, 3 at 12.
+                    RoundedRectangle(cornerRadius: large ? 4 : 3).fill(.red).frame(width: large ? 18 : 12, height: large ? 18 : 12)
                     Text("Stop")
-                    Text(formatTime(elapsed)).monospacedDigit().foregroundStyle(Theme.onPrimary.opacity(0.55))
+                    Text(formatTime(elapsed))
+                        .font(large ? .vcDisplay.weight(.semibold).monospacedDigit() : .vcTitle.monospacedDigit())
+                        .foregroundStyle(Theme.onPrimary.opacity(0.55))
                 } else {
                     RecordDot(size: large ? 18 : 12)
                     Text("Record")
@@ -40,7 +44,7 @@ struct RecordButton: View {
             }
             .frame(minWidth: large ? 260 : 150)
         }
-        .buttonStyle(.primary(height: large ? 76 : 48))
+        .buttonStyle(VCButtonStyle(kind: .primary, height: large ? 76 : 48))
     }
 }
 
@@ -49,10 +53,10 @@ struct WarningRow: View {
     var extra: [String] = []
 
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 16) {
             ForEach(issues.map(\.label) + extra, id: \.self) { Warning(text: $0) }
         }
-        .frame(height: 22)
+        .frame(height: 24)
     }
 }
 
@@ -85,7 +89,7 @@ struct TakeCapture: View {
     @State private var picking = false
 
     var body: some View {
-        VStack(spacing: large ? 36 : 22) {
+        VStack(spacing: large ? 36 : 24) {
             Spacer(minLength: 0)
             if working.active {
                 VStack(spacing: 12) {
@@ -99,7 +103,7 @@ struct TakeCapture: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(large ? 48 : 28)
+        .padding(large ? 48 : 24)
         .frame(maxWidth: 880)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie]) { result in
@@ -109,58 +113,52 @@ struct TakeCapture: View {
     }
 
     private var captureView: some View {
-        VStack(spacing: large ? 36 : 22) {
+        VStack(spacing: large ? 36 : 24) {
             Text(prompt)
-                .font(.system(size: large ? 26 : 20, weight: .semibold))
+                .font(.vcDisplay)
                 .multilineTextAlignment(.center)
-                .lineSpacing(4)
+                .lineSpacing(5)
                 .frame(maxWidth: 760)
             HStack(spacing: 20) {
                 RecordButton(recording: recorder.isRecording, elapsed: recorder.elapsed, large: large, action: toggleRecording)
                 if allowsUpload {
                     Button("Upload") { picking = true }
-                        .buttonStyle(.outline(height: 48))
+                        .buttonStyle(VCButtonStyle(kind: .secondary, height: 48))
                         .disabled(recorder.isRecording)
                 }
             }
             WarningRow(issues: recorder.issues)
             LevelMeter(levels: recorder.levels).frame(width: large ? 560 : 440, height: large ? 60 : 44)
             if let onCancel {
-                Button("Cancel") { _ = recorder.stop(); onCancel() }.buttonStyle(.outline(height: 32))
+                Button("Cancel") { _ = recorder.stop(); onCancel() }.buttonStyle(.vc(.secondary, .l))
             }
         }
     }
 
     private func reviewView(_ review: Review) -> some View {
         let short = review.duration < minSeconds
-        return VStack(spacing: large ? 28 : 18) {
-            HStack(spacing: 14) {
-                Button { player.toggle(review.url) } label: {
-                    Image(systemName: player.playing == review.url ? "stop.fill" : "play.fill")
-                        .frame(width: 38, height: 30)
-                        .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 8))
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(player.playing == review.url ? "Stop" : "Play")
-                SmallWaveform(url: review.url).frame(width: 200, height: 30)
+        return VStack(spacing: large ? 28 : 16) {
+            HStack(spacing: 12) {
+                TransportPlayButton(playing: player.playing == review.url) { player.toggle(review.url) }
+                SmallWaveform(url: review.url).frame(width: 200, height: 28)
                 Text(formatTime(review.duration)).monospacedDigit().foregroundStyle(Theme.secondary)
             }
+            // A card, so the transcript reads as the thing to check and fix.
             TextField("Transcript", text: Binding(get: { self.review?.transcript ?? "" },
                                                   set: { self.review?.transcript = $0 }), axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: large ? 20 : 16))
+                .font(.system(size: 15))
                 .lineLimit(2...6)
-                .padding(14)
+                .padding(12)
                 .frame(maxWidth: 700)
-                .background(Color.white.opacity(0.05), in: .rect(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.line))
+                .background(Theme.hover, in: .rect(cornerRadius: Radius.card))
+                .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
             WarningRow(issues: review.issues, extra: short ? ["Too short"] : [])
-            HStack(spacing: 14) {
-                if let onCancel { Button("Cancel", action: onCancel).buttonStyle(.outline(height: 34)) }
-                Button("Record again") { self.review = nil }.buttonStyle(.outline(height: 34))
+            HStack(spacing: 8) {
+                if let onCancel { Button("Cancel", action: onCancel).buttonStyle(.vc(.secondary, .l)) }
+                Button("Record again") { self.review = nil }.buttonStyle(.vc(.secondary, .l))
                 Button(saveTitle) { save(review) }
-                    .buttonStyle(.primary)
+                    .buttonStyle(.vc(.primary, .l))
                     .disabled(short || review.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
@@ -314,13 +312,14 @@ struct FullCloneView: View {
             Spacer(minLength: 28).frame(maxHeight: 96)
             // Kept when empty, so the prompt doesn't move between steps.
             Text(progressText(session, item))
-                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                .font(.vcTitle.monospacedDigit())
                 .foregroundStyle(Theme.secondary)
                 .frame(height: 20)
                 .padding(.bottom, 12)
             Text(item.prompt)
-                .font(.system(size: 34, weight: .semibold))
+                .font(.vcDisplay)
                 .multilineTextAlignment(.center)
+                .lineSpacing(5)
                 .padding(.horizontal, 32)
             Spacer().frame(height: 44)
             controls(session, item)
@@ -328,19 +327,19 @@ struct FullCloneView: View {
             if working.active {
                 ProgressView(value: working.value).frame(width: 260).frame(height: 22)
             } else if roomNoise {
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     Warning(text: "Background noise")
                     Button("Continue") { roomNoise = false; store.setSession(voiceID, FullClone.skip(session)) }
-                        .buttonStyle(.outline(height: 26))
+                        .buttonStyle(.vc(.secondary, .s))
                 }
-                .frame(height: 22)
+                .frame(height: 24)
             } else {
                 // Room check records silence on purpose, so level warnings would always fire.
                 WarningRow(issues: session.step == 0 ? [] : recorder.issues)
             }
             LevelMeter(levels: recorder.levels).frame(width: 600, height: 64).padding(.top, 18)
             Spacer(minLength: 28).frame(maxHeight: 64)
-            HStack(spacing: 32) {
+            HStack(spacing: 16) {
                 Button("Re-record previous") { rerecordPrevious() }
                     .disabled(session.previous.isEmpty || recorder.isRecording || working.active)
                 if session.step == 3 {
@@ -349,7 +348,7 @@ struct FullCloneView: View {
                 }
                 Button("Pause session") { _ = recorder.stop(); onExit() }
             }
-            .buttonStyle(.outline(height: 44))
+            .buttonStyle(.vc(.secondary, .l))
             Spacer(minLength: 20)
         }
         .frame(maxWidth: 880)
@@ -363,17 +362,17 @@ struct FullCloneView: View {
     @ViewBuilder private func controls(_ session: Session, _ item: FullClone.Item) -> some View {
         if session.step == 4 {
             Button { Task { await audition() } } label: {
-                HStack(spacing: 14) { Image(systemName: "play.fill"); Text("Audition") }.frame(minWidth: 260)
+                HStack(spacing: 16) { Image(systemName: "play.fill"); Text("Audition") }.frame(minWidth: 260)
             }
-            .buttonStyle(.primary(height: 76))
+            .buttonStyle(VCButtonStyle(kind: .primary, height: 76))
             .disabled(working.active)
         } else {
-            HStack(spacing: 26) {
+            HStack(spacing: 24) {
                 RecordButton(recording: recorder.isRecording, elapsed: recorder.elapsed) { toggleRecording(item) }
                     .disabled(working.active)
                 if session.step > 0 {
                     Button("Upload") { picking = true }
-                        .buttonStyle(.outline(height: 54))
+                        .buttonStyle(VCButtonStyle(kind: .secondary, height: 48))
                         .disabled(recorder.isRecording || working.active)
                 }
             }
@@ -457,6 +456,8 @@ struct FullCloneView: View {
     }
 }
 
+/// The full clone's five steps on a line: done ones checked, the current one filled, its name in the selection grey.
+/// Rounded squares (radius 6), not circles: circles are only for the Record dot.
 struct StepBar: View {
     let current: Int
     private let width: CGFloat = 150
@@ -466,29 +467,32 @@ struct StepBar: View {
             ForEach(Array(FullClone.steps.enumerated()), id: \.offset) { index, name in
                 VStack(spacing: 12) {
                     ZStack {
+                        let shape = RoundedRectangle(cornerRadius: Radius.row)
                         if index < current {
-                            Circle().fill(Theme.secondary)
-                            Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.onPrimary)
+                            shape.fill(Theme.secondary)
+                            Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.onPrimary)
                         } else if index == current {
-                            Circle().fill(Color(hex: 0xC9CBCE))
+                            shape.fill(Theme.text)
                         } else {
-                            Circle().strokeBorder(Theme.text.opacity(0.8), lineWidth: 1.5).background(Circle().fill(Theme.content))
+                            shape.fill(Theme.content).overlay(shape.strokeBorder(Theme.secondary, lineWidth: 1))
                         }
                     }
                     .frame(width: 24, height: 24)
                     Text(name)
-                        .font(.system(size: 15, weight: index == current ? .medium : .regular))
-                        .padding(.horizontal, 16)
-                        .frame(height: 30)
-                        .background(index == current ? Theme.selection : .clear, in: .capsule)
+                        .font(index == current ? .vcBodyBold : .vcBody)
+                        .foregroundStyle(index > current ? Theme.secondary : Theme.text)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background(index == current ? Theme.selection : .clear, in: .rect(cornerRadius: Radius.row))
                 }
                 .frame(width: width)
                 .accessibilityElement(children: .combine)
+                .accessibilityValue(index < current ? "Done" : index == current ? "Current step" : "")
                 .accessibilityAddTraits(index == current ? .isSelected : [])
             }
         }
         .background(alignment: .top) {
-            Rectangle().fill(Theme.text.opacity(0.35)).frame(height: 1)
+            Theme.strong.frame(height: 1)
                 .padding(.horizontal, width / 2)
                 .padding(.top, 12)
         }
