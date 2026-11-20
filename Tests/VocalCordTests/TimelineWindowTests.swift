@@ -60,7 +60,7 @@ private let folder = URL(filePath: ProcessInfo.processInfo.environment["WINDOW_S
 
 /// Settings of their own, so the tests leave the app's alone: the project open, the Inspector open, the Terminal shut.
 private func settings(project: String) throws -> (UserDefaults, String) {
-    let suite = "VocalCordTests-\(UUID().uuidString)"
+    let suite = testSuite("VocalCordTests.timeline")
     let store = try #require(UserDefaults(suiteName: suite))
     store.set(project, forKey: "project")
     store.set(Mode.timeline.rawValue, forKey: "mode")
@@ -89,7 +89,7 @@ struct TimelineWindowSnapshots {
         #expect(projects.newRenders(id)[third] != nil)
 
         let (store, suite) = try settings(project: id)
-        defer { store.removePersistentDomain(forName: suite) }
+        defer { dropDefaults(suite) }
         try await timelineWindow(EditView(selected: clips[1].id), projects: projects, voices: voices, preview: preview, store: store,
                                  size: NSSize(width: 1280, height: 800), name: "selected")
         try await timelineWindow(EditView(selected: clips[1].id), projects: projects, voices: voices, preview: preview, store: store,
@@ -109,7 +109,7 @@ struct TimelineWindowSnapshots {
         #expect(projects.linesNotOnTimeline(id).count == 2)
 
         let (store, suite) = try settings(project: id)
-        defer { store.removePersistentDomain(forName: suite) }
+        defer { dropDefaults(suite) }
         try await timelineWindow(EditView(), projects: projects, voices: voices, preview: preview, store: store,
                                  size: NSSize(width: 1200, height: 700), name: "empty", waitForAudio: false)
 

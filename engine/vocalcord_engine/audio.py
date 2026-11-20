@@ -86,7 +86,7 @@ STRAY_GAP_S, STRAY_BURST_S = 0.3, 0.15
 
 
 def trim_outer_silence(audio: np.ndarray, rate: int) -> np.ndarray:
-    """Ported from directed_voice.py, plus dropping a stray last sound."""
+    """From the first prototype, plus dropping a stray last sound."""
     audible = np.flatnonzero(np.abs(audio) > max(0.002, np.max(np.abs(audio)) * 0.005))
     if not len(audible):
         return audio

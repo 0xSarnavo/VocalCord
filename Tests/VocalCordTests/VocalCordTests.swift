@@ -13,6 +13,23 @@ func tempFolder() throws -> URL {
 /// Half-second bursts of a tone at `amplitude`, separated by noise at `floor`.
 /// Half-second bursts of tone with gaps. Silent edges leave a quarter second without tone at each end, like a recording
 /// that starts and stops in silence.
+private let suiteCounter = Mutex(0)
+
+/// A settings suite name for a test, numbered within the run and empty to start. macOS writes a suite's plist after it's
+/// removed, so every run reusing the same few numbered names keeps ~/Library/Preferences from filling with new ones.
+func testSuite(_ prefix: String) -> String {
+    let name = "\(prefix).\(suiteCounter.withLock { count in count += 1; return count })"
+    dropDefaults(name)
+    return name
+}
+
+/// Drops a test's settings suite, file and all: removing the domain alone leaves an empty plist in ~/Library/Preferences.
+func dropDefaults(_ name: String) {
+    UserDefaults.standard.removePersistentDomain(forName: name)
+    CFPreferencesAppSynchronize(name as CFString)
+    try? FileManager.default.removeItem(at: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Preferences/\(name).plist"))
+}
+
 func speechLike(seconds: Double, amplitude: Float, floor: Float, rate: Double = 24000, silentEdges: Bool = true) -> [Float] {
     (0..<Int(seconds * rate)).map { index in
         let time = Double(index) / rate

@@ -53,9 +53,9 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
 @MainActor private func capture(_ name: String, voices: VoiceStore, projects: ProjectStore, defaults: [String: Any],
                                 size: NSSize = NSSize(width: 1280, height: 800), prepare: () -> Void = {}) async throws {
     _ = NSApplication.shared
-    let suiteName = "VocalCordTests.GenerateWindow.\(UUID().uuidString)"
+    let suiteName = testSuite("VocalCordTests.GenerateWindow")
     let suite = try #require(UserDefaults(suiteName: suiteName))
-    defer { suite.removePersistentDomain(forName: suiteName) }
+    defer { dropDefaults(suiteName) }
     suite.set(Mode.generate.rawValue, forKey: "mode")
     suite.set(false, forKey: "terminalOpen")
     for (key, value) in defaults { suite.set(value, forKey: key) }

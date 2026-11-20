@@ -78,9 +78,9 @@ struct TimelineWordsSnapshots {
         await preview.load(try await projects.playbackTimeline(id, engine: voices.engine))
 
         // The zoom is read from its own defaults, so the test leaves the app's alone.
-        let suite = "VocalCordTests-\(UUID().uuidString)"
+        let suite = testSuite("VocalCordTests.timeline")
         let store = try #require(UserDefaults(suiteName: suite))
-        defer { store.removePersistentDomain(forName: suite) }
+        defer { dropDefaults(suite) }
         for (zoom, name) in [(90.0, "timeline-words-zoomed-in"), (60, "timeline-words-standard"), (24, "timeline-words-zoomed-out")] {
             store.set(zoom, forKey: "timelineZoom")
             let pane = EditorPane(project: project, selected: .constant(clips[1].id))

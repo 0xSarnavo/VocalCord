@@ -1,8 +1,8 @@
-"""Breeze TTS 2 rendering, ported from directed_voice.py.
+"""Breeze TTS 2 rendering, from the first prototype.
 
 A render is a list of lines. Each line has its own voice (reference audio and its
 exact transcript, optional breath recording and pronunciations), a tone, a pause
-after it, and an optional seed. Inline tags work as in directed_voice.py:
+after it, and an optional seed. Inline tags:
 `[pause 0.30]`, `[breath]`, and `[tone]` or `[free direction]` mid-line.
 """
 
@@ -65,7 +65,7 @@ def apply_pronunciations(text: str, pronunciations: dict[str, str] | None) -> st
 
 def parse_line(text: str, tone: str | None = None) -> list[tuple[str, object, str]]:
     """Split one line into ("speech", text, instruction), ("pause", seconds, "")
-    and ("breath", 0.0, "") items. Ported from directed_voice.parse_script."""
+    and ("breath", 0.0, "") items. From the first prototype."""
     items = []
     instruction = resolve_tone(tone)
     for part in re.split(r"(\[[^]]+\])", text.strip()):

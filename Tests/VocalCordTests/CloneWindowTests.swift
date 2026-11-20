@@ -44,7 +44,7 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
 
 /// A defaults suite of its own for one capture, removed afterwards.
 private final class IsolatedDefaults {
-    let name = "VocalCordTests.clone.\(UUID().uuidString)"
+    let name = testSuite("VocalCordTests.clone")
     let defaults: UserDefaults
 
     init(_ values: [String: Any]) {
@@ -52,7 +52,7 @@ private final class IsolatedDefaults {
         for (key, value) in values { defaults.set(value, forKey: key) }
     }
 
-    deinit { defaults.removePersistentDomain(forName: name) }
+    deinit { dropDefaults(name) }
 }
 
 /// The app's root view with its environments and the private settings.

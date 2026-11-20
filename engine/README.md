@@ -30,7 +30,7 @@ without them. No PyTorch.
 
 | Use | Model | Size | Licence | Why |
 |---|---|---|---|---|
-| Speech | Breeze TTS 2, MLX [8-bit](https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-8bit) / [4-bit](https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit) | 4.3 / 2.8 GB | Research, non-commercial | Existing renderer, ported from `directed_voice.py` |
+| Speech | Breeze TTS 2, MLX [8-bit](https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-8bit) / [4-bit](https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit) | 4.3 / 2.8 GB | Research, non-commercial | The renderer, from the first prototype |
 | Transcripts (`heard`, clips) | [mlx-community/whisper-large-v3-turbo-asr-8bit](https://huggingface.co/mlx-community/whisper-large-v3-turbo-asr-8bit) | 868 MB | MIT (OpenAI Whisper) | Best English accuracy among MLX Whisper builds under 1.2 GB; ships the alignment heads mlx-audio uses for word timestamps. Transcribed the sample reference word for word. |
 | `like_you` | WeSpeaker ResNet34-LM, [voxceleb_resnet34_LM.onnx](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | 26.5 MB | CC BY 4.0 (VoxCeleb) | Small ONNX speaker-verification model (the one pyannote uses). Features via [kaldi-native-fbank](https://github.com/csukuangfj/kaldi-native-fbank) (Apache 2.0), as WeSpeaker's own ONNX demo. |
 | `human` | UTMOS22 strong, [utmos22_strong.onnx](https://huggingface.co/TigreGotico/utmos-onnx) | 411 MB | MIT | MOS predictor trained on synthetic-speech ratings (VoiceMOS 2022). ONNX export of [tarepan/SpeechMOS](https://github.com/tarepan/SpeechMOS) from [sarulab-speech/UTMOS22](https://github.com/sarulab-speech/UTMOS22); the export reports a max deviation of 6e-6 from the PyTorch model. |
