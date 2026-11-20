@@ -106,12 +106,6 @@ extension Color {
     }
 }
 
-/// Red dot used on every Record button.
-struct RecordDot: View {
-    var size: CGFloat = 9
-    var body: some View { Circle().fill(.red).frame(width: size, height: size) }
-}
-
 /// Amber triangle and label, shown only when there is a problem.
 struct Warning: View {
     let text: String

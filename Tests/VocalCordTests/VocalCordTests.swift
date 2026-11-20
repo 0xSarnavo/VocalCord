@@ -43,40 +43,41 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
         let minutes = test.estimate(model: "4bit")
         #expect(minutes.lowerBound >= 1 && minutes.lowerBound < minutes.upperBound)
     }
-    #expect(Set(VoiceTest.range.lines.map(\.tone)) == Set(Tone.all))
+    #expect(Set(VoiceTest.range.lines.map(\.tone)) == Set(Tone.shown))
     #expect(VoiceTest.long.estimate(model: "8bit").lowerBound > VoiceTest.long.estimate(model: "4bit").lowerBound)
 }
 
-@MainActor @Test func voiceCheckRetriesEachLineAndReplacesTheLastCheck() async throws {
+@MainActor @Test func voiceCheckRendersEachLineOnceAndReplacesTheLastCheck() async throws {
     let counter = ScoreCounter()
     let engine = FakeEngine(delay: .zero, scores: { _, text in
         guard text != "Hello." else { return nil }
-        return Scores(likeYou: counter.next(text) == 1 ? 50 : 95, human: 3.6, words: 100, heard: text)   // first try fails
+        return Scores(likeYou: counter.next(text) == 1 ? 50 : 95, human: 3.6, words: 100, heard: text)   // a text's first render fails
     })
     let store = VoiceStore(root: try tempFolder(), engine: engine)
-    let id = store.createVoice(name: "Me", fullClone: false)
+    let id = store.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: wav)
     try store.addTake(id, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
 
     try await store.check(id, test: .range)
     var report = try #require(store.voice(id)?.lastCheck)
-    #expect(report.test == .range && report.passed == 10 && report.lines.allSatisfy { $0.tries == 2 })
-    #expect(report.lines.filter(\.version.direction).count == 7)   // only Neutral has a take
+    // Each line renders once, so each first render's flag stays: nothing renders again.
+    #expect(report.test == .range && report.lines.count == 10 && report.passed == 0)
+    #expect(report.lines.allSatisfy { $0.version.tone == "Neutral" && !$0.version.direction })   // tones are hidden
     let folder = store.folder(id).appending(path: "check")
-    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 10)   // only each line's best
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 10)
 
-    // The same line ten times: only its first render fails, and the new check replaces the last one's files.
+    // The same line ten times, its first render already done above, and the new check replaces the last one's files.
     try await store.check(id, test: .consistency)
     report = try #require(store.voice(id)?.lastCheck)
-    #expect(report.test == .consistency && report.passed == 10 && report.lines.map(\.tries) == [1] + Array(repeating: 1, count: 9))
+    #expect(report.test == .consistency && report.passed == 10)
     #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 10)
     #expect(report.lines.allSatisfy { FileManager.default.fileExists(atPath: store.checkURL($0.version, voiceID: id).path) })
 }
 
 @MainActor @Test func takesSavedBeforeTheCutOffCheckGetIt() async throws {
     let store = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let id = store.createVoice(name: "Me", fullClone: false)
+    let id = store.createVoice(name: "Me")
     for silentEdges in [true, false] {
         let wav = try tempFolder().appending(path: "take.wav")
         try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0.0003, silentEdges: silentEdges)[...], rate: 24000, to: wav)
@@ -117,28 +118,6 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     #expect(VoiceStore(root: root, engine: FakeEngine()).voices == store.voices)
 }
 
-/// Feeds a WAV through the microphone's write-and-measure path.
-@Test func recordingPathWritesWAVAndLevels() throws {
-    let folder = try tempFolder()
-    let source = folder.appending(path: "in.wav"), output = folder.appending(path: "out.wav")
-    try writeWAV(speechLike(seconds: 3, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: source)
-    let file = try AVAudioFile(forReading: source)
-    let blocks = Mutex<[BlockLevel]>([])
-    let capture = MicCapture()
-    try capture.open(writingTo: output, sampleRate: 24000) { block in blocks.withLock { $0.append(block) } }
-    while file.framePosition < file.length {
-        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096))
-        try file.read(into: buffer, frameCount: 4096)
-        capture.process(buffer)
-    }
-    capture.close()
-    #expect(abs(audioDuration(output) - 3) < 0.01)
-    var analyzer = LevelAnalyzer()
-    blocks.withLock { $0.forEach { analyzer.add($0) } }
-    #expect(abs(analyzer.seconds - 3) < 0.01)
-    #expect(analyzer.issues == [])
-}
-
 @Test func fakeEngineSplitsAtPauses() async throws {
     let folder = try tempFolder()
     let source = folder.appending(path: "long.wav")
@@ -150,28 +129,16 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     #expect(try await FakeEngine(delay: .zero).checkAudio(clips[0].url).issues == [])
 }
 
-@Test func fullCloneSessionSteps() {
-    var session = Session()
-    session = FullClone.next(session, previous: [])
-    #expect(session.step == 1 && session.index == 0)
-    session = FullClone.back(session)
-    #expect(session.step == 0)
-    session = FullClone.skip(Session(step: 3, index: 7))
-    #expect(session.step == 3 && session.index == 12)
-    session = FullClone.skip(Session(step: 3, index: 40))
-    #expect(session.step == 4)
-}
-
 @MainActor @Test func uploadKeepsOriginalAndAuditionPicksMains() async throws {
     let root = try tempFolder()
     let upload = try tempFolder().appending(path: "talk.wav")
     try writeWAV(speechLike(seconds: 25, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: upload)
     let store = VoiceStore(root: root, engine: FakeEngine(delay: .zero))
-    let voiceID = store.createVoice(name: " ", fullClone: true)
-    let ids = try await store.importMedia(upload, voiceID: voiceID, tone: "Happy") { _ in }
+    let voiceID = store.createVoice(name: " ")
+    let ids = try await store.importMedia(upload, voiceID: voiceID, tone: "Neutral") { _ in }
     let voice = try #require(store.voice(voiceID))
-    #expect(voice.name == "Untitled voice" && voice.session == Session())
-    #expect(ids.count >= 2 && voice.takes("Happy").count == ids.count)
+    #expect(voice.name == "Untitled voice")
+    #expect(ids.count >= 2 && voice.takes("Neutral").count == ids.count)
     #expect(try FileManager.default.contentsOfDirectory(atPath: store.rawFolder(voiceID).path).count == 1)
     #expect(FileManager.default.fileExists(atPath: upload.path))
 
@@ -179,10 +146,10 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     let auditioned = try #require(store.voice(voiceID))
     let scored = auditioned.takes.filter { $0.score != nil }
     #expect(scored.count == min(5, ids.count))
-    #expect(auditioned.mains["Happy"] == scored.max { $0.score! < $1.score! }?.id)
+    #expect(auditioned.mains["Neutral"] == scored.max { $0.score! < $1.score! }?.id)
 }
 
-@Test func fileClipsWithWarningsOrOddLengthsStartUnticked() {
+@Test func fileClipsWithWarningsOrOddLengthsArentKept() {
     let clip = { (seconds: Double) in Clip(url: URL(filePath: "/clip.wav"), duration: seconds, transcript: "Hi.") }
     #expect(FileClip(clip(8), issues: []).keep)
     #expect(!FileClip(clip(8), issues: [.noisy]).keep)
@@ -190,7 +157,7 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     #expect(!FileClip(clip(21), issues: []).keep)
 }
 
-@MainActor @Test func fromAFileKeepsSourcesAndClipsAndMakesTickedTakes() async throws {
+@MainActor @Test func fromAFileKeepsSourcesAndClipsAndMakesKeptTakes() async throws {
     let upload = try tempFolder().appending(path: "podcast.wav")
     try writeWAV(speechLike(seconds: 40, amplitude: 0.3, floor: 0.0003)[...], rate: 24000, to: upload)
     let store = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero, speakers: 2))
@@ -202,15 +169,15 @@ private func issues(_ samples: [Float]) -> [AudioIssue] {
     var chosen = try #require(groups.first { $0.count >= 2 })
     chosen[0].keep = false
     chosen[1].keep = true
-    chosen[1].tone = "Happy"
     let id = try store.createVoice(name: "Podcast", from: folder, clips: chosen)
     let voice = try #require(store.voice(id))
-    #expect(voice.takes.count == chosen.filter(\.keep).count && voice.takes("Happy").count == 1)
+    #expect(voice.takes.count == chosen.filter(\.keep).count && voice.takes("Neutral").count == voice.takes.count)
     let kept = store.rawFolder(id).appending(path: folder.lastPathComponent)
     #expect(FileManager.default.fileExists(atPath: kept.appending(path: "sources/1 podcast.wav").path))
     #expect(try FileManager.default.contentsOfDirectory(atPath: kept.appending(path: "clips-1").path).count == clips.count)
     #expect(!FileManager.default.fileExists(atPath: folder.path) && FileManager.default.fileExists(atPath: upload.path))
 
     try await store.audition(id) { _ in }
-    #expect(store.voice(id)?.mains["Happy"] == voice.takes("Happy").first?.id)
+    let auditioned = try #require(store.voice(id))
+    #expect(auditioned.mains["Neutral"] == auditioned.takes.filter { $0.score != nil }.max { $0.score! < $1.score! }?.id)
 }

@@ -56,7 +56,7 @@ final class FakeTypeSafe: Sendable {
 
 // MARK: Questions
 
-@Test func aRequestCarriesOnlyTheLineTextAndTone() throws {
+@Test(.enabled(if: Tone.enabled, "tones are hidden")) func aRequestCarriesOnlyTheLineTextAndTone() throws {
     let subject = JevSubject(text: "[breath] We  shipped it today. [pause 0.5]", tone: "Happy", original: "The team shipped the product today.")
     #expect(subject.text == "We shipped it today.")
     let data = try JSONSerialization.data(withJSONObject: JevQuestions.body(subject), options: .sortedKeys)
@@ -139,7 +139,15 @@ final class FakeTypeSafe: Sendable {
     #expect(!jev.added && keys.read() == nil && !Jev(keys: keys, send: typeSafe.send).added)
 }
 
-@MainActor @Test func checksAreCachedAndFailedCallsAreErrors() async throws {
+@Test func jevSkipsTheToneCheckWhileTonesAreHidden() throws {
+    guard !Tone.enabled else { return }
+    let rewrite = JevSubject(text: "We shipped it today.", tone: "Happy", original: "The team shipped the product today.")
+    #expect(JevQuestions.checks(rewrite) == [.spoken, .keepsMeaning])
+    let plain = JevQuestions.body(JevSubject(text: "Hi there.", tone: "Neutral"))
+    #expect((plain["questions"] as? [String: Any]).map { Set($0.keys) } == ["spoken"])
+}
+
+@MainActor @Test(.enabled(if: Tone.enabled, "its answers include the tone check")) func checksAreCachedAndFailedCallsAreErrors() async throws {
     let typeSafe = FakeTypeSafe([
         "We did it!": [FakeTypeSafe.answers(["spoken": 0.96, "fits_tone": 0.91])],
         "We lost everything.": [FakeTypeSafe.answers(["spoken": 0.93, "fits_tone": 0.08])],

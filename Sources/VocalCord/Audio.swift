@@ -37,7 +37,7 @@ struct BlockLevel: Sendable {
     var decibels: Float { 20 * log10(max(rms, 1e-6)) }
 }
 
-/// Live and file checks, with the engine's `check_audio` thresholds so both warn alike.
+/// File checks, with the engine's `check_audio` thresholds so both warn alike.
 struct LevelAnalyzer: Sendable {
     private(set) var seconds: Double = 0
     private var blocks: [Float] = []
@@ -133,115 +133,6 @@ nonisolated func wavSettings(_ rate: Double) -> [String: Any] {
 nonisolated func audioDuration(_ url: URL) -> Double {
     guard let file = try? AVAudioFile(forReading: url) else { return 0 }
     return Double(file.length) / file.processingFormat.sampleRate
-}
-
-/// Microphone capture to a mono WAV. Runs off the main actor because the tap fires on the audio thread.
-nonisolated final class MicCapture: @unchecked Sendable {
-    private let engine = AVAudioEngine()
-    private var file: AVAudioFile?
-    private var mono: AVAudioFormat?
-    private var onBlock: (@Sendable (BlockLevel) -> Void)?
-
-    func start(writingTo url: URL, onBlock: @escaping @Sendable (BlockLevel) -> Void) throws {
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw AppError("No microphone found.") }
-        try open(writingTo: url, sampleRate: format.sampleRate, onBlock: onBlock)
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [self] buffer, _ in process(buffer) }
-        do { try engine.start() } catch { stop(); throw error }
-    }
-
-    func open(writingTo url: URL, sampleRate: Double, onBlock: @escaping @Sendable (BlockLevel) -> Void) throws {
-        mono = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
-        file = try AVAudioFile(forWriting: url, settings: wavSettings(sampleRate), commonFormat: .pcmFormatFloat32, interleaved: false)
-        self.onBlock = onBlock
-    }
-
-    /// Writes the first channel and reports its level. Recording and tests share this path.
-    func process(_ buffer: AVAudioPCMBuffer) {
-        guard let channel = buffer.floatChannelData?[0], let mono, let file,
-              let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength) else { return }
-        let count = Int(buffer.frameLength)
-        out.frameLength = buffer.frameLength
-        out.floatChannelData![0].update(from: channel, count: count)
-        try? file.write(from: out)
-        onBlock?(BlockLevel(UnsafeBufferPointer(start: channel, count: count), sampleRate: mono.sampleRate))
-    }
-
-    func stop() {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        close()
-    }
-
-    func close() {
-        file?.close()
-        file = nil
-    }
-}
-
-struct Recording {
-    var url: URL
-    var duration: Double
-    var issues: [AudioIssue]
-}
-
-@MainActor @Observable
-final class Recorder {
-    static let meterBars = 48
-    private(set) var isRecording = false
-    private(set) var levels = [Float](repeating: 0, count: Recorder.meterBars)
-    private(set) var issues: [AudioIssue] = []
-    private(set) var elapsed: Double = 0
-    @ObservationIgnored private var analyzer = LevelAnalyzer()
-    @ObservationIgnored private var capture: MicCapture?
-    @ObservationIgnored private var url: URL?
-    @ObservationIgnored private var limit = Double.infinity
-    @ObservationIgnored private var onLimit: (() -> Void)?
-
-    func start(to url: URL, maxSeconds: Double, onLimit: @escaping () -> Void) async throws {
-        guard !isRecording else { return }
-        guard await AVCaptureDevice.requestAccess(for: .audio) else {
-            throw AppError("Allow microphone access in System Settings > Privacy & Security > Microphone.")
-        }
-        analyzer = LevelAnalyzer()
-        levels = [Float](repeating: 0, count: Self.meterBars)
-        issues = []
-        elapsed = 0
-        limit = maxSeconds
-        self.onLimit = onLimit
-        self.url = url
-        let capture = MicCapture()
-        try capture.start(writingTo: url) { block in Task { @MainActor [weak self] in self?.receive(block) } }
-        self.capture = capture
-        isRecording = true
-    }
-
-    private func receive(_ block: BlockLevel) {
-        guard isRecording else { return }
-        analyzer.add(block)
-        levels.removeFirst()
-        levels.append(min(1, max(0, (block.decibels + 60) / 50)))
-        elapsed = analyzer.seconds
-        let found = analyzer.issues
-        if found != issues { issues = found }
-        if elapsed >= limit, let onLimit {
-            self.onLimit = nil
-            onLimit()
-        }
-    }
-
-    func stop() -> Recording? {
-        guard let capture, let url else { return nil }
-        capture.stop()
-        self.capture = nil
-        self.url = nil
-        isRecording = false
-        levels = [Float](repeating: 0, count: Self.meterBars)
-        // Live warnings belong to this recording; the next item starts clean.
-        issues = []
-        return Recording(url: url, duration: audioDuration(url), issues: analyzer.issues)
-    }
 }
 
 /// Plays one file at a time, so starting anything stops the rest.

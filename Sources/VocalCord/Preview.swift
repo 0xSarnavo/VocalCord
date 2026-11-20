@@ -223,6 +223,7 @@ struct PreviewPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PanelHeader("Preview") {
+                if Video.enabled {
                 Menu {
                     Button("Choose video…") { choosing = true }
                     Button("Remove video") { projects.setVideo(nil, in: project.id) }.disabled(project.video == nil)
@@ -235,10 +236,11 @@ struct PreviewPane: View {
                 .fixedSize()
                 .help("Video")
                 .accessibilityLabel("Video")
-                FoldButton(label: "preview and outputs", action: onFold)
+                }
+                FoldButton(label: "preview and outputs", systemImage: "chevron.down", action: onFold)
             }
             VStack(spacing: 12) {
-                videoArea
+                if Video.enabled { videoArea }
                 Waveform().frame(height: 48)
                 transport
             }
@@ -257,7 +259,7 @@ struct PreviewPane: View {
                 playButton
                 PlayTime()
                 Spacer(minLength: 8)
-                if project.video != nil { offsetField }
+                if Video.enabled, project.video != nil { offsetField }
             }
             VStack(alignment: .trailing, spacing: 8) {
                 HStack(spacing: 12) {
@@ -265,7 +267,7 @@ struct PreviewPane: View {
                     PlayTime()
                     Spacer(minLength: 0)
                 }
-                if project.video != nil { offsetField }
+                if Video.enabled, project.video != nil { offsetField }
             }
         }
     }

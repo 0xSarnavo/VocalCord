@@ -122,7 +122,7 @@ final class ToolBridge {
 
     static let scriptTools: [[String: Any]] = [
         tool("get_voices", "Every voice with its takes per tone and its pronunciations. A tone with no takes still renders, from a written direction."),
-        tool("get_script", "The script of the project open in VocalCord: each line's number, text with any tags, voice, tone, pause after it in seconds, chosen version with scores and flags, and any pending change. A pending new line has no text until the user accepts it."),
+        tool("get_script", "The script of the project open in VocalCord: each line's number, text with any tags, voice, tone, pause after it in seconds, chosen version with scores and flags, any pending change, and how a line's render stands out from the other lines' (different_from_other_lines: pitch, pace or Like you). A pending new line has no text until the user accepts it."),
         tool("update_script", "Propose changes to lines. Nothing is applied: each changed line waits in the script for the user to accept or reject it. Fields left out keep their pending or current value. "
              + "Text can direct delivery with tags: [pause 0.5], [breath], [speed 80%]…[/speed], [stress]…[/stress] and [say Koo-ber]Kuber[/say]; "
              + "any other [label] is a tone direction. A line whose tags have problems isn't proposed: its problems come back in errors, to fix and send again.",
@@ -321,6 +321,8 @@ final class ToolBridge {
         var pendingNewLine: Bool?
         /// Script rule warnings for the pending text if any, else the line's own.
         var warnings: [String]?
+        /// How the chosen version stands out from the other lines' (`Consistency`): it may sound like another take.
+        var differentFromOtherLines: [String]?
     }
 
     private struct VersionInfo: Encodable {
@@ -530,11 +532,13 @@ final class ToolBridge {
     }
 
     private func script(_ project: Project) -> ScriptInfo {
-        ScriptInfo(project: project.name, tones: Tone.all, lines: project.lines.enumerated().map { index, line in
+        let different = Consistency.notes(project.lines)
+        return ScriptInfo(project: project.name, tones: Tone.shown, lines: project.lines.enumerated().map { index, line in
             LineInfo(line: index + 1, text: line.text, voice: voices.voice(line.voiceID)?.name ?? "None", tone: line.tone,
                      pause: line.pauseAfter, chosenVersion: line.chosenVersion.map { versionInfo($0, in: line) },
                      pendingChange: line.proposal, pendingNewLine: line.added,
-                     warnings: Optional(Script.warnings(line.proposal?.text ?? line.text)).flatMap { $0.isEmpty ? nil : $0 })
+                     warnings: Optional(Script.warnings(line.proposal?.text ?? line.text)).flatMap { $0.isEmpty ? nil : $0 },
+                     differentFromOtherLines: different[line.id])
         })
     }
 
@@ -961,7 +965,7 @@ final class ToolBridge {
     private func percent(_ score: Double?) -> Int? { score.map { Int(($0 * 100).rounded()) } }
 
     private func takes(_ voice: Voice) -> TakesInfo {
-        TakesInfo(voice: voice.name, tones: Tone.all, takes: voice.takes.enumerated().map { index, take in
+        TakesInfo(voice: voice.name, tones: Tone.shown, takes: voice.takes.enumerated().map { index, take in
             TakeInfo(take: index + 1, tone: take.tone, transcript: take.transcript, seconds: (take.duration * 100).rounded() / 100,
                      likeYou: percent(take.score), main: voice.mainTake(take.tone)?.id == take.id,
                      warnings: take.issues.map(\.label) + (take.duration < 3 ? ["Too short"] : take.duration > 20 ? ["Too long"] : []),
@@ -1035,7 +1039,7 @@ final class ToolBridge {
             throw AppError("The audition was cancelled.")
         }
         guard let updated = voices.voice(voice.id) else { throw AppError("\u{201C}\(voice.name)\u{201D} is gone.") }
-        let rows = Tone.all.compactMap { tone -> AuditionResult.Best? in
+        let rows = Tone.shown.compactMap { tone -> AuditionResult.Best? in
             guard let id = best[tone], let index = updated.takes.firstIndex(where: { $0.id == id }) else { return nil }
             return AuditionResult.Best(tone: tone, take: index + 1, likeYou: percent(updated.takes[index].score))
         }

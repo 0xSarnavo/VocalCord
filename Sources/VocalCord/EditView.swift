@@ -220,7 +220,9 @@ struct EditView: View {
     @AppStorage("project") private var selection = ""
     @AppStorage("mode") private var mode = Mode.timeline
     @AppStorage("terminalOpen") private var terminalOpen = false
-    @AppStorage("terminalHeight") private var terminalHeight = 300.0
+    @AppStorage("terminalWidth") private var terminalWidth = 380.0
+    /// Everything right of the sidebar, for the Terminal column's widest.
+    @State private var detailWidth = 1000.0
     @AppStorage("timelineSideOpen") private var sideOpen = true
     @State private var selected: String?
     @State private var exporting = false
@@ -243,9 +245,8 @@ struct EditView: View {
             Group {
                 if let project = projects.project(selection) {
                     let rendered = project.lines.contains { $0.chosenVersion != nil }
-                    // Edge to edge: the work pane, a hairline, the Inspector on the window's colour.
+                    // Edge to edge: the work pane, a hairline, the Inspector on the window's colour, then the Terminal.
                     HStack(spacing: 0) {
-                        GeometryReader { proxy in
                             VStack(spacing: 0) {
                                 Group {
                                     if project.edit != nil {
@@ -266,13 +267,7 @@ struct EditView: View {
                                 }
                                 .frame(maxHeight: .infinity)
                                 .panel()
-                                if terminalOpen {
-                                    // The track keeps room for its header, a question, the transport and the smallest clips.
-                                    // The panel draws its own resizable top edge.
-                                    TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - EditorPane.minimumHeight)
-                                }
                             }
-                        }
                         if project.edit != nil {
                             PaneDivider()
                             if sideOpen {
@@ -281,7 +276,12 @@ struct EditView: View {
                                 FoldedSidePanel(title: "Inspector") { sideOpen = true }
                             }
                         }
+                        if terminalOpen {
+                            // The track keeps room for its transport and a few clips beside the Inspector.
+                            TerminalPanel(width: $terminalWidth, maxWidth: detailWidth - 280 - 420)
+                        }
                     }
+                    .onGeometryChange(for: Double.self) { $0.size.width } action: { detailWidth = $0 }
                     .onChange(of: Opening(projectID: project.id, rendered: rendered), initial: true) { _, opening in
                         if opening.rendered { projects.startEdit(opening.projectID) }
                     }
@@ -1274,7 +1274,7 @@ private struct ClipSettings: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(number.map { "Line \($0)" } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text)
                     Spacer(minLength: 0)
-                    Text(([take, version?.tone].compactMap(\.self)).joined(separator: " \u{00B7} "))
+                    Text(([take, Tone.enabled ? version?.tone : nil].compactMap(\.self)).joined(separator: " \u{00B7} "))
                         .font(.vcCaption.monospacedDigit())
                         .foregroundStyle(Theme.secondary)
                         .lineLimit(1)

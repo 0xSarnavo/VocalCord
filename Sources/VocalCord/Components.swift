@@ -94,6 +94,8 @@ struct IconButtonStyle: ButtonStyle {
         let filled: Bool
         let selected: Bool
         @Environment(\.isEnabled) private var isEnabled
+        /// The button's own keyboard focus, drawn as a quiet outline where the system ring is turned off.
+        @Environment(\.isFocused) private var focused
         @State private var hovered = false
 
         var body: some View {
@@ -103,6 +105,7 @@ struct IconButtonStyle: ButtonStyle {
                 .foregroundStyle(filled || selected || hot ? Theme.text : Theme.secondary)
                 .frame(width: size.height, height: size.height)
                 .background(background(hot), in: .rect(cornerRadius: size.radius))
+                .overlay { if focused { RoundedRectangle(cornerRadius: size.radius).strokeBorder(Theme.stroke) } }
                 .opacity(isEnabled ? 1 : 0.4)
                 .contentShape(.rect(cornerRadius: size.radius))
                 .onHover { hovered = $0 }
@@ -365,13 +368,82 @@ extension PanelHeader where Title == Text {
 struct FoldButton: View {
     /// What is folded, for VoiceOver: "Hide pronunciations".
     let label: String
+    /// Towards the edge the pane folds to: right for a side column, down for a strip under the work.
+    var systemImage = "chevron.right"
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) { Image(systemName: "chevron.right") }
+        Button(action: action) { Image(systemName: systemImage) }
             .buttonStyle(.icon)
             .help("Hide (⌥⌘0)")
             .accessibilityLabel("Hide \(label)")
+    }
+}
+
+/// A pane's 1 pt divider that drags to resize it, lit under the pointer and while dragged. `edge` is the side of the pane
+/// it sits on: `.top` for a pane under the work, `.leading` for a column on its right. Dragging away from the pane grows it.
+struct ResizeDivider: View {
+    let edge: Edge
+    @Binding var size: Double
+    let range: ClosedRange<Double>
+    /// For VoiceOver: "Resize terminal".
+    let label: String
+    @State private var dragStart: Double?
+    @State private var hovered = false
+
+    var body: some View {
+        let column = edge == .leading
+        PaneDivider(axis: column ? .vertical : .horizontal, highlighted: hovered || dragStart != nil)
+            .overlay {
+                // 8 pt across, centred on the 1 pt line, so the edge is easy to grab.
+                Color.clear
+                    .frame(width: column ? 8 : nil, height: column ? nil : 8)
+                    .contentShape(.rect)
+                    .pointerStyle(.frameResize(position: column ? .leading : .top))
+                    .onHover { hovered = $0 }
+                    .gesture(DragGesture(coordinateSpace: .global)
+                        .onChanged { value in
+                            let start = dragStart ?? size
+                            dragStart = start
+                            size = (start - (column ? value.translation.width : value.translation.height)).clamped(range)
+                        }
+                        .onEnded { _ in dragStart = nil })
+                    .accessibilityElement()
+                    .accessibilityLabel(label)
+                    .accessibilityValue("\(Int(size)) points")
+                    .accessibilityAdjustableAction { direction in
+                        size = (size + (direction == .increment ? 40 : -40)).clamped(range)
+                    }
+            }
+            .zIndex(1)
+    }
+}
+
+/// A folded strip under the work: a slim full-width bar whose chevron opens it again.
+struct FoldedBottomPanel: View {
+    let title: String
+    let onOpen: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneDivider(axis: .horizontal)
+            Button(action: onOpen) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.up")
+                    Text(title)
+                }
+                .font(.vcCaption)
+                .foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 28)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .help("\(title) (⌥⌘0)")
+            .accessibilityLabel("Show \(title.lowercased())")
+        }
+        .background(Theme.base)
     }
 }
 

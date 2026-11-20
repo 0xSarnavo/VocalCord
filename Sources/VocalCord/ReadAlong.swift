@@ -12,10 +12,11 @@ struct LitWord: Equatable {
 }
 
 extension ProjectStore {
-    /// After the user edits a line (Return, leaving it, or a command): renders it or applies its marks as needed, then plays it.
-    /// A failed render already shows its error; a failed marks step shows one here.
+    /// After an edit (Return, leaving the text, or a command): brings the line up to date without the voice, as
+    /// `commitLine(render: false)` does, then plays it. A line that needs the voice waits for Render. A failed marks
+    /// step shows its error here.
     func commitAndPlay(_ lineID: String, in projectID: String, voices: VoiceStore, player: Player) {
-        guard let task = commitLine(lineID, in: projectID, voices: voices) else { return }
+        guard let task = commitLine(lineID, in: projectID, voices: voices, render: false) else { return }
         Task {
             do {
                 if let url = try await task.value { player.play(url, from: 0) }

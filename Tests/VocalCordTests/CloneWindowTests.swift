@@ -18,7 +18,7 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
 @MainActor private func cloneFixture(scored: Bool = true) throws -> (VoiceStore, String) {
     let root = try tempFolder()
     let voices = VoiceStore(root: root, engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Maya", fullClone: false)
+    let voiceID = voices.createVoice(name: "Maya")
     // The first is too long for two lines, to show the ellipsis.
     let takes = [("Neutral", "I record a few lines in my normal voice, the way I'd explain something to a friend over coffee on a slow "
                     + "Sunday morning, with nowhere to be and nothing to prove, and the kettle just starting to sing in the kitchen."),
@@ -57,8 +57,8 @@ private final class IsolatedDefaults {
 
 /// The app's root view with its environments and the private settings.
 @MainActor private func root(voices: VoiceStore, terminals: (ToolBridge) throws -> Terminals, setup: Setup? = nil,
-                             settings: IsolatedDefaults) throws -> some View {
-    let projects = ProjectStore(root: try tempFolder(), exportsRoot: try tempFolder())
+                             settings: IsolatedDefaults, projects given: ProjectStore? = nil) throws -> some View {
+    let projects = try given ?? ProjectStore(root: try tempFolder(), exportsRoot: try tempFolder())
     let player = Player()
     let jev = Jev(keys: MemoryKeys(nil))
     let tools = ToolBridge(projects: projects, voices: voices, jev: jev, projectID: { nil })
@@ -161,7 +161,7 @@ func snapshotsOfCloneStates() async throws {
     // The Terminal panel under the takes, its session ended; scores show the Like you column; pronunciations listed.
     let (voices, voiceID) = try cloneFixture()
     let terminalSettings = IsolatedDefaults(["mode": Mode.clone.rawValue, "voice": voiceID, "terminalOpen": true,
-                                             "terminalHeight": 260.0, "pronunciationsOpen": true])
+                                             "terminalWidth": 360.0, "pronunciationsOpen": true])
     var terminals: Terminals?
     let terminalRoot = try root(voices: voices, terminals: { tools in
         let made = try handed(tools)
@@ -172,6 +172,22 @@ func snapshotsOfCloneStates() async throws {
     session.feed(text: "\u{1B}[2mVocalCord's voiceover director\u{1B}[0m\r\n\r\n> Fix the transcript of the second Neutral take.\r\n")
     terminals?.processTerminated(source: session, exitCode: 0)
     try await capture(terminalRoot, size: NSSize(width: 1280, height: 800), name: "window-clone-terminal")
+
+    // Generate with the Terminal as a column on the right, Preview and Outputs under the script.
+    let film = ProjectStore(root: try tempFolder(), exportsRoot: try tempFolder())
+    let projectID = film.create(name: "Launch film")
+    film.addLines(["Meet the next chapter of your voice.", "Everything is ready."], to: projectID, voices: voices)
+    let generateSettings = IsolatedDefaults(["mode": Mode.generate.rawValue, "project": projectID, "terminalOpen": true,
+                                             "terminalWidth": 360.0])
+    var generateTerminals: Terminals?
+    let generateRoot = try root(voices: voices, terminals: { tools in
+        let made = try handed(tools)
+        generateTerminals = made
+        return made
+    }, settings: generateSettings, projects: film)
+    let generateSession = try #require(generateTerminals).session(.claude)
+    generateSession.feed(text: "\u{1B}[2mVocalCord's voiceover director\u{1B}[0m\r\n\r\n> Review the pace of my script.\r\n")
+    try await capture(generateRoot, size: NSSize(width: 1280, height: 800), name: "window-generate-terminal")
 
     // The voice page with Pronunciations folded, at the narrowest window.
     let foldedSettings = IsolatedDefaults(["mode": Mode.clone.rawValue, "voice": voiceID, "terminalOpen": false,
@@ -202,20 +218,14 @@ func snapshotsOfCloneStates() async throws {
             .preferredColorScheme(.dark)
             .foregroundStyle(Theme.text)
     }
-    voices.setSession(voiceID, Session(step: 3, index: 7))
-    try await capture(pane(FullCloneView(voiceID: voiceID) {}), size: NSSize(width: 759, height: 760), name: "clone-flow-full",
-                      toolbar: false)
-    try await capture(pane(FastCloneView(voiceID: voiceID) {}), size: NSSize(width: 759, height: 760), name: "clone-flow-fast",
-                      toolbar: false)
     try await capture(pane(FileCloneView(name: "Narrator") { _ in }), size: NSSize(width: 759, height: 760), name: "clone-flow-file",
                       toolbar: false)
+    try await capture(pane(FileCloneView(name: "Narrator", script: false) { _ in }), size: NSSize(width: 759, height: 760),
+                      name: "clone-flow-any-file", toolbar: false)
 
     // The sheets.
-    try await capture(pane(NewVoiceSheet { _, _ in }), size: NSSize(width: 580, height: 330), name: "sheet-new-voice", toolbar: false)
+    try await capture(pane(NewVoiceSheet { _ in }), size: NSSize(width: 520, height: 300), name: "sheet-new-voice", toolbar: false)
     let voice = try #require(voices.voice(voiceID))
     try await capture(pane(VoiceCheckSheet(voice: voice)), size: NSSize(width: 820, height: 400), name: "sheet-voice-check",
                       toolbar: false)
-    try await capture(pane(TakeCapture(voiceID: voiceID, tone: "Sad", prompt: Prompts.sentence(for: "Sad"), minSeconds: 1, maxSeconds: 30,
-                                       saveTitle: "Save take", large: false, onCancel: {}) { _ in }),
-                      size: NSSize(width: 680, height: 470), name: "sheet-record-take", toolbar: false)
 }

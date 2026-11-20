@@ -459,3 +459,26 @@ func highlightingTouchesAttributesOnly() {
     view.update(text: "New words")
     #expect(view.display.text == "New words" && view.string == "New words")
 }
+
+@MainActor @Test(.enabled(if: windowServer, "Needs a window server for text views."))
+func toolbarToolsReachTheLineBeingEdited() throws {
+    let (view, window) = host("Meet VocalCord today", style: .row, width: 400)
+    defer { window.close() }
+    var commands: [String] = []
+    view.onCommand = { commands.append($0) }
+
+    // Stress on the selected word, then a pause after the word at the caret, as the menu would.
+    view.setSelectedRange(NSRange(location: 5, length: 9))
+    view.applyScriptTool(ScriptToolRequest(.stress))
+    #expect(commands.last == "Meet [stress]VocalCord[/stress] today")
+    view.update(text: "Meet VocalCord today")
+    view.setSelectedRange(NSRange(location: 14, length: 0))
+    view.applyScriptTool(ScriptToolRequest(.pause(0.5)))
+    #expect(commands.last == "Meet VocalCord [pause 0.5] today")
+
+    // A command that can't apply says why instead.
+    view.update(text: "")
+    let request = ScriptToolRequest(.stress)
+    view.applyScriptTool(request)
+    #expect(request.problem == "Write a word first." && commands.count == 2)
+}

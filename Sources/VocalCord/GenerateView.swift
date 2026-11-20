@@ -8,10 +8,12 @@ struct GenerateView: View {
     @AppStorage("project") private var selection = ""
     @State private var exporting = false
     @AppStorage("terminalOpen") private var terminalOpen = false
-    @AppStorage("terminalHeight") private var terminalHeight = 300.0
-    /// Preview and Outputs; folding them gives the script the room. Preview keeps its state and playback while folded.
+    @AppStorage("terminalWidth") private var terminalWidth = 380.0
+    /// Preview and Outputs, in a strip under the script; folding them gives the script the room. Preview keeps its
+    /// state and playback while folded.
     @AppStorage("generateSideOpen") private var sideOpen = true
-    /// Everything right of the sidebar, for the side column's width.
+    @AppStorage("generatePreviewHeight") private var previewHeight = 180.0
+    /// Everything right of the sidebar, for the Terminal column's widest.
     @State private var width = 999.0
     /// The empty state's New project: the sidebar asks for the name, as its + does.
     @State private var creating = false
@@ -35,7 +37,6 @@ struct GenerateView: View {
         }
         .toolbar {
             WorkspaceToolbar {
-                renderSlot
                 exportButton
             }
         }
@@ -44,7 +45,8 @@ struct GenerateView: View {
         .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
     }
 
-    /// Edge to edge: the script, then Preview and Outputs, meeting at 1 pt dividers with no gaps and no frames.
+    /// Edge to edge: the script with Preview and Outputs in a strip under it, and the Terminal as a column on the right,
+    /// meeting at 1 pt dividers. The strip and the column resize from their dividers and fold away.
     private func workspace(_ project: Project) -> some View {
         let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
         return HStack(spacing: 0) {
@@ -53,17 +55,17 @@ struct GenerateView: View {
                     ScriptPane(project: project).id(project.id)
                         .frame(maxHeight: .infinity)
                         .panel()
-                    if terminalOpen {
-                        // Its top edge is its own resizable divider. The script keeps room for its header and a few lines.
-                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
-                    }
+                    // The script keeps room for its header and a few lines.
+                    previewStrip(project, maxHeight: proxy.size.height - 250)
                 }
             }
-            PaneDivider()
-            sideColumn(project)
+            if terminalOpen {
+                // The script table keeps the width every column needs.
+                TerminalPanel(width: $terminalWidth, maxWidth: width - ScriptColumn.minimumWidth(jev: false) - 16)
+            }
         }
         .task(id: timeline) { await preview.load(timeline) }
-        .onChange(of: project.video, initial: true) { preview.setVideo(project.video) }
+        .onChange(of: project.video, initial: true) { preview.setVideo(Video.enabled ? project.video : nil) }
         // Renders made before word timing get their words in the background, for the read-along and the pace notes; a
         // render blocks it, so it tries again once the render finishes.
         .onChange(of: project.id, initial: true) { projects.timeWordsIfNeeded(project.id, voices: voices) }
@@ -73,20 +75,28 @@ struct GenerateView: View {
         .focusedSceneValue(\.toggleSidePanel, toggleSide)
     }
 
-    @ViewBuilder private func sideColumn(_ project: Project) -> some View {
+    @ViewBuilder private func previewStrip(_ project: Project, maxHeight: Double) -> some View {
         if sideOpen {
+            let range = Self.previewMinHeight...max(Self.previewMinHeight, maxHeight)
             VStack(spacing: 0) {
-                // Laid out first, so the video gets the column's whole width and Outputs the height left.
-                PreviewPane(project: project) { sideOpen = false }
-                    .layoutPriority(1)
-                PaneDivider(axis: .horizontal)
-                OutputsPane(project: project).id(project.id)
+                ResizeDivider(edge: .top, size: $previewHeight, range: range, label: "Resize preview")
+                HStack(spacing: 0) {
+                    PreviewPane(project: project) { sideOpen = false }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    PaneDivider()
+                    OutputsPane(project: project).id(project.id)
+                        .frame(width: Self.outputsWidth)
+                }
             }
-            .frame(width: Self.sideWidth(detail: width))
+            .frame(height: previewHeight.clamped(range))
         } else {
-            FoldedSidePanel(title: "Preview") { sideOpen = true }
+            FoldedBottomPanel(title: "Preview") { sideOpen = true }
         }
     }
+
+    /// Preview's header, waveform and transport fit.
+    static let previewMinHeight = 152.0
+    static let outputsWidth = 280.0
 
     private func toggleSide() { sideOpen.toggle() }
 
@@ -94,62 +104,18 @@ struct GenerateView: View {
     private var renderAction: (() -> Void)? { canRender ? { render() } : nil }
     private var exportAction: (() -> Void)? { canExport ? { exporting = true } : nil }
 
-    /// The Preview and Outputs column for a detail `width` wide (everything right of the sidebar): 256 at the narrowest
-    /// window with the default sidebar, so the script table fits, growing to 320 in wide windows.
-    static func sideWidth(detail width: Double) -> Double { min(320, max(256, 256 + (width - 1000) * 0.15)) }
 
     // MARK: Toolbar
 
-    /// Lines with text and no render that reads it: what Render renders, or applies when only marks changed.
+    /// Lines with text and no render that reads it, shown on Render. Render itself reads the whole script.
     private var needed: Int { projects.project(selection)?.lines.count(where: \.needsRender) ?? 0 }
-    private var canRender: Bool { projects.progress == nil && voices.busy == nil && needed > 0 }
+    private var hasText: Bool {
+        projects.project(selection)?.lines.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+    }
+    private var canRender: Bool { projects.progress == nil && voices.busy == nil && hasText }
     private var canExport: Bool { projects.project(selection)?.lines.contains { $0.chosenVersion != nil } ?? false }
 
-    private func render() { projects.renderNeeded(selection, voices: voices) }
-
-    /// Render, or its progress while it runs, in one slot as wide as the widest of them, so nothing beside it moves.
-    private var renderSlot: some View {
-        ZStack(alignment: .trailing) {
-            // Sizes the slot: progress with the retry count is the widest state.
-            renderProgress(value: 0, attempt: Version.tries).hidden().accessibilityHidden(true).allowsHitTesting(false)
-            if let progress = projects.progress {
-                renderProgress(value: progress, attempt: projects.renderTry)
-            } else {
-                let count = needed
-                Button(action: render) {
-                    HStack(spacing: 6) {
-                        Text("Render")
-                        if count > 0 { Text("\(count)").foregroundStyle(Theme.secondary).monospacedDigit() }
-                    }
-                }
-                .buttonStyle(.vc(.secondary, .m))
-                .disabled(!canRender)
-                .help(voices.busy != nil ? "A voice check or audition is running"
-                      : count == 0 ? "Every line is up to date" : "Render the lines that need it (⌘R)")
-                .accessibilityLabel(count == 0 ? "Render" : "Render \(count) \(count == 1 ? "line" : "lines")")
-            }
-        }
-    }
-
-    private func renderProgress(value: Double, attempt: Int?) -> some View {
-        HStack(spacing: 8) {
-            ProgressView(value: value)
-                .progressViewStyle(.linear)
-                .frame(width: 72)
-                .accessibilityLabel("Rendering")
-            // Lines that failed a check render again, keeping the best of up to five.
-            if let attempt, attempt > 1 {
-                Text("Try \(attempt) of \(Version.tries)").font(.vcCaption).foregroundStyle(Theme.secondary).monospacedDigit()
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-            Button { projects.cancel() } label: { Image(systemName: "xmark") }
-                .buttonStyle(.icon(.s))
-                .help("Cancel render")
-                .accessibilityLabel("Cancel render")
-        }
-        .frame(height: VCSize.m.height)
-    }
+    private func render() { projects.renderScript(selection, voices: voices) }
 
     /// The screen's one off-white action.
     private var exportButton: some View {
@@ -180,7 +146,9 @@ struct ProjectsSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader("Projects") {
+                // The window's first control, so it takes keyboard focus at launch: a quiet outline, not the bright ring.
                 Button(action: askForNew) { Image(systemName: "plus") }
+                    .focusEffectDisabled()
                     .buttonStyle(.icon(.s))
                     .help("New project (⌘N)")
                     .accessibilityLabel("New project")
@@ -246,7 +214,8 @@ enum ScriptColumn {
     static let number: CGFloat = 24
     static let text: CGFloat = 136
     static let voice: CGFloat = 100
-    static let tone: CGFloat = 88
+    /// None while tones are hidden (`Tone.enabled`).
+    static var tone: CGFloat { Tone.enabled ? 88 : 0 }
     static let pause: CGFloat = 44
     static let like: CGFloat = 60
     static let human: CGFloat = 48
@@ -263,7 +232,8 @@ enum ScriptColumn {
     /// Between the end of the text and the Voice column.
     static let textGap: CGFloat = 8
 
-    /// The narrowest pane that shows every column: 692 pt, or 724 with Jev's, inside the 742 a 1200 pt window leaves.
+    /// The narrowest pane that shows every column: 692 pt, or 724 with Jev's, inside the 742 a 1200 pt window leaves;
+    /// 88 less while tones are hidden.
     static func minimumWidth(jev: Bool) -> CGFloat {
         let fixed = number + voice + tone + pause + like + human + words + (jev ? self.jev : 0) + version + gutter
         return edge * 2 + fixed + text
@@ -341,12 +311,14 @@ struct ScriptPane: View {
                 // Ahead of the header's spacer, so the actions get the room they need and fold only when it runs out.
                 .layoutPriority(1)
             }
+            ScriptToolbar()
             if mode == .read {
                 ReadView(project: project)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 table
             }
+            bottomBar
         }
         .sheet(isPresented: Binding(present: $splitText)) {
             SplitSheet(text: splitText ?? "") { lines in projects.addLines(lines, to: project.id, voices: voices) }
@@ -404,7 +376,6 @@ struct ScriptPane: View {
                             .equatable()
                         Theme.rule.frame(height: 1)
                     }
-                    footer
                 } header: {
                     // Leading, so the rule under a header wider than the pane starts at its edge.
                     VStack(alignment: .leading, spacing: 0) {
@@ -442,9 +413,11 @@ struct ScriptPane: View {
                 .help("The pace the pace notes aim for")
                 .accessibilityLabel("Pace target")
                 .accessibilityValue(paceValue)
-                Button("Compare styles…") { comparing = renderable.map(\.id) }
-                    .buttonStyle(.vc(.secondary, .s))
-                    .disabled(!canCompare)
+                if Tone.enabled {
+                    Button("Compare styles…") { comparing = renderable.map(\.id) }
+                        .buttonStyle(.vc(.secondary, .s))
+                        .disabled(!canCompare)
+                }
                 if jev.added {
                     Button(jev.isChecking ? "Checking…" : "Check script", action: checkScript)
                         .buttonStyle(.vc(.secondary, .s))
@@ -452,7 +425,9 @@ struct ScriptPane: View {
                 }
             } else {
                 Menu {
-                    Button("Compare styles…") { comparing = renderable.map(\.id) }.disabled(!canCompare)
+                    if Tone.enabled {
+                        Button("Compare styles…") { comparing = renderable.map(\.id) }.disabled(!canCompare)
+                    }
                     if jev.added {
                         Button(jev.isChecking ? "Checking…" : "Check script", action: checkScript).disabled(!canCheck)
                     }
@@ -528,7 +503,7 @@ struct ScriptPane: View {
             Text("#").padding(.leading, Column.leading).frame(width: Column.number, alignment: .leading)
             Text("Text").padding(.trailing, Column.textGap).frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
             Text("Voice").padding(.leading, Column.leading).frame(width: Column.voice, alignment: .leading)
-            Text("Tone").padding(.leading, Column.leading).frame(width: Column.tone, alignment: .leading)
+            if Tone.enabled { Text("Tone").padding(.leading, Column.leading).frame(width: Column.tone, alignment: .leading) }
             Text("Pause").padding(.trailing, Column.trailing).frame(width: Column.pause, alignment: .trailing)
                 .help("Silence after the line, in seconds")
             Text("Like you").padding(.trailing, Column.trailing).frame(width: Column.like, alignment: .trailing)
@@ -548,17 +523,75 @@ struct ScriptPane: View {
         .frame(height: 28)
     }
 
-    /// Ghost buttons, their labels on the pane's 16 pt text edge.
-    private var footer: some View {
+    /// One bar pinned under the script, in Table and Read alike: adding lines on the left (ghost buttons, their labels on
+    /// the pane's 16 pt text edge), the script's length against one take and Render on the right.
+    private var bottomBar: some View {
         HStack(spacing: 8) {
             Button { projects.addLines([""], to: project.id, voices: voices) } label: { Label("Add line", systemImage: "plus") }
             Button("Paste…") { splitText = NSPasteboard.general.string(forType: .string) ?? "" }
             Button("Import…") { importing = true }
+            Spacer(minLength: 8)
+            if !renderable.isEmpty { lengthMeter }
+            renderButton
         }
         .buttonStyle(.vc(.ghost, .s))
-        .padding(.horizontal, Column.edge - VCSize.s.padding)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, Column.edge - VCSize.s.padding)
+        .padding(.trailing, 12)
+        .frame(height: 44)
+        .overlay(alignment: .top) { Theme.line.frame(height: 1) }
+    }
+
+    /// Render (⌘R also works from the menu bar), or its progress and Cancel while it runs. The count says how many lines
+    /// changed since their render; Render reads the whole script as one take either way.
+    @ViewBuilder private var renderButton: some View {
+        if let progress = projects.progress {
+            HStack(spacing: 8) {
+                ProgressView(value: progress).progressViewStyle(.linear).frame(width: 96).accessibilityLabel("Rendering")
+                Button { projects.cancel() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.icon(.s))
+                    .help("Cancel render")
+                    .accessibilityLabel("Cancel render")
+            }
+            .frame(height: VCSize.s.height)
+        } else {
+            let changed = project.lines.count(where: \.needsRender)
+            Button {
+                projects.renderScript(project.id, voices: voices)
+            } label: {
+                HStack(spacing: 6) {
+                    Text(changed == 0 && !renderable.isEmpty ? "Render again" : "Render")
+                    if changed > 0 { Text("\(changed)").opacity(0.6).monospacedDigit() }
+                }
+            }
+            .buttonStyle(.vc(.primary, .s))
+            .disabled(renderable.isEmpty || voices.busy != nil)
+            .help(voices.busy != nil ? "A voice check or audition is running"
+                  : "Render the whole script as one take, so every line sounds like one recording (⌘R)")
+            .accessibilityLabel(changed == 0 ? "Render the script again" : "Render the script, \(changed) \(changed == 1 ? "line" : "lines") changed")
+        }
+    }
+
+    /// Past one take the voice reads the script in parts, which can sound less alike: the bar turns amber and says how
+    /// much to cut.
+    private var lengthMeter: some View {
+        let length = OneTake.length(project.lines), over = length.share > 1
+        let limit = Int(OneTake.seconds)
+        let explanation = over ? "About \(length.seconds) seconds: more than one take. Cut about \(length.seconds - limit) seconds to keep one consistent voice."
+            : "About \(length.seconds) of \(limit) seconds: the script is read as one take."
+        return HStack(spacing: 8) {
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Theme.fill)
+                Rectangle().fill(over ? Theme.amber : Theme.secondary).frame(width: 64 * min(1, length.share))
+            }
+            .frame(width: 64, height: 4)
+            Text(over ? "\(length.seconds) of \(limit) s \u{00B7} cut \(length.seconds - limit) s" : "\(length.seconds) of \(limit) s")
+                .font(.vcCaption.monospacedDigit())
+                .foregroundStyle(over ? Theme.amber : Theme.secondary)
+        }
+        .padding(.trailing, 4)
+        .help(explanation)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(explanation)
     }
 }
 
@@ -620,24 +653,27 @@ struct LineRow: View {
         let decision: CGFloat = line.proposal == nil ? 0 : 22
         let isApplying = projects.applying.contains(line.id)
         let playing = preview.currentLine == line.id
-        HStack(spacing: 0) {
+        // Top-aligned: in a tall line the number and values sit level with the text's first line, each in a band one
+        // control tall, and the text's 16 pt first line is centred in that band.
+        HStack(alignment: .top, spacing: 0) {
             Text("\(number)")
                 .font(.vcCaption.monospacedDigit())
                 .foregroundStyle(Theme.secondary)
                 .padding(.leading, Column.leading)
-                .frame(width: Column.number, alignment: .leading)
+                .frame(width: Column.number, height: VCSize.s.height, alignment: .leading)
             // The script rules the line breaks show under its text, for the pending change while there is one.
             VStack(alignment: .leading, spacing: 4) {
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
                 } else {
-                    // Return or leaving the text renders or applies the edit and plays it; a command applies at once.
+                    // Return, leaving the text or a command applies changed pauses and speeds and plays the line. New
+                    // words wait for Render: nothing renders until the user clicks it.
                     ScriptTextView(text: line.text, style: .row, lit: lit,
                                    onChange: { projects.setText($0, line: line.id, in: projectID) },
-                                   onCommit: commit,
+                                   onCommit: applyEdit,
                                    onCommand: { text in
                                        projects.setText(text, line: line.id, in: projectID)
-                                       commit()
+                                       applyEdit()
                                    })
                 }
                 ForEach(Script.warnings(line.proposal?.text ?? line.text), id: \.self) { Warning(text: $0) }
@@ -646,10 +682,12 @@ struct LineRow: View {
                     PaceNoteView(note: note, help: pace.verdict, busy: isApplying, onFix: fixPace)
                 }
             }
+            .padding(.top, (VCSize.s.height - 16) / 2)
             .padding(.trailing, Column.textGap)
             .frame(minWidth: Column.text, maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 0) {
             voiceMenu.frame(width: Column.voice)
-            toneMenu.frame(width: Column.tone)
+            if Tone.enabled { toneMenu.frame(width: Column.tone) }
             pauseField.frame(width: Column.pause)
             ScoreCell(value: scores.map { "\($0.likeYou)%" }, flag: joined(version?.likeYouFlag, version?.pitchFlag), dim: version?.likeYouJudged == false,
                       help: version?.likeYouJudged == false ? "Too short to judge" : nil).frame(width: Column.like)
@@ -669,6 +707,8 @@ struct LineRow: View {
                 }
             }
             .frame(width: Column.gutter + decision, alignment: .trailing)
+            }
+            .frame(height: VCSize.s.height)
         }
         .font(.vcBody.monospacedDigit())
         .padding(.horizontal, Column.edge)
@@ -693,12 +733,12 @@ struct LineRow: View {
         }
         .simultaneousGesture(TapGesture().onEnded { preview.seek(toLine: line.id) })
         .contextMenu {
-            Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
-            Divider()
+            if Tone.enabled {
+                Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
+                Divider()
+            }
             Button("Move up") { projects.moveLine(line.id, by: -1, in: projectID) }.disabled(number == 1)
             Button("Move down") { projects.moveLine(line.id, by: 1, in: projectID) }.disabled(isLast)
-            Divider()
-            renderAgainItem
             Divider()
             Button("Delete line…", role: .destructive) { confirmingDelete = true }
         }
@@ -794,8 +834,6 @@ struct LineRow: View {
                             if player.playing != url { player.toggle(url) }
                         }
                     }
-                    Divider()
-                    renderAgainItem
                 } label: {
                     // Tertiary at rest like the other pop-ups' chevrons, but never on the selection grey.
                     Image(systemName: "chevron.up.chevron.down")
@@ -821,11 +859,12 @@ struct LineRow: View {
     }
 
     private func versionTitle(_ version: Version, _ index: Int) -> String {
-        (["v\(index + 1)", version.tone] + (version.direction ? ["direction"] : [])).joined(separator: " · ")
+        (["v\(index + 1)"] + (Tone.enabled ? [version.tone] : []) + (version.direction ? ["direction"] : [])).joined(separator: " · ")
     }
 
     /// What the gutter shows: a spinner while the line renders (or applies for a while), a clock while it waits for
-    /// the render ahead of it, else the button that brings it up to date.
+    /// the render ahead of it, the Apply button when only its marks changed, else nothing: voices render from the
+    /// toolbar's Render, the whole script at once.
     enum Status: Equatable {
         case rendering, waiting, applying
         /// Only marks changed: applying them needs no render.
@@ -833,15 +872,15 @@ struct LineRow: View {
         case render
     }
 
-    static func status(_ line: Line, renderingLine: String?, queued: [String], applying: Set<String>) -> Status {
-        if renderingLine == line.id { return .rendering }
+    static func status(_ line: Line, rendering: Set<String>, queued: [String], applying: Set<String>) -> Status {
+        if rendering.contains(line.id) { return .rendering }
         if queued.contains(line.id) { return .waiting }
         if applying.contains(line.id) { return .applying }
         return line.needsRender && !line.needsVoice ? .apply : .render
     }
 
     @ViewBuilder private var statusCell: some View {
-        let status = Self.status(line, renderingLine: projects.renderingLine, queued: projects.queued, applying: projects.applying)
+        let status = Self.status(line, rendering: projects.rendering, queued: projects.queued, applying: projects.applying)
         switch status {
         case .rendering:
             ProgressView().controlSize(.small).frame(width: VCSize.s.height, height: VCSize.s.height)
@@ -855,49 +894,32 @@ struct LineRow: View {
                 .accessibilityLabel("Line \(number) waiting to render")
         case .applying where slowApply:
             ProgressView().controlSize(.small).frame(width: VCSize.s.height, height: VCSize.s.height)
-        case .applying, .apply, .render:
+        case .applying, .apply:
             // Kept as is while marks apply, so the usual quick apply doesn't flash a new state.
-            rerenderButton(apply: status != .render)
+            applyButton
+        case .render:
+            Color.clear.frame(width: VCSize.s.height, height: VCSize.s.height)
         }
     }
 
-    /// Render again, in the row's and the version's menus: the gutter's button waits for the pointer, so this is how
-    /// the keyboard and VoiceOver find it.
-    private var renderAgainItem: some View {
-        Button("Render again") { projects.rerender(line.id, in: projectID, voices: voices) }
-            .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || projects.progress != nil || voices.busy != nil)
-    }
-
-    /// Bright and always there while the line needs a render or its marks applied; otherwise rendering again is a
-    /// choice, so it waits for the pointer to come over the row.
-    private func rerenderButton(apply: Bool) -> some View {
-        let needed = line.needsRender
-        return Button {
-            if apply {
-                guard !projects.applying.contains(line.id) else { return }
-                commit()
-            } else {
-                projects.rerender(line.id, in: projectID, voices: voices)
-            }
+    /// Applies changed pauses and speeds without the voice; edits usually do this on Return already.
+    private var applyButton: some View {
+        Button {
+            guard !projects.applying.contains(line.id) else { return }
+            applyEdit()
         } label: {
-            if needed {
-                Image(systemName: "arrow.clockwise").foregroundStyle(Theme.text)
-            } else {
-                Image(systemName: "arrow.clockwise")
-            }
+            Image(systemName: "arrow.clockwise").foregroundStyle(Theme.text)
         }
         .buttonStyle(.icon(.s))
-        .opacity(needed || hovered ? 1 : 0)
-        // Applying marks doesn't use the voice model, so it can run beside a render.
-        .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty || !apply && (projects.progress != nil || voices.busy != nil))
-        .help(apply ? "Apply the changed pauses and speeds, without a new render" : "Render again, until a version passes")
-        .accessibilityLabel(apply ? "Apply changes to line \(number)" : "Render line \(number) again")
+        .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty)
+        .help("Apply the changed pauses and speeds, without a new render")
+        .accessibilityLabel("Apply changes to line \(number)")
     }
 
     // MARK: Editing and pace
 
-    /// Renders the line or applies its marks as needed, then plays it.
-    private func commit() {
+    /// After an edit: applies changed pauses and speeds and plays the line. New words wait for the user to click Render.
+    private func applyEdit() {
         projects.commitAndPlay(line.id, in: projectID, voices: voices, player: player)
     }
 
@@ -913,7 +935,7 @@ struct LineRow: View {
         return (PaceNote.notes(report, tokens: parsed.tokens), report.verdict)
     }
 
-    /// Slows or speeds a stretch at once, then plays the line. A line that needs the voice first is rendered, then played.
+    /// Slows or speeds a stretch at once, then plays the line. A line that needs the voice first waits for Render.
     private func fixPace(_ range: ClosedRange<Int>) {
         let lineID = line.id
         Task {
@@ -1287,5 +1309,65 @@ struct CompareSheet: View {
     /// Every line's voice has a take in this tone.
     private func recorded(_ tone: String) -> Bool {
         lines.allSatisfy { !(voices.voice($0.voiceID)?.takes(tone).isEmpty ?? true) }
+    }
+}
+
+/// Tools for the selected words in a line, the same as its right-click menu, sent to the line being edited through the
+/// responder chain (`ScriptTextNSView.applyScriptTool`). No mood tools: a mood direction starts a fresh take, which
+/// breaks the one consistent voice. The buttons never take focus, so the line keeps its selection.
+struct ScriptToolbar: View {
+    @State private var problem: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Menu {
+                ForEach([0.25, 0.5, 1, 2], id: \.self) { seconds in
+                    Button("\(ScriptDisplay.format(seconds)) s") { send(.pause(seconds)) }
+                }
+            } label: { Label("Pause", systemImage: "pause.fill") }
+            .help("A pause after the selected word")
+            Button { send(.stress) } label: { Label("Stress", systemImage: "arrow.up") }
+                .help("Say the selected words with more weight")
+            Menu {
+                ForEach([0.9, 0.8, 0.7], id: \.self) { rate in Button("\(ScriptDisplay.percent(rate))%") { send(.speed(rate)) } }
+            } label: { Label("Slower", systemImage: "tortoise.fill") }
+            .help("Slow the selected words down")
+            Menu {
+                ForEach([1.1, 1.2, 1.3], id: \.self) { rate in Button("\(ScriptDisplay.percent(rate))%") { send(.speed(rate)) } }
+            } label: { Label("Faster", systemImage: "hare.fill") }
+            .help("Speed the selected words up")
+            Button { send(.breath) } label: { Label("Breath", systemImage: "wind") }
+                .help("A short breath after the selected word")
+            Button { send(nil) } label: { Label("Say it like\u{2026}", systemImage: "character.bubble") }
+                .help("Spell a word the way it should sound")
+            Spacer(minLength: 8)
+            // Only when it fits whole; a problem always shows.
+            ViewThatFits(in: .horizontal) {
+                Text(problem ?? "Select words, then pick a tool")
+                Text(problem ?? "")
+            }
+            .font(.vcCaption)
+            .foregroundStyle(problem == nil ? Theme.tertiary : Theme.amber)
+            .lineLimit(1)
+        }
+        .buttonStyle(.vc(.ghost, .s))
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
+        .focusable(false)
+        .labelStyle(.titleAndIcon)
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+        .task(id: problem) {
+            guard problem != nil else { return }
+            try? await Task.sleep(for: .seconds(4))
+            problem = nil
+        }
+    }
+
+    private func send(_ command: ScriptCommand?) {
+        let request = ScriptToolRequest(command)
+        let handled = NSApp.sendAction(#selector(ScriptTextNSView.applyScriptTool(_:)), to: nil, from: request)
+        problem = handled ? request.problem : "Click into a line and select words first"
     }
 }

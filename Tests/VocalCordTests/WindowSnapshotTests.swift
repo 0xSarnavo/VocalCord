@@ -13,7 +13,7 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
 /// A voice with takes in three tones, and a project of rendered lines, saved as the app saves them.
 @MainActor private func windowFixture() throws -> (VoiceStore, ProjectStore) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Maya", fullClone: false)
+    let voiceID = voices.createVoice(name: "Maya")
     let takes = [("Neutral", "I record a few lines in my normal voice, the way I'd explain something to a friend."),
                  ("Neutral", "This is my second take, a little slower, so the model hears how I pause."),
                  ("Happy", "Honestly, this is the part I was most excited to show you."),

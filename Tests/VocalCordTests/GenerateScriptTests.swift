@@ -91,16 +91,16 @@ private func tokens(_ text: String) -> [ParsedLine.Token] { Marks.parse(text).to
     var line = Line(text: plain, voiceID: "me")
     line.versions = [version("v", text: plain, words: [WordTime(start: 0, end: 0.5), WordTime(start: 0.6, end: 1), WordTime(start: 1.1, end: 1.5)])]
     line.chosen = "v"
-    #expect(LineRow.status(line, renderingLine: nil, queued: [], applying: []) == .render)
-    #expect(LineRow.status(line, renderingLine: line.id, queued: [], applying: []) == .rendering)
-    #expect(LineRow.status(line, renderingLine: "other", queued: ["x", line.id], applying: []) == .waiting)
-    #expect(LineRow.status(line, renderingLine: nil, queued: [], applying: [line.id]) == .applying)
+    #expect(LineRow.status(line, rendering: [], queued: [], applying: []) == .render)
+    #expect(LineRow.status(line, rendering: [line.id], queued: [], applying: []) == .rendering)
+    #expect(LineRow.status(line, rendering: ["other"], queued: ["x", line.id], applying: []) == .waiting)
+    #expect(LineRow.status(line, rendering: [], queued: [], applying: [line.id]) == .applying)
     // A pause added: only marks to apply. New words: the voice.
     line.text = "One [pause 0.3] two three."
     #expect(line.needsRender && !line.needsVoice)
-    #expect(LineRow.status(line, renderingLine: nil, queued: [], applying: []) == .apply)
+    #expect(LineRow.status(line, rendering: [], queued: [], applying: []) == .apply)
     line.text = "One two three four."
-    #expect(LineRow.status(line, renderingLine: nil, queued: [], applying: []) == .render)
+    #expect(LineRow.status(line, rendering: [], queued: [], applying: []) == .render)
 }
 
 @MainActor @Test func rowMarksSayWhatNeedsAttention() {
@@ -126,19 +126,17 @@ private func tokens(_ text: String) -> [ParsedLine.Token] { Marks.parse(text).to
     #expect(LineRow.mark(Line(text: "  ", voiceID: "me")) == .current)
 }
 
-/// The narrowest window (1200 pt) with the default sidebar (200) leaves the script 742 pt beside a 256 pt side column,
-/// and every column fits in it, Jev's too, with room for a scroll bar that takes space.
+/// The narrowest window (1200 pt) with the default sidebar (200) gives the script the whole width, Preview and Outputs
+/// being under it; with the Terminal column open at its narrowest, every column still fits, Jev's too, with room for a
+/// scroll bar that takes space.
 @Test func theScriptTableFitsTheNarrowestWindow() {
     let detail = 1200.0 - 200 - 1
-    let side = GenerateView.sideWidth(detail: detail)
-    #expect(side == 256)
-    let script = detail - 1 - side
-    #expect(script == 742)
-    #expect(ScriptColumn.minimumWidth(jev: false) == 692 && ScriptColumn.minimumWidth(jev: true) == 724)
-    #expect(ScriptColumn.minimumWidth(jev: true) + 16 <= script)
-    // Wider windows give the preview more, up to 320.
-    #expect(GenerateView.sideWidth(detail: 1079) > 256 && GenerateView.sideWidth(detail: 1079) < 270)
-    #expect(GenerateView.sideWidth(detail: 3000) == 320 && GenerateView.sideWidth(detail: 600) == 256)
+    let script = detail - 1 - TerminalPanel.minWidth
+    #expect(script == 698)
+    // The tone column's 88 pt only while tones show.
+    let tone = Tone.enabled ? 0.0 : 88
+    #expect(ScriptColumn.minimumWidth(jev: false) == 692 - tone && ScriptColumn.minimumWidth(jev: true) == 724 - tone)
+    #expect(ScriptColumn.minimumWidth(jev: true) + 16 <= script || Tone.enabled)
 }
 
 @MainActor @Test func rowsCompareWithoutTheirClosure() {
@@ -167,7 +165,7 @@ private func spoken(_ count: Int, each: Double, from start: Double) -> [WordTime
 /// drags with a long gap, plain lines, and optionally two changes an agent proposed.
 @MainActor private func panelFixture(proposals: Bool) throws -> (ProjectStore, VoiceStore, Project) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     func line(_ text: String, _ versions: [Version], chosen: String?) -> Line {
         var line = Line(text: text, voiceID: voiceID)
         line.versions = versions.map { var version = $0; version.voiceID = voiceID; return version }

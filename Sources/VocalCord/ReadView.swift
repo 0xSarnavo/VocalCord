@@ -174,7 +174,8 @@ struct ReadView: View {
         preview.play()
     }
 
-    /// A command from the menu: saved, then rendered or applied as needed and played.
+    /// A command from the menu: saved, then applied and played when only marks changed. One that needs the voice (say
+    /// it like, stress) waits for Render.
     private func command(_ text: String, line: Line) {
         projects.setText(text, line: line.id, in: project.id)
         projects.commitAndPlay(line.id, in: project.id, voices: voices, player: player)

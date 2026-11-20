@@ -16,7 +16,7 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
 /// The engine takes `delay` for each call, so a long one keeps a render running.
 @MainActor private func generateFixture(rendered: Int, delay: Duration) throws -> (VoiceStore, ProjectStore, String) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: delay))
-    let voiceID = voices.createVoice(name: "Maya", fullClone: false)
+    let voiceID = voices.createVoice(name: "Maya")
     let take = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 6, amplitude: 0.5, floor: 0.01)[...], rate: 24000, to: take)
     try voices.addTake(voiceID, file: take, tone: "Neutral", transcript: "A take in my own voice.", issues: [])
@@ -128,7 +128,7 @@ func snapshotsOfGenerateStates() async throws {
 
     // A render running: its progress and Cancel in Render's place, the toolbar otherwise where it was.
     try await capture("rendering", voices: voices, projects: projects, defaults: base, size: NSSize(width: 1200, height: 700)) {
-        projects.renderNeeded(id, voices: voices)
+        projects.renderScript(id, voices: voices)
     }
     #expect(projects.progress != nil)
     projects.cancel()

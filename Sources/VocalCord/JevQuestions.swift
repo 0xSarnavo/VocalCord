@@ -28,7 +28,10 @@ enum JevQuestions {
     }
 
     /// The checks for one line: the meaning check only when an agent rewrote it.
-    static func checks(_ subject: JevSubject) -> [Check] { subject.original == nil ? [.spoken, .fitsTone] : Check.allCases }
+    /// Fit with the tone only while tones show (`Tone.enabled`): a tone the user can't change isn't theirs to fix.
+    static func checks(_ subject: JevSubject) -> [Check] {
+        (subject.original == nil ? [.spoken, .fitsTone] : Check.allCases).filter { Tone.enabled || $0 != .fitsTone }
+    }
 
     /// One line's request. The line's text is the whole state; each question carries the context only it needs.
     static func body(_ subject: JevSubject) -> [String: Any] {

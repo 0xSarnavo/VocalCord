@@ -19,6 +19,8 @@ The in-app agent can't load this skill: its short version of these rules is `Age
   direction (`STYLES` in `engine/vocalcord_engine/tts.py`) at `cfg_scale` 4. That multiplies the direction's effect, so
   a direction can move the voice: "brighter, slightly quicker" for Happy raised the pitch by up to 6 semitones in a
   test. Directions must not ask for pitch or speed changes; a real take in that tone beats any direction.
+- Tones are hidden in the app for now (`Tone.enabled` in `VoiceStore.swift`): Neutral sounded best most of the time,
+  so every line is Neutral, rendered from the Neutral main take with no direction.
 - Every `generate` call is a fresh take. Within one call the voice keeps its flow; across calls mood, pace and
   intonation restart. Text over 600 characters and a mid-line tone direction (`[confident]`) split a line into separate
   calls. Script commands don't: the app renders the line whole, times each word with Whisper, then inserts
@@ -35,7 +37,8 @@ The in-app agent can't load this skill: its short version of these rules is `Age
 3. Clean beats long: a hand's width from the mic, a quiet room with soft furnishings, no fan or music. Echo and noise
    are cloned as if they were the voice.
 4. One mood per take, spoken the way the output should sound: a flat take gives flat renders, a storytelling take
-   gives storytelling renders. Record a take per tone the scripts use.
+   gives storytelling renders. While tones are hidden, a voice's takes all come from one natural reading of the
+   in-app script (`CloneScript.swift`), cut at its pauses (`clips.py`); with tones back, record a take per tone.
 5. The transcript must match the words exactly; clear speech whose Whisper transcript is confident clones best.
 6. Choose takes by what they render, not by how clean they sound. `audition` renders a test line from the top
    candidates per tone and scores them.
@@ -63,11 +66,17 @@ The in-app agent can't load this skill: its short version of these rules is `Age
 - Delivery checks (`Version.flags` in `ProjectStore.swift`): pitch more than 1.5 semitones off the take
   (`scoring.pitch`), pace more than 35% off the take's on lines of 6 s or more (`Scores.paced`), and a gap over 1.2 s
   mid-line (`scoring.longest_pause`). Slow and Hesitant skip pace and gaps.
-- Render in Generate retries a line that fails any check, up to `Version.tries` (5), and keeps the best by
-  `Version.rank`; `render_line` renders once for the agent. Voice check in Clone (`VoiceCheck.swift`) runs the same
-  loop over ten test lines and shows its time estimate first, from `RenderSpeed` (measured seconds of rendering per
-  second of audio).
+- Nothing renders on its own. Render in Generate (the toolbar, ⌘R) reads the whole script as one take per run of
+  consecutive lines in one voice, up to 600 characters (`OneTake.swift`), and cuts it into the lines at Whisper word
+  times, so the lines share one flow. Rows have no voice render, only Apply for marks; an edit applies changed pauses
+  and speeds at once but leaves new words for Render (`commitLine(render:)`). `render_line` renders once for the agent. Voice check in
+  Clone (`VoiceCheck.swift`) renders ten test lines once each and shows its time estimate first, from `RenderSpeed`
+  (measured seconds of rendering per second of audio).
 - Each render comes out a little different: render again before rewriting. Listen on a phone speaker too.
+- One voice across lines: each line is a fresh take, so one can come out lower, faster or less like the voice than
+  the rest. `Consistency.notes` (`Consistency.swift`) flags a line more than 1.5 semitones, 30% in pace or 10 Like you
+  points off the other lines' median (pace and Like you from 3 s), and get_script hands it to the agent as
+  `different_from_other_lines`. Render that line again first.
 - Choppy or cut pauses: check for mid-line directions (they split the take) and for a take that is cut off; renders
   fade at part edges and drop a stray pop after dead air (`audio.fade`, `audio.trim_outer_silence`). An inserted
   pause or speed join that clicks means Whisper's word times were off there (low `matched` in `get_pacing`).

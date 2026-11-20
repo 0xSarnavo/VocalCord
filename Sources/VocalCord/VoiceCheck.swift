@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// A test of a whole voice: VocalCord renders a set of lines with the same retry loop as Generate and reports how each
+/// A test of a whole voice: VocalCord renders a set of lines once each, like Render in Generate, and reports how each
 /// one scored. Its renders are `Voices/<voice>/check/<version>.wav`; a new check replaces them.
 enum VoiceTest: String, CaseIterable, Identifiable, Codable, Sendable {
     case range, consistency, long
@@ -17,22 +17,24 @@ enum VoiceTest: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var detail: String {
         switch self {
-        case .range: "Narration and one line per tone, 10 to 20 seconds each. Tests range and emotion."
+        case .range: Tone.enabled ? "Narration and one line per tone, 10 to 20 seconds each. Tests range and emotion."
+            : "Ten different kinds of writing, 10 to 20 seconds each. Tests range."
         case .consistency: "One narration line, ten times. Tests how steady the voice is from render to render."
         case .long: "About 35 seconds each, the most one take holds. Tests long voiceovers."
         }
     }
 
+    /// While tones are hidden every line is read in Neutral.
     var lines: [(text: String, tone: String)] {
-        switch self {
+        let lines = switch self {
         case .range: Self.rangeLines
         case .consistency: Array(repeating: Self.rangeLines[0], count: 10)
         case .long: Self.longLines
         }
+        return Tone.enabled ? lines : lines.map { ($0.text, "Neutral") }
     }
 
-    /// Minutes on this Mac, from its measured render speed: every line passing the first time, then with the retries a
-    /// typical check needs. A line can take up to five tries.
+    /// Minutes on this Mac, from its measured render speed, up to twice that for slower renders.
     func estimate(model: String = EngineSettings.model) -> ClosedRange<Int> {
         // About 15 characters a second of speech; scoring takes a few seconds a line.
         let audio = lines.reduce(0.0) { $0 + Double($1.text.count) / 15 }
@@ -44,8 +46,8 @@ enum VoiceTest: String, CaseIterable, Identifiable, Codable, Sendable {
     private static let rangeLines: [(text: String, tone: String)] = [
         ("Every morning, the harbor wakes up slowly. Fishing boats drift in, gulls circle overhead, and the café on the "
          + "corner props its door open. By eight, the whole street smells of coffee and salt.", "Neutral"),
-        ("Here's how it works. You record a short clip, pick a tone for each line, and press render. A few minutes "
-         + "later, your script comes back in your own voice.", "Neutral"),
+        ("Here's how it works. You read a short script, upload it, and press render. A few minutes later, your "
+         + "script comes back in your own voice.", "Neutral"),
         ("We've tested this with real customers for six months. It works, it's fast, and it saves every team about two "
          + "hours a week. Now it's ready for everyone.", "Confident"),
         ("I can't believe it actually worked! The whole family showed up, the cake was perfect, and Grandma laughed so "
@@ -68,9 +70,9 @@ enum VoiceTest: String, CaseIterable, Identifiable, Codable, Sendable {
         (rangeLines[0].text + " Old men argue about the weather on the bench by the fountain. Children race their bikes "
          + "along the sea wall, and someone always shouts at them to slow down. Nobody ever does. By noon the boats "
          + "are empty, the nets are drying, and the town settles into its long, lazy afternoon.", "Neutral"),
-        (rangeLines[1].text + " You can give every line its own tone, so one sentence sounds calm and the next sounds "
-         + "excited. If a line sounds off, play it again, change a word, or try a different tone. When the whole "
-         + "script sounds right, export it as one file and drop it into your video.", "Neutral"),
+        (rangeLines[1].text + " The whole script is read as one take, so every line sounds like the same recording. If "
+         + "a line sounds off, play it again, change a word, or render once more. When the whole script sounds right, "
+         + "export it as one file and drop it into your video.", "Neutral"),
         (rangeLines[2].text + " The numbers are simple. Teams that switched spent less time fixing mistakes and more "
          + "time shipping. Support tickets dropped by a third. And every single customer in the trial asked to keep "
          + "it when the trial ended. That's not luck. That's a product that works.", "Confident"),
@@ -98,11 +100,10 @@ enum VoiceTest: String, CaseIterable, Identifiable, Codable, Sendable {
     ]
 }
 
-/// The last voice check of a voice: each test line's best version and how many renders it took.
+/// The last voice check of a voice: each test line's version.
 struct VoiceCheck: Codable, Hashable, Sendable {
     struct Line: Codable, Hashable, Sendable {
         var version: Version
-        var tries: Int
     }
     var test: VoiceTest
     var date: Date
@@ -124,8 +125,7 @@ struct VoiceCheckSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Voice check").font(.vcTitle)
-                Text("Renders test lines in \u{201C}\(voice.name)\u{201D}. A line that fails a check renders again, up to \(Version.tries) "
-                     + "times, and keeps its best version.")
+                Text("Renders test lines in \u{201C}\(voice.name)\u{201D}, once each, and scores them.")
                     .foregroundStyle(Theme.secondary)
             }
             if store.checking == voice.id {
@@ -173,7 +173,7 @@ struct VoiceCheckSheet: View {
                             .monospacedDigit()
                             .foregroundStyle(Theme.secondary)
                             .help("On this Mac with the \(EngineSettings.titles[EngineSettings.model] ?? EngineSettings.model) model, "
-                                  + "from how fast it has rendered so far. Lines that need retries take longer.")
+                                  + "from how fast it has rendered so far.")
                     }
                     .padding(12)
                     // A choice tile: the selection grey and a stronger border when chosen.
@@ -199,7 +199,7 @@ struct VoiceCheckSheet: View {
     }
 }
 
-/// One row per test line: play, tone, text, the scores, pitch and pace against the take, tries, and the flags left.
+/// One row per test line: play, tone (while tones show), text, the scores, pitch and pace against the take, and its flags.
 private struct VoiceCheckReport: View {
     @Environment(VoiceStore.self) private var store
     let voiceID: String
@@ -211,20 +211,19 @@ private struct VoiceCheckReport: View {
             if report.test == .consistency { Text(spread).foregroundStyle(Theme.secondary).monospacedDigit() }
             ScrollView {
                 VStack(spacing: 0) {
-                    row(["", "Tone", "Line", "Like you", "Human", "Words", "Pitch", "Pace", "Tries", ""].map { Text($0) })
+                    row(["", "Tone", "Line", "Like you", "Human", "Words", "Pitch", "Pace", ""].map { Text($0) })
                         .font(.vcCaptionBold).foregroundStyle(Theme.secondary).frame(height: 28)
                     ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
                         let version = line.version, scores = version.scores
                         HStack(spacing: 0) {
                             PlayButton(url: store.checkURL(version, voiceID: voiceID)).frame(width: 40, alignment: .leading)
-                            Text(version.tone).frame(width: 78, alignment: .leading)
+                            if Tone.enabled { Text(version.tone).frame(width: 78, alignment: .leading) }
                             Text(version.text).lineLimit(1).help(version.text).frame(maxWidth: .infinity, alignment: .leading)
                             Text(scores.map { "\($0.likeYou)%" } ?? "").frame(width: 66, alignment: .trailing)
                             Text(scores.map { String(format: "%.1f", $0.human) } ?? "").frame(width: 54, alignment: .trailing)
                             Text(scores.map { "\($0.words)%" } ?? "").frame(width: 56, alignment: .trailing)
                             Text(pitch(scores)).frame(width: 60, alignment: .trailing)
                             Text(pace(scores)).frame(width: 56, alignment: .trailing)
-                            Text("\(line.tries)").frame(width: 44, alignment: .trailing)
                             Group {
                                 if version.passes {
                                     Image(systemName: "checkmark").foregroundStyle(Theme.secondary)
@@ -249,15 +248,14 @@ private struct VoiceCheckReport: View {
     private func row(_ cells: [Text]) -> some View {
         HStack(spacing: 0) {
             cells[0].frame(width: 40, alignment: .leading)
-            cells[1].frame(width: 78, alignment: .leading)
+            if Tone.enabled { cells[1].frame(width: 78, alignment: .leading) }
             cells[2].frame(maxWidth: .infinity, alignment: .leading)
             cells[3].frame(width: 66, alignment: .trailing)
             cells[4].frame(width: 54, alignment: .trailing)
             cells[5].frame(width: 56, alignment: .trailing)
             cells[6].frame(width: 60, alignment: .trailing)
             cells[7].frame(width: 56, alignment: .trailing)
-            cells[8].frame(width: 44, alignment: .trailing)
-            cells[9].frame(width: 34)
+            cells[8].frame(width: 34)
         }
     }
 

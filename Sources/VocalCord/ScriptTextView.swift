@@ -469,6 +469,16 @@ enum ScriptCommand: Hashable, Sendable {
     }
 }
 
+/// What a Script toolbar button asks the line being edited to do (`ScriptTextNSView.applyScriptTool`). Nil asks for a
+/// respelling first (Say it like…).
+final class ScriptToolRequest: NSObject {
+    let command: ScriptCommand?
+    /// Why the command couldn't apply, set by the line.
+    var problem: String?
+
+    init(_ command: ScriptCommand?) { self.command = command }
+}
+
 /// The `[` list, in order.
 enum ScriptBracketItem: CaseIterable, Sendable {
     case pause, breath, slower, faster, stress, say
@@ -1093,6 +1103,24 @@ final class ScriptTextNSView: NSTextView, NSTextViewDelegate, @preconcurrency NS
         set(ScriptDisplay(text), selection: selection)
         edited = text != committed
         onChange(text)
+    }
+
+    /// A Script toolbar button (`ScriptToolbar`), sent up the responder chain to the line being edited: its command on
+    /// the selected words, or on the word at the caret, as the right-click menu does. A command that can't apply leaves
+    /// its reason on the request.
+    @objc func applyScriptTool(_ sender: Any?) {
+        guard let request = sender as? ScriptToolRequest else { return }
+        let selection = selectedRange()
+        let target = display.target(selection: selection)
+        guard let command = request.command else {
+            let said = target.words.flatMap { display.parsed.tokens[$0.lowerBound].say } ?? ""
+            ask("Say it like", value: said, placeholder: "Koo-ber", at: target.words.map(display.range(of:)) ?? selection) { [weak self] input in
+                guard let self else { return }
+                perform(try ScriptCommand.say(input).applied(to: display.text, target: target))
+            }
+            return
+        }
+        do { perform(try command.applied(to: display.text, target: target)) } catch { request.problem = error.localizedDescription }
     }
 
     /// A command's text, applied here at once and handed out to be applied and committed.

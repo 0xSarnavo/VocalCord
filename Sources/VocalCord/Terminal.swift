@@ -21,25 +21,31 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         and the takes of the voice selected in Clone. To anything else, reply exactly: "I only help with voiceover scripts."
 
         Script (Generate):
-        - Write new lines or a whole script with add_lines, even into an empty project. Each line has text, a voice, \
-        a tone and a pause after it in seconds.
-        - Each line is one take: the voice keeps its flow within a line and starts fresh on the next. Make a line a \
-        paragraph of up to 600 characters (about 35 seconds), and start a new line at a change of scene or tone.
+        - Write new lines or a whole script with add_lines, even into an empty project. Each line has text, \
+        \(Tone.enabled ? "a voice, a tone" : "a voice") and a pause after it in seconds.
+        - Render in Generate reads the whole script as one take (consecutive lines in one voice, about 600 characters a \
+        take) and cuts it back into the lines, so they share one flow. Make a line a paragraph of up to 600 characters \
+        (about 35 seconds), and start a new line at a change of scene.
         - Write for the ear: short sentences, one idea each, under 25 words, with a very short one now and then. Put \
         the word to stress at the end of its sentence. Use contractions. Write numbers, symbols and abbreviations as \
         spoken words.
         - Pauses come from punctuation: a comma is short, a full stop longer, a colon sets up what follows, and an \
         ellipsis adds weight (use it rarely). Use the pause after a line for longer gaps, and tags (below) for a beat \
         inside a line; (sigh) adds a sigh.
-        - Give each line the tone its words call for, and let the words carry the emotion too. Tones the voice has \
-        takes for (get_voices) sound most like it; any other tone renders from a written direction, so suggest \
-        recording a take in that tone in Clone.
+        - \(Tone.enabled ? toneRule : neutralRule)
         - Fix every warning and error that update_script, add_lines and get_script return.
-        - Fix low scores: render_line renders once, so read the scores, then rewrite or respell and render again. Low \
+        - Render only when the user asks. render_line renders one line on its own, as a separate take that may not \
+        match the rest; prefer asking the user to click Render, which reads the whole script again as one take.
+        - Fix low scores: read the scores, then rewrite or respell, and have the user render again. Low \
         is Like you under 70%, Words under 90%, Human more than 0.5 below the voice's own take, or a flag for pitch, \
         pace or a gap that drifts from the take. Each render comes out a little different, so rendering again can fix \
-        a bad one; Render in Generate already retries each line up to five times. A pitch flag in a tone with no take \
-        means the voice needs a take in that tone.
+        a bad one. Nothing renders again on its own: Render in Generate renders each line once, when the user clicks it.
+        - Keep one voice across the script. Each line is a fresh take, so one can come out lower, faster or less like \
+        the voice than the rest. After the user renders, read get_script: different_from_other_lines says how a line's \
+        render stands out from the others. Tell the user which lines and why, in plain words, and suggest clicking \
+        Render again first, as each take differs. If a line keeps standing out, look at its text: a very short line, odd \
+        punctuation or a tag can change the delivery. You can't hear the audio, so say these are measurements and ask \
+        the user to listen.
 
         Directing delivery:
         - Tags in a line's text: [pause 0.5] is that many seconds of silence (0.05 to 10); [breath] a short pause; \
@@ -62,7 +68,7 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         Timeline:
         - The Timeline tab edits the project's audio on one track, each clip a piece of one line's render. Read it with \
         get_timeline and change it with propose_timeline_edits.
-        - Fix a line in Generate first: render it again, change its tone or rewrite it. Use the voice tools only after \
+        - Fix a line in Generate first: render it again\(Tone.enabled ? ", change its tone" : "") or rewrite it. Use the voice tools only after \
         that, and keep them small: pitch beyond about 2 semitones up or down, or speed outside about 90 to 110%, stops \
         sounding like the speaker.
         - Cut long gaps, breaths and stray sounds with trim, split and gap.
@@ -70,19 +76,27 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         Takes (Clone):
         - Each render copies the voice, mood and pace of one take, read with its transcript. A good take is 10 to 15 \
         seconds, recorded close to the mic in a quiet room, in one mood, with half a second of silence before and \
-        after, and its transcript matches the words spoken exactly. Suggest a take like that for each tone the script \
-        uses, and a storytelling take for narration.
+        after, and its transcript matches the words spoken exactly. \(Tone.enabled ? takesPerTone : oneReading)
         - Fix transcript errors you can spot (get_takes), such as a misheard name or missing punctuation; never guess \
         at words.
-        - Label each take with the tone it is spoken in, and make a clean take with no warnings each tone's main take. \
+        - \(Tone.enabled ? "Label each take with the tone it is spoken in, and make a clean take with no warnings each tone's main take." : "Make a clean take with no warnings the main take.") \
         A take marked cut off starts or ends mid-word: suggest recording it again.
         - Add pronunciations for words the voice says wrong.
-        - audition scores the takes and proposes the best per tone as its main take.
+        - audition scores the takes and proposes the best\(Tone.enabled ? " per tone" : "") as the main take.
 
         Use only the VocalCord tools. update_script, add_lines, propose_timeline_edits, propose_take_changes and audition \
         only propose changes: the user accepts or rejects them, so never say a change is applied. set_pace_target is the \
         exception: it changes the project's pace target at once.
         """
+
+    private static let toneRule = "Give each line the tone its words call for, and let the words carry the emotion too. Tones "
+        + "the voice has takes for (get_voices) sound most like it; any other tone renders from a written direction, so suggest "
+        + "recording a take in that tone in Clone."
+    private static let neutralRule = "Tones are switched off for now: every line uses Neutral, and the words carry the emotion. "
+        + "Don't add [label] tone directions."
+    private static let takesPerTone = "Suggest a take like that for each tone the script uses, and a storytelling take for narration."
+    private static let oneReading = "A voice comes from one recording of the script in Clone, cut into takes at its pauses; for a "
+        + "better voice, suggest reading that script again in a quieter room and uploading it."
 
     /// What the Generate tab's pace review asks the agent.
     static let reviewPacePrompt = "Review the pace and rhythm of the project open in VocalCord. Read it with get_script and "
@@ -412,19 +426,25 @@ extension Terminals: @preconcurrency LocalProcessTerminalViewDelegate {
 struct TerminalPanel: View {
     @Environment(Terminals.self) private var terminals
     @AppStorage("terminalOpen") private var open = false
-    @Binding var height: Double
-    let maxHeight: Double
-    @State private var dragStart: Double?
-    @State private var hovered = false
+    /// The column's width; its left edge resizes it. Every tab puts it on the window's right edge.
+    @Binding var width: Double
+    let maxWidth: Double
 
-    static let minHeight = 140.0
+    static let minWidth = 300.0
 
     var body: some View {
+        let range = Self.minWidth...max(Self.minWidth, maxWidth)
+        HStack(spacing: 0) {
+            ResizeDivider(edge: .leading, size: $width, range: range, label: "Resize terminal")
+            panel
+        }
+        .frame(width: width.clamped(range))
+        .panel()
+        .task { await terminals.detect() }
+    }
+
+    private var panel: some View {
         VStack(spacing: 0) {
-            // The pane divider above the panel is its resize handle, lit under the pointer and while dragged.
-            PaneDivider(axis: .horizontal, highlighted: hovered || dragStart != nil)
-                .overlay { resizeHandle }
-                .zIndex(1)
             HStack(spacing: 4) {
                 ForEach(Agent.allCases.filter { terminals.installed?[$0] != nil }) { agent in
                     Button(agent.title) { terminals.selected = agent }
@@ -432,7 +452,7 @@ struct TerminalPanel: View {
                         .accessibilityAddTraits(terminals.selected == agent ? .isSelected : [])
                 }
                 Spacer()
-                Button { open = false } label: { Image(systemName: "xmark") }
+                Button { open = false } label: { Image(systemName: "chevron.right") }
                     .buttonStyle(.icon(.s))
                     .help("Hide Terminal (\u{2303}`)")
                     .accessibilityLabel("Hide Terminal")
@@ -443,33 +463,6 @@ struct TerminalPanel: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: clamp(height))
-        .panel()
-        .task { await terminals.detect() }
-    }
-
-    private func clamp(_ value: Double) -> Double { min(max(value, Self.minHeight), max(Self.minHeight, maxHeight)) }
-
-    /// 8 pt tall, centred on the 1 pt line, so the edge is easy to grab.
-    private var resizeHandle: some View {
-        Color.clear
-            .frame(height: 8)
-            .contentShape(.rect)
-            .pointerStyle(.frameResize(position: .top))
-            .onHover { hovered = $0 }
-            .gesture(DragGesture(coordinateSpace: .global)
-                .onChanged { value in
-                    let start = dragStart ?? height
-                    dragStart = start
-                    height = clamp(start - value.translation.height)
-                }
-                .onEnded { _ in dragStart = nil })
-            .accessibilityElement()
-            .accessibilityLabel("Resize terminal")
-            .accessibilityValue("\(Int(height)) points")
-            .accessibilityAdjustableAction { direction in
-                height = clamp(height + (direction == .increment ? 40 : -40))
-            }
     }
 
     @ViewBuilder private var content: some View {

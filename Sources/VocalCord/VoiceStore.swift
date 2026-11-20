@@ -2,6 +2,11 @@ import Foundation
 
 enum Tone {
     static let all = ["Neutral", "Confident", "Happy", "Sad", "Angry", "Soft", "Slow", "Hesitant"]
+    /// Tones are hidden for now: Neutral, from one natural reading, sounds best most of the time. True brings back the
+    /// tone column and Compare styles in Generate, every tone in Clone, the tone tests in Voice check and the agents' tones.
+    static let enabled = false
+    /// The tones the app offers.
+    static var shown: [String] { enabled ? all : ["Neutral"] }
 }
 
 struct AppError: LocalizedError {
@@ -32,7 +37,7 @@ struct TakeProposal: Codable, Hashable, Sendable {
     var main: Bool?
 }
 
-/// A clip cut from a dropped file, reviewed before its voice exists.
+/// A clip cut from an uploaded file, before its voice exists.
 struct FileClip: Identifiable, Hashable, Sendable {
     var url: URL
     var duration: Double
@@ -42,7 +47,7 @@ struct FileClip: Identifiable, Hashable, Sendable {
     var keep: Bool
     var id: URL { url }
 
-    /// Clips with warnings or outside 3–20 s start unticked.
+    /// Clips with warnings or outside 3–20 s aren't kept.
     init(_ clip: Clip, issues: [AudioIssue]) {
         url = clip.url
         duration = clip.duration
@@ -58,13 +63,6 @@ struct Pronunciation: Codable, Identifiable, Hashable, Sendable {
     var respelling: String
 }
 
-/// Full clone progress: `step` indexes FullClone.steps, `previous` holds the last item's takes for Re-record previous.
-struct Session: Codable, Hashable, Sendable {
-    var step = 0
-    var index = 0
-    var previous: [String] = []
-}
-
 struct Voice: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var name: String
@@ -73,7 +71,6 @@ struct Voice: Codable, Identifiable, Hashable, Sendable {
     /// Tone name to the take ID used as that tone's reference.
     var mains: [String: String] = [:]
     var pronunciations: [Pronunciation] = []
-    var session: Session?
     /// Pronunciations a terminal agent proposed, each waiting for the user to accept or reject it.
     var proposedPronunciations: [Pronunciation]?
     var lastCheck: VoiceCheck?
@@ -202,10 +199,9 @@ final class VoiceStore {
         save()
     }
 
-    func createVoice(name: String, fullClone: Bool) -> String {
+    func createVoice(name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let voice = Voice(id: UUID().uuidString, name: trimmed.isEmpty ? "Untitled voice" : trimmed,
-                          createdAt: .now, session: fullClone ? Session() : nil)
+        let voice = Voice(id: UUID().uuidString, name: trimmed.isEmpty ? "Untitled voice" : trimmed, createdAt: .now)
         try? files.createDirectory(at: rawFolder(voice.id), withIntermediateDirectories: true)
         voices.append(voice)
         save()
@@ -230,8 +226,6 @@ final class VoiceStore {
         save()
     }
 
-    func setSession(_ id: String, _ session: Session?) { update(id) { $0.session = session } }
-
     // MARK: Takes
 
     /// Moves `file` into the voice folder as a new take.
@@ -245,16 +239,18 @@ final class VoiceStore {
         return take.id
     }
 
-    /// Splits a file already kept in raw/ into clips and adds them as takes.
+    /// Splits a file already kept in raw/ into clips and adds them as takes: the clean ones, or every clip when none is.
     func addClips(from media: URL, voiceID: String, tone: String,
                   progress: @escaping @Sendable (Double) -> Void) async throws -> [String] {
-        var ids: [String] = []
+        var checked: [(clip: Clip, issues: [AudioIssue])] = []
         for clip in try await split(media, minSeconds: 3, maxSeconds: 15, progress: progress) {
-            let check = try await engine.checkAudio(clip.url)
-            ids.append(try addTake(voiceID, file: clip.url, tone: tone, transcript: clip.transcript,
-                                   issues: check.issues, duration: clip.duration))
+            checked.append((clip, try await engine.checkAudio(clip.url).issues))
         }
-        return ids
+        let clean = checked.filter(\.issues.isEmpty)
+        return try (clean.isEmpty ? checked : clean).map { item in
+            try addTake(voiceID, file: item.clip.url, tone: tone, transcript: item.clip.transcript, issues: item.issues,
+                        duration: item.clip.duration)
+        }
     }
 
     /// Keeps the original upload in raw/, then adds the engine's clips as takes.
@@ -307,10 +303,10 @@ final class VoiceStore {
             .filter { !$0.isEmpty }
     }
 
-    /// Makes a voice from reviewed clips: ticked clips become takes, and `folder` (sources and every clip) moves to raw/.
+    /// Makes a voice from cut clips: kept clips become takes, and `folder` (sources and every clip) moves to raw/.
     /// The caller runs the audition.
     func createVoice(name: String, from folder: URL, clips: [FileClip]) throws -> String {
-        let id = createVoice(name: name, fullClone: false)
+        let id = createVoice(name: name)
         do {
             let takes = try clips.filter(\.keep).map { clip in
                 let take = Take(id: UUID().uuidString, tone: clip.tone, transcript: clip.transcript.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -483,7 +479,7 @@ final class VoiceStore {
 
     // MARK: Audition
 
-    /// Renders the audition line from up to 5 candidates per tone, scores each, and makes the best the main take, or with
+    /// Renders the audition line from up to 5 candidates per shown tone, scores each, and makes the best the main take, or with
     /// `proposing` proposes it as the main take instead. All renders come before all scores, so the engine swaps models once.
     /// Returns the best take's ID per tone.
     @discardableResult
@@ -492,7 +488,7 @@ final class VoiceStore {
         guard let voice = voice(voiceID) else { return [:] }
         auditioning = voiceID
         defer { auditioning = nil }
-        let candidates = Tone.all.flatMap { tone in
+        let candidates = Tone.shown.flatMap { tone in
             voice.takes(tone)
                 .sorted { ($0.issues.count, abs($0.duration - 10)) < ($1.issues.count, abs($1.duration - 10)) }
                 .prefix(5)
@@ -516,7 +512,7 @@ final class VoiceStore {
         var best: [String: String] = [:]
         update(voiceID) { voice in
             for index in voice.takes.indices { if let score = scores[voice.takes[index].id] { voice.takes[index].score = score } }
-            for tone in Tone.all {
+            for tone in Tone.shown {
                 if let take = voice.takes(tone).filter({ scores[$0.id] != nil }).max(by: { scores[$0.id]! < scores[$1.id]! }) {
                     best[tone] = take.id
                     if !proposing { voice.mains[tone] = take.id }
@@ -547,9 +543,8 @@ final class VoiceStore {
 
     func cancelCheck() { checkTask?.cancel() }
 
-    /// Rounds like Generate's: render every pending line, score them all, then render again the lines whose best
-    /// version still fails a check, up to `Version.tries`. The renders are written to a fresh folder that replaces the
-    /// last check's once this one finishes.
+    /// Like Generate's Render: every line renders once, then they're all scored. The renders are written to a fresh
+    /// folder that replaces the last check's once this one finishes.
     func check(_ voiceID: String, test: VoiceTest) async throws {
         guard let voice = voice(voiceID), !voice.takes.isEmpty else { throw AppError("Add a take in Clone first.") }
         let lines = test.lines
@@ -557,54 +552,43 @@ final class VoiceStore {
         try files.createDirectory(at: fresh, withIntermediateDirectories: true)
         var finished = false
         defer { if !finished { try? files.removeItem(at: fresh) } }
-        var best = [Version?](repeating: nil, count: lines.count), tries = [Int](repeating: 0, count: lines.count)
-        var pending = Array(lines.indices)
-        for attempt in 1...Version.tries where !pending.isEmpty {
-            var made: [(index: Int, version: Version, take: Take)] = []
-            for (step, index) in pending.enumerated() {
-                try Task.checkCancellation()
-                let (text, tone) = lines[index]
-                guard let take = voice.reference(tone) else { continue }
-                checkStatus = "Line \(index + 1) of \(lines.count)" + (attempt > 1 ? ", try \(attempt) of \(Version.tries)" : "")
-                var version = Version(id: UUID().uuidString, text: text, voiceID: voiceID, tone: tone, direction: take.tone != tone,
-                                      seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
-                let clock = ContinuousClock.now, share = 0.85 / Double(pending.count)
-                version.duration = try await engine.render(
-                    RenderLine(text: text, tone: tone, reference: audioURL(take, voiceID: voiceID), referenceText: take.transcript,
-                               pronunciations: voice.pronunciationMap, seed: version.seed),
-                    to: fresh.appending(path: "\(version.id).wav")
-                ) { value in Task { @MainActor in self.checkProgress = (Double(step) + value) * share } }
-                let elapsed = ContinuousClock.now - clock
-                RenderSpeed.record(rendering: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18,
-                                   audio: version.duration)
-                made.append((index, version, take))
-                tries[index] += 1
-            }
-            checkStatus = "Scoring" + (attempt > 1 ? ", try \(attempt) of \(Version.tries)" : "")
-            for item in made { try await scoreHuman(item.take, voiceID: voiceID) }
-            for (step, item) in made.enumerated() {
-                try Task.checkCancellation()
-                var version = item.version
-                version.scores = try await engine.score(fresh.appending(path: "\(version.id).wav"), reference: audioURL(item.take, voiceID: voiceID),
-                                                        text: version.text, hints: voice.pronunciations.map(\.word))
-                    .paced(text: version.text, duration: version.duration, take: item.take)
-                version.referenceHuman = self.voice(voiceID)?.takes.first { $0.id == item.take.id }?.human
-                if best[item.index].map({ version.rank > $0.rank }) ?? true { best[item.index] = version }
-                checkProgress = 0.85 + 0.15 * Double(step + 1) / Double(made.count)
-            }
-            pending = pending.filter { !(best[$0]?.passes ?? true) }
+        var made: [(version: Version, take: Take)] = []
+        for (index, line) in lines.enumerated() {
+            try Task.checkCancellation()
+            let (text, tone) = line
+            guard let take = voice.reference(tone) else { continue }
+            checkStatus = "Line \(index + 1) of \(lines.count)"
+            var version = Version(id: UUID().uuidString, text: text, voiceID: voiceID, tone: tone, direction: take.tone != tone,
+                                  seed: Int.random(in: 1...99_999), duration: 0, createdAt: .now)
+            let clock = ContinuousClock.now, share = 0.85 / Double(lines.count)
+            version.duration = try await engine.render(
+                RenderLine(text: text, tone: tone, reference: audioURL(take, voiceID: voiceID), referenceText: take.transcript,
+                           pronunciations: voice.pronunciationMap, seed: version.seed),
+                to: fresh.appending(path: "\(version.id).wav")
+            ) { value in Task { @MainActor in self.checkProgress = (Double(index) + value) * share } }
+            let elapsed = ContinuousClock.now - clock
+            RenderSpeed.record(rendering: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18,
+                               audio: version.duration)
+            made.append((version, take))
         }
-        let kept = Set(best.compactMap { $0?.id })
-        for file in (try? files.contentsOfDirectory(at: fresh, includingPropertiesForKeys: nil)) ?? []
-        where !kept.contains(file.deletingPathExtension().lastPathComponent) {
-            try? files.removeItem(at: file)
+        checkStatus = "Scoring"
+        for item in made { try await scoreHuman(item.take, voiceID: voiceID) }
+        var scored: [Version] = []
+        for (step, item) in made.enumerated() {
+            try Task.checkCancellation()
+            var version = item.version
+            version.scores = try await engine.score(fresh.appending(path: "\(version.id).wav"), reference: audioURL(item.take, voiceID: voiceID),
+                                                    text: version.text, hints: voice.pronunciations.map(\.word))
+                .paced(text: version.text, duration: version.duration, take: item.take)
+            version.referenceHuman = self.voice(voiceID)?.takes.first { $0.id == item.take.id }?.human
+            scored.append(version)
+            checkProgress = 0.85 + 0.15 * Double(step + 1) / Double(made.count)
         }
         let folder = folder(voiceID).appending(path: "check", directoryHint: .isDirectory)
         try? files.removeItem(at: folder)
         try files.moveItem(at: fresh, to: folder)
         finished = true
-        let report = VoiceCheck(test: test, date: .now, model: EngineSettings.model,
-                                lines: zip(best, tries).compactMap { version, tries in version.map { VoiceCheck.Line(version: $0, tries: tries) } })
+        let report = VoiceCheck(test: test, date: .now, model: EngineSettings.model, lines: scored.map { VoiceCheck.Line(version: $0) })
         update(voiceID) { $0.lastCheck = report }
     }
 }

@@ -1,31 +1,20 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum Flow: Hashable {
-    /// `file` holds the new voice's name: that voice is made only at the end.
-    case fast(String), full(String), file(String)
-
-    var voiceID: String? {
-        switch self {
-        case .fast(let id), .full(let id): id
-        case .file: nil
-        }
-    }
-}
-
 struct CloneView: View {
     @Environment(VoiceStore.self) private var store
     /// Stored, so the agents' tools know the voice selected here.
     @AppStorage("voice") private var selection: String?
     @AppStorage("pronunciationsOpen") private var pronunciationsOpen = true
-    @State private var flow: Flow?
+    /// The voice being made from a recording, while its screen shows: the voice exists only at the end.
+    @State private var making: NewVoice?
     @State private var showNew = false
     @State private var renaming: String?
     @State private var newName = ""
     @State private var deleting: String?
 
-    /// The voice page is on screen: not during a clone, and only with a voice selected.
-    private var showsVoice: Bool { flow == nil && store.voice(selection) != nil }
+    /// The voice page is on screen: not while a voice is being made, and only with a voice selected.
+    private var showsVoice: Bool { making == nil && store.voice(selection) != nil }
 
     var body: some View {
         SidebarLayout {
@@ -33,24 +22,19 @@ struct CloneView: View {
         } detail: {
             detail
         }
-        // The Terminal opens under the voice page, so not during a clone.
+        // The Terminal opens under the voice page, so not while a voice is being made.
         .toolbar { WorkspaceToolbar(terminalEnabled: showsVoice) }
         .focusedSceneValue(\.terminalAvailable, showsVoice)
         .focusedSceneValue(\.newItemAction, { showNew = true })
         .focusedSceneValue(\.newItemTitle, "New Voice\u{2026}")
         .focusedSceneValue(\.toggleSidePanel, showsVoice ? { pronunciationsOpen.toggle() } : nil)
         .onAppear { if store.voice(selection) == nil { selection = store.voices.first?.id } }
-        .onChange(of: selection) { if flow?.voiceID != selection { flow = nil } }
+        // Choosing a voice in the sidebar leaves the new voice's screen.
+        .onChange(of: selection) { if selection != nil { making = nil } }
         .sheet(isPresented: $showNew) {
-            NewVoiceSheet { name, kind in
-                if kind == .file {
-                    selection = nil
-                    flow = .file(name)
-                    return
-                }
-                let id = store.createVoice(name: name, fullClone: kind == .full)
-                selection = id
-                flow = kind == .full ? .full(id) : .fast(id)
+            NewVoiceSheet { voice in
+                selection = nil
+                making = voice
             }
         }
         // `presenting:` hands the ID to the actions, since dismissing clears the state.
@@ -71,29 +55,24 @@ struct CloneView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        switch flow {
-        case .full(let id):
-            FullCloneView(voiceID: id) { flow = nil }.id(id).panel()
-        case .fast(let id):
-            FastCloneView(voiceID: id) { flow = nil }.id(id).panel()
-        case .file(let name):
-            FileCloneView(name: name) { id in
-                flow = nil
+        if let voice = making {
+            FileCloneView(name: voice.name, script: voice.script) { id in
+                making = nil
                 selection = id ?? store.voices.first?.id
             }
+            .id(voice.id)
             .panel()
-        case nil:
-            if let voice = store.voice(selection) {
-                VoicePage(voice: voice, onResume: { flow = .full(voice.id) }, onRename: startRename, onDelete: { deleting = $0 })
-                    .id(voice.id)
-            } else if store.voices.isEmpty {
-                EmptyState(title: "No voices yet", message: "Record a few short takes and VocalCord clones your voice on this Mac.") {
-                    Button("New voice") { showNew = true }.buttonStyle(.vc(.primary, .l))
-                }
-                .panel()
-            } else {
-                EmptyState(title: "No voice selected", message: "Choose a voice in the sidebar.").panel()
+        } else if let voice = store.voice(selection) {
+            VoicePage(voice: voice, onRename: startRename, onDelete: { deleting = $0 })
+                .id(voice.id)
+        } else if store.voices.isEmpty {
+            EmptyState(title: "No voices yet", message: "Read a short script out loud or upload any recording, and VocalCord "
+                       + "clones the voice on this Mac.") {
+                Button("New voice") { showNew = true }.buttonStyle(.vc(.primary, .l))
             }
+            .panel()
+        } else {
+            EmptyState(title: "No voice selected", message: "Choose a voice in the sidebar.").panel()
         }
     }
 
@@ -125,8 +104,10 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader("Voices") {
+                // The window's first control, so it takes keyboard focus at launch: a quiet outline, not the bright ring.
                 Button(action: onNew) { Image(systemName: "plus") }
                     .buttonStyle(.icon(.s))
+                    .focusEffectDisabled()
                     .help("New voice (⌘N)")
                     .accessibilityLabel("New voice")
             }
@@ -153,67 +134,47 @@ struct Sidebar: View {
 struct VoicePage: View {
     @Environment(VoiceStore.self) private var store
     let voice: Voice
-    let onResume: () -> Void
     let onRename: (String) -> Void
     let onDelete: (String) -> Void
     @AppStorage("pronunciationsOpen") private var inspectorOpen = true
     @State private var auditioning = Progress()
     @State private var checkingVoice = false
-    @State private var recordTone: String?
     @State private var picking = false
-    @State private var pickTone = "Neutral"
     @State private var importing = Progress()
-    @State private var importingTone: String?
     @AppStorage("terminalOpen") private var terminalOpen = false
-    @AppStorage("terminalHeight") private var terminalHeight = 300.0
+    @AppStorage("terminalWidth") private var terminalWidth = 380.0
 
     var body: some View {
+        GeometryReader { proxy in
         HStack(spacing: 0) {
-            GeometryReader { proxy in
                 VStack(spacing: 0) {
-                    VStack(spacing: 0) {
                         PanelHeader {
                             Text(voice.name).contextMenu { VoiceMenu(id: voice.id, onRename: onRename, onDelete: onDelete) }
                         } actions: {
                             decideAll
-                            if voice.session != nil {
-                                Button("Resume session", action: onResume).buttonStyle(.vc(.primary, .s))
-                            }
+                            uploadButton
                             Button("Voice check\u{2026}") { checkingVoice = true }
                                 .buttonStyle(.vc(.secondary, .s))
                                 .disabled(voice.takes.isEmpty)
-                                .help("Render test lines, retrying each until it passes, and see how the voice holds up")
+                                .help("Render test lines and see how the voice holds up")
                             auditionButton
                         }
-                        TakesTable(voice: voice, importingTone: importingTone, importProgress: importing.value,
-                                   onRecord: { recordTone = $0 }, onUpload: { pickTone = $0; picking = true })
-                    }
-                    .frame(maxHeight: .infinity)
-                    .panel()
-                    if terminalOpen {
-                        // The table keeps room for its header and a few takes.
-                        TerminalPanel(height: $terminalHeight, maxHeight: proxy.size.height - 250)
-                    }
+                        TakesTable(voice: voice)
                 }
-            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .panel()
             PaneDivider()
             PronunciationsPanel(voice: voice, open: $inspectorOpen)
-        }
-        .sheet(isPresented: Binding(present: $recordTone)) {
-            if let tone = recordTone {
-                TakeCapture(voiceID: voice.id, tone: tone, prompt: Prompts.sentence(for: tone),
-                            minSeconds: 1, maxSeconds: 30, saveTitle: "Save take", large: false,
-                            onCancel: { recordTone = nil }) { _ in recordTone = nil }
-                    .frame(width: 680, height: 470)
-                    .background(Theme.content)
-                    .focusEffectDisabled()
+            if terminalOpen {
+                // The takes keep room for their columns beside Pronunciations.
+                TerminalPanel(width: $terminalWidth, maxWidth: proxy.size.width - 640)
             }
+        }
         }
         .sheet(isPresented: $checkingVoice) { VoiceCheckSheet(voice: voice) }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio, .movie]) { result in
             guard case .success(let url) = result else { return }
-            let tone = pickTone
-            Task { await importUpload(url, tone: tone) }
+            Task { await importUpload(url) }
         }
     }
 
@@ -233,6 +194,27 @@ struct VoicePage: View {
             }
             .buttonStyle(.vc(.secondary, .s))
         }
+    }
+
+    /// Another recording, cut into takes beside the ones the voice has. While it's cut a progress ring stands in for
+    /// the glyph, so the button keeps its width.
+    private var uploadButton: some View {
+        Button { picking = true } label: {
+            HStack(spacing: 6) {
+                if importing.active {
+                    ProgressView(value: importing.value)
+                        .progressViewStyle(.circular)
+                        .controlSize(.mini)
+                        .frame(width: 13, height: 13)
+                } else {
+                    Image(systemName: "plus").frame(width: 13, height: 13)
+                }
+                Text("Upload\u{2026}")
+            }
+        }
+        .buttonStyle(.vc(.secondary, .s))
+        .disabled(importing.active)
+        .help("Add takes from another recording")
     }
 
     /// Also shows an audition an agent started. While it runs a small progress ring stands in for the play glyph, so
@@ -260,13 +242,13 @@ struct VoicePage: View {
         }
         .buttonStyle(.vc(.secondary, .s))
         .disabled(auditioning.active || store.busy != nil || voice.takes.isEmpty)
+        .help("Render a test line from the best takes and make the one most like you the main take")
     }
 
-    private func importUpload(_ url: URL, tone: String) async {
-        importingTone = tone
+    private func importUpload(_ url: URL) async {
         importing.start()
-        defer { importingTone = nil; importing.active = false }
-        do { _ = try await store.importMedia(url, voiceID: voice.id, tone: tone, progress: importing.callback) }
+        defer { importing.active = false }
+        do { _ = try await store.importMedia(url, voiceID: voice.id, tone: "Neutral", progress: importing.callback) }
         catch { store.error = "Couldn't import this file. \(error.localizedDescription)" }
     }
 }
@@ -278,45 +260,48 @@ private enum Column {
     static let length: CGFloat = 64
     static let like: CGFloat = 72
     static let main: CGFloat = 56
-    static let gutter: CGFloat = 32
     static let header: CGFloat = 28
     static let row: CGFloat = 40
     static let emptyRow: CGFloat = 32
     /// The pane edge to the tone names and the "Tone" header.
     static let leading: CGFloat = 16
-    /// After the gutter, so its button ends 12 from the pane edge like the panel header's actions.
     static let trailing: CGFloat = 8
     /// Between a cell's content and its column edge.
     static let inset: CGFloat = 8
 
-    /// Everything but the Take column. "Like you" is left out until a take has a score.
-    static func fixed(like: Bool) -> CGFloat { tone + length + (like ? self.like : 0) + main + gutter + trailing }
+    /// The first column: the tone names while tones show, else the room that puts the takes on the pane's text edge.
+    static func lead(tones: Bool) -> CGFloat { tones ? tone : leading - inset }
+
+    /// Everything but the Take column. "Like you" is left out until a take has a score, Main while no tone has two takes
+    /// to choose between.
+    static func fixed(like: Bool, tones: Bool, main showsMain: Bool) -> CGFloat {
+        lead(tones: tones) + length + (like ? self.like : 0) + (showsMain ? main : 0) + trailing
+    }
 }
 
+/// The voice's takes, grouped by tone while tones show (`Tone.enabled`); otherwise one list of the Neutral takes.
 struct TakesTable: View {
     let voice: Voice
-    let importingTone: String?
-    let importProgress: Double
-    let onRecord: (String) -> Void
-    let onUpload: (String) -> Void
     @State private var collapsed: Set<String> = []
-    @State private var hovered: String?
     @State private var width: CGFloat = 0
+
+    private var showsTones: Bool { Tone.shown.count > 1 }
 
     var body: some View {
         // Audition scores the takes; before that the column would be empty in every row.
         let showsLike = voice.takes.contains { $0.score != nil }
-        let takeWidth = max(120, width - Column.fixed(like: showsLike))
+        let showsMain = Tone.shown.contains { voice.takes($0).count > 1 }
+        let takeWidth = max(120, width - Column.fixed(like: showsLike, tones: showsTones, main: showsMain))
         ScrollView {
             // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
             LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
-                    ForEach(Tone.all, id: \.self) { tone in
-                        group(tone, showsLike: showsLike, takeWidth: takeWidth)
+                    ForEach(Tone.shown, id: \.self) { tone in
+                        group(tone, showsLike: showsLike, showsMain: showsMain, takeWidth: takeWidth)
                         Theme.rule.frame(height: 1)
                     }
                 } header: {
-                    header(showsLike: showsLike, takeWidth: takeWidth)
+                    header(showsLike: showsLike, showsMain: showsMain, takeWidth: takeWidth)
                 }
             }
             // Measures the width the rows get, not their own, so the columns can shrink again.
@@ -327,16 +312,15 @@ struct TakesTable: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private func header(showsLike: Bool, takeWidth: CGFloat) -> some View {
+    private func header(showsLike: Bool, showsMain: Bool, takeWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
-            Text("Tone").padding(.leading, Column.leading).frame(width: Column.tone, alignment: .leading)
+            Text(showsTones ? "Tone" : "").padding(.leading, Column.leading).frame(width: Column.lead(tones: showsTones), alignment: .leading)
             Text("Take").padding(.leading, Column.inset).frame(width: takeWidth, alignment: .leading)
             Text("Length").padding(.trailing, Column.inset).frame(width: Column.length, alignment: .trailing)
             if showsLike {
                 Text("Like you").padding(.trailing, Column.inset).frame(width: Column.like, alignment: .trailing)
             }
-            Text("Main").frame(width: Column.main)
-            Color.clear.frame(width: Column.gutter)
+            if showsMain { Text("Main").frame(width: Column.main) }
         }
         .lineLimit(1)
         .font(.vcCaptionBold)
@@ -347,27 +331,27 @@ struct TakesTable: View {
         .background(Theme.content)
     }
 
-    /// A tone's rows: one per take with the tone's name in the first, or one row for a tone with no take or folded
-    /// away. Separators run the full width; the whole group shares one hover.
-    private func group(_ tone: String, showsLike: Bool, takeWidth: CGFloat) -> some View {
+    /// A tone's rows: one per take, with the tone's name in the first while tones show, or one row for a tone with no
+    /// take or folded away. Separators run the full width.
+    private func group(_ tone: String, showsLike: Bool, showsMain: Bool, takeWidth: CGFloat) -> some View {
         let takes = voice.takes(tone)
         // A pending change stays in view.
-        let isCollapsed = collapsed.contains(tone) && !takes.contains { $0.proposal != nil }
-        // Dimmed at rest, so every tone shows what you can do with it without the actions crowding the takes.
-        let actionOpacity = hovered == tone || importingTone == tone ? 1 : 0.7
+        let isCollapsed = showsTones && collapsed.contains(tone) && !takes.contains { $0.proposal != nil }
         return VStack(spacing: 0) {
             if takes.isEmpty {
                 HStack(spacing: 0) {
-                    toneCell(tone, takes: takes, collapsed: false)
-                    emptyActions(tone, dim: actionOpacity)
+                    lead(tone, takes: takes, collapsed: false)
+                    Text("No takes yet. Upload a recording.")
+                        .font(.vcBody)
+                        .foregroundStyle(Theme.secondary)
+                        .padding(.leading, Column.inset)
                     Spacer(minLength: 0)
                 }
                 .frame(height: Column.emptyRow)
             } else if isCollapsed {
                 HStack(spacing: 0) {
-                    toneCell(tone, takes: takes, collapsed: true)
+                    lead(tone, takes: takes, collapsed: true)
                     Spacer(minLength: 0)
-                    addMenu(tone).opacity(actionOpacity).frame(width: Column.gutter)
                 }
                 .padding(.trailing, Column.trailing)
                 .frame(height: Column.row)
@@ -376,16 +360,12 @@ struct TakesTable: View {
                     HStack(spacing: 0) {
                         // ZStacks, not Groups: an empty Group would drop the column's fixed width.
                         ZStack(alignment: .leading) {
-                            if index == 0 { toneCell(tone, takes: takes, collapsed: false) }
+                            if index == 0 { lead(tone, takes: takes, collapsed: false) }
                         }
-                        .frame(width: Column.tone)
+                        .frame(width: Column.lead(tones: showsTones))
                         .frame(maxHeight: .infinity)
-                        TakeRow(take: take, voice: voice, showsMain: takes.count > 1, showsLike: showsLike, takeWidth: takeWidth)
-                        ZStack {
-                            if index == 0 { addMenu(tone).opacity(actionOpacity) }
-                        }
-                        .frame(width: Column.gutter)
-                        .frame(maxHeight: .infinity)
+                        TakeRow(take: take, voice: voice, showsMain: takes.count > 1, mainColumn: showsMain, showsLike: showsLike,
+                                takeWidth: takeWidth)
                     }
                     .padding(.trailing, Column.trailing)
                     // Lets the fixed columns stretch to a wrapped transcript's height.
@@ -395,9 +375,14 @@ struct TakesTable: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(hovered == tone ? Theme.hover : .clear)
-        .onHover { hovering in
-            if hovering { hovered = tone } else if hovered == tone { hovered = nil }
+    }
+
+    /// The first column: the tone cell while tones show, else the space that lines the takes up with the header.
+    @ViewBuilder private func lead(_ tone: String, takes: [Take], collapsed isCollapsed: Bool) -> some View {
+        if showsTones {
+            toneCell(tone, takes: takes, collapsed: isCollapsed)
+        } else {
+            Color.clear.frame(width: Column.lead(tones: false))
         }
     }
 
@@ -437,61 +422,6 @@ struct TakesTable: View {
             label.accessibilityElement(children: .combine)
         }
     }
-
-    @ViewBuilder private func addMenu(_ tone: String) -> some View {
-        if importingTone == tone {
-            ProgressView(value: importProgress).frame(width: 24)
-        } else {
-            Menu {
-                Button("Record") { onRecord(tone) }
-                Button("Upload") { onUpload(tone) }
-            } label: {
-                IconMenuLabel(systemImage: "plus")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Add a take")
-            .accessibilityLabel("Add take to \(tone)")
-        }
-    }
-
-    /// Record and Upload for a tone with no take, where its first take will go. `dim` quiets the labels at rest; the
-    /// Record dot stays full red, so it keeps its 3:1.
-    private func emptyActions(_ tone: String, dim: Double) -> some View {
-        HStack(spacing: 8) {
-            if importingTone == tone {
-                ProgressView(value: importProgress).frame(width: 120)
-            } else {
-                Button { onRecord(tone) } label: {
-                    HStack(spacing: 6) { RecordDot(size: 8); Text("Record").opacity(dim) }
-                }
-                .accessibilityLabel("Record a \(tone) take")
-                Button { onUpload(tone) } label: { Text("Upload").opacity(dim) }
-                    .accessibilityLabel("Upload a \(tone) take")
-            }
-        }
-        .buttonStyle(.vc(.secondary, .s))
-        .fixedSize()
-        .padding(.leading, Column.inset)
-    }
-}
-
-/// An Icon S button's look for a menu's label: a menu takes no custom button style, so the hover is drawn here.
-private struct IconMenuLabel: View {
-    let systemImage: String
-    @State private var hovered = false
-
-    var body: some View {
-        Image(systemName: systemImage)
-            .font(.vcBody)
-            .foregroundStyle(hovered ? Theme.text : Theme.secondary)
-            .frame(width: VCSize.s.height, height: VCSize.s.height)
-            .background(hovered ? Theme.hover : .clear, in: .rect(cornerRadius: VCSize.s.radius))
-            .contentShape(.rect)
-            .onHover { hovered = $0 }
-    }
 }
 
 struct TakeRow: View {
@@ -499,6 +429,8 @@ struct TakeRow: View {
     let take: Take
     let voice: Voice
     let showsMain: Bool
+    /// The table has a Main column (some tone has two takes to choose between).
+    var mainColumn = true
     var showsLike = true
     let takeWidth: CGFloat
     @State private var text = ""
@@ -559,7 +491,7 @@ struct TakeRow: View {
                     .accessibilityAddTraits(isMain ? .isSelected : [])
                 }
             }
-            .frame(width: Column.main)
+            .frame(width: mainColumn ? Column.main : 0)
             .frame(maxHeight: .infinity)
         }
         .font(.vcBody.monospacedDigit())
@@ -569,7 +501,8 @@ struct TakeRow: View {
         .contextMenu {
             Button("Delete take…", role: .destructive) { confirmingDelete = true }
         }
-        .confirmationDialog("Delete this \(take.tone) take?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .confirmationDialog(Tone.enabled ? "Delete this \(take.tone) take?" : "Delete this take?", isPresented: $confirmingDelete,
+                            titleVisibility: .visible) {
             Button("Delete take", role: .destructive) { store.removeTakes([take.id], from: voice.id) }
         } message: {
             Text("The voice stops using it. The recording stays in the voice's folder.")
@@ -809,13 +742,19 @@ struct PronunciationsPanel: View {
 
 // MARK: New voice
 
-struct NewVoiceSheet: View {
-    enum Kind { case fast, full, file }
+/// A new voice's name and how it's made: from a reading of the app's script, or from any audio or video.
+struct NewVoice: Equatable, Identifiable {
+    var name: String
+    var script: Bool
+    /// A fresh screen for each new voice, even one started while another is being cut.
+    var id = UUID()
+}
 
+struct NewVoiceSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let onStart: (String, Kind) -> Void
+    let onStart: (NewVoice) -> Void
     @State private var name = ""
-    @State private var kind = Kind.fast
+    @State private var script = true
     @State private var consent = false
 
     var body: some View {
@@ -825,42 +764,44 @@ struct NewVoiceSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .focusEffectDisabled(false)
             HStack(spacing: 12) {
-                choice("Fast clone", detail: "One 10–20 s clip", kind: .fast)
-                choice("Full clone", detail: "Guided, about 8 min", kind: .full)
-                choice("From a file", detail: "Any audio or video", kind: .file)
+                choice("Read a script", detail: "Read our 2-minute script aloud, record it on your phone or Mac, then upload it. "
+                       + "Sounds most like you.", script: true)
+                choice("Upload any audio", detail: "A podcast, a video or an old recording. Best with one person talking and "
+                       + "no music.", script: false)
             }
             Toggle("This is my voice, or I have the speaker's permission.", isOn: $consent)
                 .toggleStyle(.checkbox)
             HStack(spacing: 8) {
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(.vc(.secondary, .m)).keyboardShortcut(.cancelAction)
-                Button("Start") {
-                    onStart(name, kind)
+                Button("Continue") {
+                    onStart(NewVoice(name: name, script: script))
                     dismiss()
                 }
                 .buttonStyle(.vc(.primary, .m))
                 .keyboardShortcut(.defaultAction)
                 .disabled(!consent)
+                .help(consent ? "" : "Tick the permission box to continue")
             }
             .padding(.top, 8)
         }
         .padding(24)
-        .frame(width: 580)
+        .frame(width: 520)
         .background(Theme.content)
         .preferredColorScheme(.dark)
         .focusEffectDisabled()
     }
 
     /// A card: the selection grey and a stronger border when chosen.
-    private func choice(_ title: String, detail: String, kind: Kind) -> some View {
-        let selected = self.kind == kind
-        return Button { self.kind = kind } label: {
+    private func choice(_ title: String, detail: String, script: Bool) -> some View {
+        let selected = self.script == script
+        return Button { self.script = script } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.vcBodyBold)
-                Text(detail).font(.vcBody).foregroundStyle(Theme.secondary)
+                Text(detail).font(.vcBody).foregroundStyle(Theme.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(selected ? Theme.selection : Theme.hover, in: .rect(cornerRadius: Radius.card))
             .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(selected ? Theme.strong : Theme.line))
             .contentShape(.rect)
@@ -870,35 +811,37 @@ struct NewVoiceSheet: View {
     }
 }
 
-// MARK: From a file
+// MARK: From a recording
 
-/// Drop files, cut them into clips, pick the speaker, review the clips, then create the voice and audition it.
+/// A new voice from a recording: with `script`, the script to read and how, then the upload; otherwise any audio or
+/// video. The recording is cut into clips at its pauses, the speaker is asked for only when there's more than one, the
+/// clean clips become takes, and an audition picks the main take.
 struct FileCloneView: View {
     @Environment(VoiceStore.self) private var store
     let name: String
+    /// Shows the app's script to read first; false goes straight to the upload.
+    var script = true
     /// The new voice's ID, or nil when cancelled.
     let onDone: (String?) -> Void
 
-    private enum Stage { case pick, cutting, grouping, speakers, review, auditioning }
+    private enum Stage { case pick, cutting, grouping, speakers }
     @State private var stage = Stage.pick
     @State private var working = Progress()
     @State private var task: Task<Void, Never>?
-    /// Copies of the sources and every clip, until Create moves them to the voice's raw/.
+    /// Copies of the sources and every clip, until the voice is made and they move to its raw/.
     @State private var folder: URL?
     @State private var groups: [[FileClip]] = []
-    @State private var clips: [FileClip] = []
     @State private var picking = false
     @State private var dropping = false
+    @State private var copied = false
 
     var body: some View {
         Group {
             switch stage {
-            case .pick: pickView
-            case .cutting: progressView("Cutting into clips", button: "Cancel")
-            case .grouping: progressView("Finding speakers", button: "Cancel")
+            case .pick: if script { pickView } else { anyFileView }
+            case .cutting: progressView("Cutting your recording into clips", button: "Cancel")
+            case .grouping: progressView("Finding your voice", button: "Cancel")
             case .speakers: speakersView
-            case .review: reviewView
-            case .auditioning: progressView("Audition", button: "Skip")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -911,7 +854,12 @@ struct FileCloneView: View {
         }
     }
 
-    /// Full clone's layout: a large prompt, its controls and one button below them, in a centred column.
+    private var title: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Untitled voice" : trimmed
+    }
+
+    /// A large title, its controls and one button below them, in a centred column.
     private func screen<Content: View>(_ title: String, bottom: String, action: @escaping () -> Void,
                                        @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 0) {
@@ -930,15 +878,86 @@ struct FileCloneView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// The script, in the Read view's type so it reads well aloud from the screen, under the steps. The whole pane
+    /// takes a dropped file and lights up while one is over it.
     private var pickView: some View {
-        screen("Drop audio or video files", bottom: "Cancel", action: { onDone(nil) }) {
-            Button { picking = true } label: { Text("Choose files").frame(minWidth: 260) }
-                .buttonStyle(VCButtonStyle(kind: .primary, height: 76))
+        VStack(spacing: 0) {
+            PanelHeader {
+                Text(title)
+            } actions: {
+                Button("Cancel") { onDone(nil) }.buttonStyle(.vc(.secondary, .s))
+                Button {
+                    CloneScript.copy()
+                    copied = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        copied = false
+                    }
+                } label: {
+                    // As wide as "Copy script", so Copied doesn't move the buttons beside it.
+                    ZStack { Text("Copy script").hidden(); Text(copied ? "Copied" : "Copy script") }
+                }
+                .buttonStyle(.vc(.secondary, .s))
+                .help("Copy the script to read it from your phone")
+                Button("Upload recording\u{2026}") { picking = true }.buttonStyle(.vc(.primary, .s))
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 32) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Read this script out loud, record it, and upload the recording.").font(.vcTitle)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(CloneScript.steps.enumerated()), id: \.offset) { index, step in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("\(index + 1)").font(.vcBodyBold.monospacedDigit()).frame(width: 12, alignment: .leading)
+                                    Text(step).fixedSize(horizontal: false, vertical: true)
+                                }
+                                .foregroundStyle(Theme.secondary)
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(Array(CloneScript.paragraphs.enumerated()), id: \.offset) { index, paragraph in
+                            if index > 0 { PauseMark() }
+                            Text(paragraph)
+                                .font(.vcDisplay)
+                                .lineSpacing(6)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("That's the end. Stop recording, send it to this Mac and upload it.").font(.vcTitle)
+                        Button("Upload recording\u{2026}") { picking = true }.buttonStyle(.vc(.primary, .m))
+                    }
+                }
+                .frame(maxWidth: ReadLayout.textWidth, alignment: .leading)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 32)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollBounceBehavior(.basedOnSize)
         }
-        // The whole pane takes the drop; it lights up while files are over it.
-        .background(dropping ? Theme.selection.opacity(0.5) : .clear, in: .rect(cornerRadius: Radius.card))
-        .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(dropping ? Theme.strong : .clear))
-        .padding(8)
+        .background(dropping ? Theme.selection.opacity(0.5) : .clear)
+        .overlay { if dropping { Rectangle().strokeBorder(Theme.strong) } }
+        .dropDestination(for: URL.self) { urls, _ in start(urls) } isTargeted: { dropping = $0 }
+    }
+
+    /// Any audio or video, laid out like the script screen: the header's buttons, and the whole pane takes a drop.
+    private var anyFileView: some View {
+        VStack(spacing: 0) {
+            PanelHeader {
+                Text(title)
+            } actions: {
+                Button("Cancel") { onDone(nil) }.buttonStyle(.vc(.secondary, .s))
+                Button("Choose files\u{2026}") { picking = true }.buttonStyle(.vc(.primary, .s))
+            }
+            EmptyState(title: "Drop audio or video files here",
+                       message: "A podcast, a video or an old recording. Best with one person talking and no music.") {
+                Button("Choose files\u{2026}") { picking = true }.buttonStyle(.vc(.secondary, .m))
+            }
+        }
+        .background(dropping ? Theme.selection.opacity(0.5) : .clear)
+        .overlay { if dropping { Rectangle().strokeBorder(Theme.strong) } }
         .dropDestination(for: URL.self) { urls, _ in start(urls) } isTargeted: { dropping = $0 }
     }
 
@@ -952,60 +971,21 @@ struct FileCloneView: View {
         screen("Who do you want to clone?", bottom: "Cancel", action: { onDone(nil) }) {
             VStack(spacing: 4) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
-                    SpeakerRow(number: index + 1, clips: group) { choose(group) }
+                    SpeakerRow(number: index + 1, clips: group) { create(group) }
                 }
             }
             .frame(width: 440)
         }
     }
 
-    private var reviewView: some View {
-        let kept = clips.filter(\.keep)
-        let ready = !kept.isEmpty && !kept.contains { $0.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return VStack(spacing: 0) {
-            PanelHeader {
-                Text(title.isEmpty ? "Untitled voice" : title)
-            } actions: {
-                if groups.count > 1 {
-                    Button("Back") { stage = .speakers }.buttonStyle(.vc(.secondary, .s))
-                }
-                Button("Cancel") { onDone(nil) }.buttonStyle(.vc(.secondary, .s))
-                Button("Create voice", action: create).buttonStyle(.vc(.primary, .s)).disabled(!ready)
-            }
-            ScrollView {
-                // The header scrolls with the rows, so a scroll bar that takes room can't shift the rows under it.
-                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        ForEach($clips) { $clip in
-                            FileClipRow(clip: $clip)
-                            Theme.rule.frame(height: 1)
-                        }
-                    } header: {
-                        HStack(spacing: 12) {
-                            Text("\(kept.count) of \(clips.count) clips").frame(maxWidth: .infinity, alignment: .leading)
-                            Color.clear.frame(width: FileColumn.issues)
-                            Text("Length").frame(width: FileColumn.length, alignment: .trailing)
-                            Text("Tone").padding(.leading, 6).frame(width: FileColumn.tone, alignment: .leading)
-                        }
-                        .font(.vcCaptionBold.monospacedDigit())
-                        .foregroundStyle(Theme.secondary)
-                        .padding(.horizontal, 16)
-                        .frame(height: 28)
-                        .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
-                        .background(Theme.content)
-                    }
-                }
-            }
-            .scrollBounceBehavior(.basedOnSize)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-
     /// Cuts the files, then groups the clips by speaker. Returns false when nothing dropped is audio or video.
     private func start(_ urls: [URL]) -> Bool {
         let media = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .audiovisualContent) == true }
-        guard !media.isEmpty, stage == .pick else { return false }
+        guard stage == .pick else { return false }
+        guard !media.isEmpty else {
+            if !urls.isEmpty { store.error = "That isn't an audio or video file. Upload the recording itself, such as an M4A or MP4." }
+            return false
+        }
         let folder = FileManager.default.temporaryDirectory.appending(path: "VocalCord-files-\(UUID().uuidString)", directoryHint: .isDirectory)
         self.folder = folder
         task = Task {
@@ -1016,40 +996,57 @@ struct FileCloneView: View {
                 stage = .grouping
                 working.start()
                 groups = try await store.groupBySpeaker(all, progress: working.callback)
-                if groups.count > 1 { stage = .speakers } else { choose(groups.first ?? all) }
+                if groups.count > 1 {
+                    stage = .speakers
+                    working.active = false
+                } else {
+                    create(groups.first ?? all)
+                }
             } catch {
                 if !(error is CancellationError) {
                     store.error = "Couldn't use \(media.count > 1 ? "these files" : "this file"). \(error.localizedDescription)"
                 }
                 discard()
                 stage = .pick
+                working.active = false
             }
-            working.active = false
         }
         return true
     }
 
-    private func choose(_ group: [FileClip]) {
-        clips = group
-        stage = .review
-    }
-
-    private func create() {
+    /// Makes the voice from the speaker's clean clips, or, when none is clean, from those of a usable length, and opens
+    /// it. The audition that picks its main take runs on in the store, so leaving the screen doesn't stop it; the voice
+    /// page's Audition button shows it working.
+    private func create(_ group: [FileClip]) {
         guard let folder else { return }
+        var clips = group
+        if !clips.contains(where: \.keep) {
+            for index in clips.indices where (3...20).contains(clips[index].duration) { clips[index].keep = true }
+        }
+        guard clips.contains(where: \.keep) else {
+            store.error = "No part of this recording is 3 to 20 seconds of clear speech. "
+                + (script ? "Read the script again, stopping at each pause, and upload that." : "Try a clearer recording.")
+            discard()
+            stage = .pick
+            working.active = false
+            return
+        }
         do {
             let id = try store.createVoice(name: name, from: folder, clips: clips)
             self.folder = nil
-            stage = .auditioning
-            working.start()
-            task = Task {
-                do { try await store.audition(id, progress: working.callback) } catch {
-                    if !(error is CancellationError) { store.error = "Audition failed. \(error.localizedDescription)" }
+            working.active = false
+            let store = store
+            Task {
+                do { try await store.audition(id) { _ in } } catch {
+                    store.error = "Couldn't pick the best take. Click Audition to try again. \(error.localizedDescription)"
                 }
-                working.active = false
-                onDone(id)
             }
+            onDone(id)
         } catch {
             store.error = "Couldn't create this voice. \(error.localizedDescription)"
+            discard()
+            stage = .pick
+            working.active = false
         }
     }
 
@@ -1059,10 +1056,20 @@ struct FileCloneView: View {
     }
 }
 
-private enum FileColumn {
-    static let issues: CGFloat = 170
-    static let length: CGFloat = 64
-    static let tone: CGFloat = 110
+/// Where the reader stops for about two seconds: the script's pause chip, between paragraphs.
+private struct PauseMark: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "pause.fill").font(.system(size: 9))
+            Text("pause 2 s")
+        }
+        .font(.vcCaptionBold)
+        .foregroundStyle(Theme.secondary)
+        .padding(.horizontal, 6)
+        .frame(height: 20)
+        .background(Theme.fill, in: .rect(cornerRadius: Radius.chip))
+        .accessibilityLabel("Pause for about two seconds")
+    }
 }
 
 struct SpeakerRow: View {
@@ -1093,49 +1100,5 @@ struct SpeakerRow: View {
         .frame(height: 40)
         .background(hovered ? Theme.hover : .clear, in: .rect(cornerRadius: Radius.row))
         .onHover { hovered = $0 }
-    }
-}
-
-struct FileClipRow: View {
-    @Binding var clip: FileClip
-
-    var body: some View {
-        let warnings = clip.issues.map(\.label) + (clip.duration < 3 ? ["Too short"] : clip.duration > 20 ? ["Too long"] : [])
-        HStack(spacing: 12) {
-            Toggle("Use clip", isOn: $clip.keep).toggleStyle(.checkbox).labelsHidden()
-            PlayButton(url: clip.url)
-            SmallWaveform(url: clip.url).frame(width: 56, height: 20)
-            TextField("Transcript", text: $clip.transcript, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...3)
-                .foregroundStyle(clip.keep ? Theme.text : Theme.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            // ZStack, not Group: an empty Group would drop the column's fixed width.
-            ZStack(alignment: .leading) {
-                if !warnings.isEmpty {
-                    Warning(text: warnings.joined(separator: ", ")).lineLimit(1).help(warnings.joined(separator: ", "))
-                }
-            }
-            .frame(width: FileColumn.issues, alignment: .leading)
-            Text(formatTime(clip.duration)).monospacedDigit().frame(width: FileColumn.length, alignment: .trailing)
-            Menu {
-                Picker("Tone", selection: $clip.tone) {
-                    ForEach(Tone.all, id: \.self) { Text($0) }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
-            } label: {
-                InlinePopupLabel(title: clip.tone)
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .frame(width: FileColumn.tone, alignment: .leading)
-            .accessibilityLabel("Tone, \(clip.tone)")
-        }
-        .font(.vcBody)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .frame(minHeight: 40)
     }
 }

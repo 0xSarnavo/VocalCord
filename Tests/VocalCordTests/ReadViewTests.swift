@@ -139,14 +139,14 @@ let offscreenFolder = URL(filePath: ProcessInfo.processInfo.environment["SCRIPTT
 @MainActor
 func readFixture(_ lines: [String]) async throws -> (projects: ProjectStore, voices: VoiceStore, preview: VocalCord.Preview, player: Player, id: String) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 3, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
     let projects = ProjectStore(root: try tempFolder(), exportsRoot: try tempFolder())
     let id = projects.create(name: "Read")
     projects.addLines(lines, to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     for _ in 0..<1000 where projects.progress != nil || !projects.applying.isEmpty || !projects.queued.isEmpty {
         try await Task.sleep(for: .milliseconds(10))
     }

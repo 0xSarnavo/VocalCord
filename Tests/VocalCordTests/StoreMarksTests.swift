@@ -9,7 +9,7 @@ import Testing
 @MainActor private func marksFixture(delay: Duration = .zero, lines: [String]) throws -> (ProjectStore, VoiceStore, FakeEngine, String) {
     let engine = FakeEngine(delay: delay)
     let voices = VoiceStore(root: try tempFolder(), engine: engine)
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
@@ -38,7 +38,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
 @MainActor @Test func renderWithMarksKeepsARawSourceAndChoosesTheMarkedVersion() async throws {
     let (projects, voices, engine, id) = try marksFixture(lines: ["Hello there [pause 0.5] my friend."])
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     #expect(projects.error == nil)
     let line = try lineIn(projects, id)
@@ -67,7 +67,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
 @MainActor @Test func renderWithoutMarksMakesOneVersionAsBefore() async throws {
     let (projects, voices, engine, id) = try marksFixture(lines: ["Hello there."])
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     let line = try lineIn(projects, id)
     #expect(engine.calls.all == ["render: Hello there."])
@@ -79,7 +79,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
 @MainActor @Test func aMarksOnlyEditIsAppliedWithoutRendering() async throws {
     let (projects, voices, engine, id) = try marksFixture(lines: ["One two three."])
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     let plain = try #require(try lineIn(projects, id).chosenVersion)
 
@@ -87,7 +87,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     projects.setText("One [pause 0.3] two three.", line: try lineIn(projects, id).id, in: id)
     var line = try lineIn(projects, id)
     #expect(line.needsRender && !line.needsVoice && line.markSource?.id == plain.id)
-    let url = try #require(projects.commitLine(line.id, in: id, voices: voices))
+    let url = try #require(projects.commitLine(line.id, in: id, voices: voices, render: true))
     let played = try await url.value
     line = try lineIn(projects, id)
     let marked = try #require(line.chosenVersion)
@@ -102,28 +102,28 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
     // Taking the marks out again chooses the plain render; nothing is made.
     projects.setText("One two three.", line: line.id, in: id)
-    #expect(projects.commitLine(line.id, in: id, voices: voices) != nil)
+    #expect(projects.commitLine(line.id, in: id, voices: voices, render: true) != nil)
     #expect(try lineIn(projects, id).chosen == plain.id && engine.calls.count("applyMarks") == 1)
     // Nothing needed: no task.
-    #expect(projects.commitLine(line.id, in: id, voices: voices) == nil)
+    #expect(projects.commitLine(line.id, in: id, voices: voices, render: true) == nil)
 
-    // The toolbar's Render applies marks too, rather than rendering.
+    // The toolbar's Render reads the script again (one take), then puts the marks on the new render.
     projects.setText("One two [breath] three.", line: line.id, in: id)
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
-    #expect(engine.calls.count("render") == 1 && engine.calls.count("applyMarks") == 2)
+    #expect(engine.calls.all.suffix(2) == ["render: One two three.", "applyMarks: \(try lineIn(projects, id).versions.last { $0.raw == true }!.id).wav"])
     #expect(try lineIn(projects, id).chosenVersion?.text == "One two [breath] three.")
 }
 
 @MainActor @Test func aSayOrStressChangeRenders() async throws {
     let (projects, voices, engine, id) = try marksFixture(lines: ["Meet Kuber today."])
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     let lineID = try lineIn(projects, id).id
 
     projects.setText("Meet [say Koo-ber]Kuber[/say] today.", line: lineID, in: id)
     #expect(try lineIn(projects, id).needsVoice)
-    _ = try await #require(projects.commitLine(lineID, in: id, voices: voices)).value
+    _ = try await #require(projects.commitLine(lineID, in: id, voices: voices, render: true)).value
     #expect(engine.calls.all.last == "render: Meet Koo-ber today.")
     var line = try lineIn(projects, id)
     #expect(line.chosenVersion?.raw == nil && line.chosenVersion?.text == line.text && !line.needsRender)
@@ -131,7 +131,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     // Stress changes what the voice is told, then lifts the words after the render.
     projects.setText("Meet [say Koo-ber]Kuber[/say] [stress]today.[/stress]", line: lineID, in: id)
     #expect(try lineIn(projects, id).needsVoice)
-    _ = try await #require(projects.commitLine(lineID, in: id, voices: voices)).value
+    _ = try await #require(projects.commitLine(lineID, in: id, voices: voices, render: true)).value
     #expect(engine.calls.count("render") == 3)
     #expect(engine.calls.all.suffix(2).first == "render: Meet Koo-ber today. | stress: today")
     line = try lineIn(projects, id)
@@ -209,7 +209,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
 @MainActor @Test func aReplacedMarkedVersionIsDroppedUnlessSomethingUsesIt() async throws {
     let (projects, voices, engine, id) = try marksFixture(lines: ["One [pause 0.3] two three."])
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     let lineID = try lineIn(projects, id).id
     let raw = try lineIn(projects, id).versions[0], first = try #require(try lineIn(projects, id).chosenVersion)
@@ -244,10 +244,10 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 @MainActor @Test func commitsQueueBehindTheRenderInOrder() async throws {
     let (projects, voices, engine, id) = try marksFixture(delay: .milliseconds(40), lines: ["Line A.", "Line B.", "Line C."])
     let ids = try #require(projects.project(id)?.lines.map(\.id))
-    let a = try #require(projects.commitLine(ids[0], in: id, voices: voices))
-    let b = try #require(projects.commitLine(ids[1], in: id, voices: voices))
-    let c = try #require(projects.commitLine(ids[2], in: id, voices: voices))
-    let again = try #require(projects.commitLine(ids[1], in: id, voices: voices))
+    let a = try #require(projects.commitLine(ids[0], in: id, voices: voices, render: true))
+    let b = try #require(projects.commitLine(ids[1], in: id, voices: voices, render: true))
+    let c = try #require(projects.commitLine(ids[2], in: id, voices: voices, render: true))
+    let again = try #require(projects.commitLine(ids[1], in: id, voices: voices, render: true))
     #expect(projects.queued == [ids[1], ids[2]])   // one entry per line
 
     let urls = [try await a.value, try await b.value, try await c.value, try await again.value]
@@ -261,7 +261,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 @MainActor @Test func cancelClearsTheQueue() async throws {
     let (projects, voices, engine, id) = try marksFixture(delay: .milliseconds(400), lines: ["Line A.", "Line B.", "Line C."])
     let ids = try #require(projects.project(id)?.lines.map(\.id))
-    let tasks = try ids.map { try #require(projects.commitLine($0, in: id, voices: voices)) }
+    let tasks = try ids.map { try #require(projects.commitLine($0, in: id, voices: voices, render: true)) }
     #expect(projects.queued == [ids[1], ids[2]])
     try await Task.sleep(for: .milliseconds(50))
     projects.cancel()
@@ -295,7 +295,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     let (projects, voices, engine, id) = try marksFixture(lines: ["One two three four five six seven eight."])
     let lineID = try lineIn(projects, id).id
     #expect(projects.paceReport(line: lineID, in: id) == nil)   // no render yet
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await settle(projects)
     let plain = try #require(try lineIn(projects, id).chosenVersion)
 
@@ -332,7 +332,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
 
 @MainActor @Test func segmentsNameTheirVersion() async throws {
     let (projects, voices, _, id) = try marksFixture(lines: ["One.", "Two.", "Not yet."])
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     try await settle(projects)
     projects.setText("Not yet, changed.", line: try lineIn(projects, id, 2).id, in: id)
     var project = try #require(projects.project(id))

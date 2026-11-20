@@ -84,13 +84,21 @@ private func fakeEngineFolder() throws -> URL {
 
 // MARK: Projects
 
+/// Each line with text rendered on its own, one take per line, for fixtures that want every line's render to be the
+/// whole reference take. The app's Render reads the script as one take (`renderScript`).
+@MainActor func renderEachLine(_ projects: ProjectStore, _ id: String, voices: VoiceStore) async throws {
+    for line in projects.project(id)?.lines ?? [] where !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        try await projects.rerender(line.id, in: id, voices: voices)?.value
+    }
+}
+
 @MainActor private func waitForRender(_ projects: ProjectStore) async throws {
     while projects.progress != nil { try await Task.sleep(for: .milliseconds(20)) }
 }
 
 @MainActor @Test func renderBatchesScoresAndKeepsVersions() async throws {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
@@ -105,12 +113,14 @@ private func fakeEngineFolder() throws -> URL {
     #expect(lines.allSatisfy { $0.voiceID == voiceID && $0.tone == "Neutral" && $0.needsRender })
     projects.setTone("Happy", line: lines[1].id, in: id)
 
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await waitForRender(projects)
     #expect(projects.error == nil)
     lines = try #require(projects.project(id)).lines
     let first = try #require(lines[0].chosenVersion), second = try #require(lines[1].chosenVersion)
-    #expect(!first.direction && second.direction && second.tone == "Happy")
+    // While tones are hidden every line reads in Neutral, from the Neutral take.
+    let happy = Tone.enabled ? "Happy" : "Neutral"
+    #expect(!first.direction && second.direction == Tone.enabled && second.tone == happy)
     #expect(first.scores != nil && first.referenceHuman == 3.5)
     #expect(voices.voice(voiceID)?.takes.first?.human == 3.5)
     #expect(FileManager.default.fileExists(atPath: projects.audioURL(first, projectID: id).path))
@@ -123,7 +133,7 @@ private func fakeEngineFolder() throws -> URL {
     projects.compare([lines[1].id], tones: ["Confident", "Sad"], in: id, voices: voices)
     try await waitForRender(projects)
     let line = try #require(projects.project(id)?.lines[1])
-    #expect(line.versions.map(\.tone) == ["Happy", "Happy", "Confident", "Sad"])
+    #expect(line.versions.map(\.tone) == [happy, happy, "Confident", "Sad"])
     #expect(line.chosen == line.versions[1].id)
     #expect(line.versions.allSatisfy { $0.scores != nil })
 
@@ -166,29 +176,65 @@ final class ScoreCounter: Sendable {
     #expect(paced.pace == 1.5 && paced.referencePace == 2)
 }
 
-@MainActor @Test func renderRetriesUntilALinePassesAndKeepsTheBest() async throws {
-    let counter = ScoreCounter()
+@MainActor @Test func renderMakesOneVersionPerLineEvenWhenItFails() async throws {
     let engine = FakeEngine(delay: .zero, scores: { _, text in
         guard text != "Hello." else { return nil }            // the take's own Human score
-        let fails = text.hasPrefix("Never") || counter.next(text) <= 2
-        return Scores(likeYou: fails ? 50 : 95, human: 3.6, words: 100, heard: text)
+        return Scores(likeYou: text.hasPrefix("Never") ? 50 : 95, human: 3.6, words: 100, heard: text)
     })
     let voices = VoiceStore(root: try tempFolder(), engine: engine)
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)   // long enough to judge Like you
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
     let projects = ProjectStore(root: try tempFolder())
-    let id = projects.create(name: "Retry")
-    projects.addLines(["Third time lucky.", "Never good enough."], to: id, voices: voices)
+    let id = projects.create(name: "Once")
+    projects.addLines(["First time lucky.", "Never good enough."], to: id, voices: voices)
 
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     try await waitForRender(projects)
-    let lines = try #require(projects.project(id)?.lines)
-    #expect(lines[0].versions.count == 3 && lines[0].chosen == lines[0].versions[2].id && lines[0].chosenVersion?.passes == true)
-    #expect(lines[1].versions.count == Version.tries && lines[1].chosenVersion?.passes == false)
-    #expect(projects.error?.hasPrefix("Line 2 still has a flag after \(Version.tries) tries") == true)
-    #expect(projects.renderTry == nil)
+    var lines = try #require(projects.project(id)?.lines)
+    #expect(lines[0].versions.count == 1 && lines[0].chosen == lines[0].versions[0].id && lines[0].chosenVersion?.passes == true)
+    // A flagged line keeps its one version and its flag; nothing renders again until the user asks.
+    #expect(lines[1].versions.count == 1 && lines[1].chosen == lines[1].versions[0].id && lines[1].chosenVersion?.passes == false)
+    #expect(projects.error == nil)
+
+    // Render again: one more version, chosen.
+    let again = try #require(projects.rerender(lines[1].id, in: id, voices: voices))
+    try await again.value
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines[1].versions.count == 2 && lines[1].chosen == lines[1].versions[1].id)
+}
+
+@MainActor @Test func anEditWaitsForRenderButMarksApplyAtOnce() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me")
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 4, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "Edits")
+    projects.addLines(["Say it once."], to: id, voices: voices)
+    var line = try #require(projects.project(id)?.lines.first)
+
+    // New words without Render: nothing renders and nothing waits.
+    #expect(projects.commitLine(line.id, in: id, voices: voices, render: false) == nil)
+    #expect(projects.progress == nil && projects.queued.isEmpty && projects.project(id)?.lines[0].versions.isEmpty == true)
+
+    // Render renders it once.
+    _ = try await #require(projects.commitLine(line.id, in: id, voices: voices, render: true)).value
+    line = try #require(projects.project(id)?.lines.first)
+    #expect(line.versions.count == 1 && !line.needsRender)
+
+    // A pause alone applies without Render, from that version.
+    projects.setText("Say it [pause 0.5] once.", line: line.id, in: id)
+    let url = try await #require(projects.commitLine(line.id, in: id, voices: voices, render: false)).value
+    line = try #require(projects.project(id)?.lines.first)
+    #expect(url != nil && !line.needsRender && line.chosenVersion?.source == line.versions[0].id)
+
+    // New words wait again.
+    projects.setText("Say it twice.", line: line.id, in: id)
+    #expect(projects.commitLine(line.id, in: id, voices: voices, render: false) == nil)
+    #expect(projects.project(id)?.lines[0].needsRender == true)
 }
 
 @MainActor @Test func unreadableProjectIsNeverOverwritten() throws {
@@ -267,7 +313,7 @@ final class ScoreCounter: Sendable {
 
 @MainActor @Test func exportListsOutputsAndKeepsChosenTakes() async throws {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
@@ -275,7 +321,7 @@ final class ScoreCounter: Sendable {
     let projects = ProjectStore(root: root, exportsRoot: movies)
     let id = projects.create(name: "Launch/film")
     projects.addLines(["One.", "Two."], to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     try await waitForRender(projects)
 
     let options = ExportOptions(format: "m4a", srt: true)
@@ -378,7 +424,7 @@ func realEngineRendersAndScoresTwoLines() async throws {
     // Progress steps: each render 10, each score 1, out of 22.
     let clock = ContinuousClock(), start = clock.now
     var marks: [Duration] = []
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     while let progress = projects.progress {
         if marks.count < 2, progress >= Double(marks.count + 1) * 10 / 22 - 0.001 { marks.append(clock.now - start) }
         try await Task.sleep(for: .milliseconds(50))
@@ -394,4 +440,101 @@ func realEngineRendersAndScoresTwoLines() async throws {
         print("E2E line \(index + 1): \(String(format: "%.2f", version.duration)) s, like you \(scores.likeYou)%, "
               + "human \(scores.human) (take \(version.referenceHuman ?? 0)), words \(scores.words)%, heard \"\(scores.heard)\"")
     }
+}
+
+@Test func consistencyNotesTheLineThatSoundsUnlikeTheRest() {
+    func line(_ id: String, pitch: Double = 110, pace: Double = 3, like: Int = 75, seconds: Double = 5) -> Line {
+        let version = Version(id: "v\(id)", text: "Hi there.", voiceID: "me", tone: "Neutral", direction: false, seed: 1,
+                              duration: seconds, createdAt: .now,
+                              scores: Scores(likeYou: like, human: 3.5, words: 100, heard: "Hi there.", pitchHz: pitch, pace: pace))
+        return Line(id: id, text: "Hi there.", voiceID: "me", versions: [version], chosen: version.id)
+    }
+    // Two lines have no "rest" to compare with.
+    #expect(Consistency.notes([line("a"), line("b", pitch: 160)]).isEmpty)
+
+    let notes = Consistency.notes([line("a"), line("b", pitch: 112), line("c", pace: 3.3), line("d", like: 78),
+                                   line("e", pitch: 140, pace: 4.2, like: 55), line("short", like: 40, seconds: 2)])
+    #expect(notes.keys.sorted() == ["e"])
+    #expect(notes["e"] == ["Pitch 4.2 semitones higher than the other lines", "40% faster than the other lines",
+                           "Like you 55%, against 75% for the other lines"])
+
+    // A short line's pitch still counts; its pace and Like you don't.
+    #expect(Consistency.notes([line("a"), line("b"), line("c"), line("short", pitch: 85, pace: 6, like: 30, seconds: 2)])
+        == ["short": ["Pitch 4.5 semitones lower than the other lines"]])
+}
+
+@MainActor @Test func renderReadsTheScriptAsOneTakeAndCutsItIntoLines() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me")
+    let wav = try tempFolder().appending(path: "take.wav")
+    // Three bursts of "speech" with silence between them, so the cuts have quiet places to land.
+    let burst = (0..<24000).map { Float(0.3 * sin(2 * .pi * 220 * Double($0) / 24000)) }
+    let gap = [Float](repeating: 0, count: 12000)
+    try writeWAV((gap + burst + gap + burst + gap + burst + gap)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let other = voices.createVoice(name: "Narrator")
+    try writeWAV((gap + burst + gap)[...], rate: 24000, to: wav)
+    try voices.addTake(other, file: wav, tone: "Neutral", transcript: "Hi.", issues: [])
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "One take")
+    projects.addLines(["One.", "Two.", "Three.", "Four."], to: id, voices: voices)
+    let ids = try #require(projects.project(id)?.lines.map(\.id))
+    projects.setVoice(other, line: ids[3], in: id)
+    let engine = try #require(voices.engine as? FakeEngine)
+
+    try await #require(projects.renderScript(id, voices: voices)).value
+    // Lines 1-3 share a voice: one render, timed once, cut in three. Line 4's voice is another take.
+    #expect(engine.calls.all.filter { $0.hasPrefix("render:") } == ["render: One. Two. Three.", "render: Four."])
+    #expect(engine.calls.count("timeWords") == 1)
+    let lines = try #require(projects.project(id)?.lines)
+    #expect(lines.allSatisfy { $0.versions.count == 1 && $0.chosen == $0.versions[0].id && $0.chosenVersion?.scores != nil })
+    let pieces = lines.prefix(3).map { $0.versions[0].duration }
+    // Each piece is about its own burst, with the silence between lines left out.
+    #expect(pieces.allSatisfy { $0 > 0.9 && $0 < 1.4 }, "\(pieces)")
+    #expect(Set(lines.prefix(3).map { $0.versions[0].seed }).count == 1)
+
+    // Render again: a new take for every line, the old versions kept.
+    try await #require(projects.renderScript(id, voices: voices)).value
+    #expect(try #require(projects.project(id)?.lines).allSatisfy { $0.versions.count == 2 && $0.chosen == $0.versions[1].id })
+}
+
+@Test func consistencyComparesOnlyLinesInTheSameVoice() {
+    func line(_ id: String, voice: String, pitch: Double) -> Line {
+        let version = Version(id: "v\(id)", text: "Hi there.", voiceID: voice, tone: "Neutral", direction: false, seed: 1,
+                              duration: 5, createdAt: .now,
+                              scores: Scores(likeYou: 75, human: 3.5, words: 100, heard: "Hi there.", pitchHz: pitch, pace: 3))
+        return Line(id: id, text: "Hi there.", voiceID: voice, versions: [version], chosen: version.id)
+    }
+    // A low voice and a high one are each steady: nothing to note.
+    let lines = ["a", "b", "c"].map { line($0, voice: "low", pitch: 110) } + ["d", "e", "f"].map { line($0, voice: "high", pitch: 200) }
+    #expect(Consistency.notes(lines).isEmpty)
+    #expect(Consistency.notes(lines + [line("g", voice: "high", pitch: 260)]).keys.sorted() == ["g"])
+}
+
+@MainActor @Test func renderKeepsTheEarlierVersionOfALineWithMarks() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me")
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "Marks")
+    projects.addLines(["One [pause 0.3] two."], to: id, voices: voices)
+    try await #require(projects.renderScript(id, voices: voices)).value
+    let first = try #require(projects.project(id)?.lines[0].chosenVersion)
+    try await #require(projects.renderScript(id, voices: voices)).value
+    let line = try #require(projects.project(id)?.lines[0])
+    // Both renders' marked versions stay listed, the new one chosen; the old file is still there.
+    #expect(line.visibleVersions.count == 2 && line.chosen != first.id && line.visibleVersions.contains { $0.id == first.id })
+    #expect(FileManager.default.fileExists(atPath: projects.audioURL(first, projectID: id).path))
+}
+
+@Test func lengthIsMeasuredAgainstOneTake() {
+    func line(_ text: String) -> Line { Line(text: text, voiceID: "me") }
+    // 299 + 1 space + 300 characters of speech = exactly one take; tags and empty lines don't count.
+    let full = [line(String(repeating: "a", count: 299) + " [pause 1]"), line(""), line(String(repeating: "b", count: 300))]
+    #expect(OneTake.length(full).share == 1 && OneTake.length(full).seconds == 35)
+    let over = full + [line(String(repeating: "c", count: 299))]
+    #expect(OneTake.length(over).share > 1 && OneTake.length(over).seconds == 53)
+    #expect(OneTake.length([]).seconds == 0)
 }

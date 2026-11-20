@@ -173,14 +173,14 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
 /// A project whose lines are rendered: 2 s each, with the default 0.5 s pause.
 @MainActor private func editFixture(lines: [String] = ["One.", "Two.", "Three."]) async throws -> (ProjectStore, VoiceStore, String) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Me", fullClone: false)
+    let voiceID = voices.createVoice(name: "Me")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
     let projects = ProjectStore(root: try tempFolder(), exportsRoot: try tempFolder())
     let id = projects.create(name: "Cut")
     projects.addLines(lines, to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     try await finishRender(projects)
     return (projects, voices, id)
 }
@@ -281,7 +281,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     let four = try #require(projects.project(id)?.lines.last)
     projects.moveLine(four.id, by: -1, in: id)   // the script reads 1, 2, 4, 3
     #expect(projects.linesNotOnTimeline(id).isEmpty)   // no render yet
-    projects.renderNeeded(id, voices: voices)
+    try await projects.rerender(four.id, in: id, voices: voices)?.value
     try await finishRender(projects)
     #expect(projects.linesNotOnTimeline(id) == [four.id] && projects.newRenders(id).isEmpty)
     #expect(projects.addLineToEdit(line: four.id, in: id))

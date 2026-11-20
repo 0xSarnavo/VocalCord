@@ -66,7 +66,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
 
 @MainActor private func scriptFixture() throws -> (ProjectStore, VoiceStore, String) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
-    let voiceID = voices.createVoice(name: "Sarnavo", fullClone: false)
+    let voiceID = voices.createVoice(name: "Sarnavo")
     let wav = try tempFolder().appending(path: "take.wav")
     try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
     try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
@@ -136,7 +136,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     // render_line renders the pending change as an unchosen version, then scores it.
     let render = try await callTool(bridge, "render_line", ["line": 2])
     #expect(!render.isError, "\(render.text)")
-    #expect(render.text.contains("\"chosen\":false") && render.text.contains("\"like_you\":") && render.text.contains("\"tone\":\"Happy\""))
+    #expect(render.text.contains("\"chosen\":false") && render.text.contains("\"like_you\":") && render.text.contains("\"tone\":\"\(Tone.enabled ? "Happy" : "Neutral")\""))
     let scores = try await callTool(bridge, "get_scores", ["line": 2])
     #expect(scores.text.contains("\"heard\":\"Now, let us take a closer look together.\""))
     #expect(try await callTool(bridge, "get_scores", ["line": 0]).isError)
@@ -144,7 +144,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
 
 @MainActor @Test func addLinesProposesNewLinesEvenIntoAnEmptyProject() async throws {
     let (projects, voices, _) = try scriptFixture()
-    let other = voices.createVoice(name: "Narrator", fullClone: false)
+    let other = voices.createVoice(name: "Narrator")
     let id = projects.create(name: "Origin story")
     let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
 
@@ -194,7 +194,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
 @MainActor private func timelineFixture() async throws -> (ProjectStore, VoiceStore, String) {
     let (projects, voices, id) = try scriptFixture()
     projects.addLines(["Here's what changed."], to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     try await waitForRenders(projects)
     return (projects, voices, id)
 }
@@ -204,7 +204,7 @@ private func readLines(_ fd: Int32, count: Int) -> [String] {
     projects.rerender(try #require(projects.project(id)?.lines[2].id), in: id, voices: voices)
     try await waitForRenders(projects)
     projects.addLines(["That's the plan."], to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    try await projects.rerender(try #require(projects.project(id)?.lines.last?.id), in: id, voices: voices)?.value
     try await waitForRenders(projects)
 }
 
@@ -330,7 +330,7 @@ private func object(_ text: String) throws -> [String: Any] {
     let (projects, voices, _) = try scriptFixture()
     let id = projects.create(name: "Pace")
     projects.addLines(["One two three four five six seven eight.", "Wait [pause 0.5] for it, [speed 80%]right now[/speed]."], to: id, voices: voices)
-    projects.renderNeeded(id, voices: voices)
+    try await renderEachLine(projects, id, voices: voices)
     try await settle(projects)
     projects.addLines(["Not rendered."], to: id, voices: voices)
     return (projects, voices, id)
@@ -458,7 +458,7 @@ private func object(_ text: String) throws -> [String: Any] {
 /// A voice with two Neutral takes, one Happy take and a pronunciation.
 @MainActor private func voiceFixture(delay: Duration = .zero) throws -> (VoiceStore, String) {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: delay))
-    let id = voices.createVoice(name: "Sarnavo", fullClone: false)
+    let id = voices.createVoice(name: "Sarnavo")
     for (tone, text, seconds) in [("Neutral", "I'll send the file in a minute.", 4.0), ("Neutral", "The meeting starts at ten.", 2.0),
                                   ("Happy", "That's great news!", 4.0)] {
         let wav = try tempFolder().appending(path: "take.wav")
@@ -539,15 +539,15 @@ private func object(_ text: String) throws -> [String: Any] {
     let result = try await callTool(bridge, "audition")
     #expect(!result.isError, "\(result.text)")
     let voice = try #require(voices.voice(id))
-    // Scores are saved; the main takes are only proposed.
-    #expect(voice.takes.allSatisfy { $0.score != nil } && voice.mains.isEmpty)
+    // Scores are saved; the main takes are only proposed. Tones are hidden, so only the Neutral takes are auditioned.
+    #expect(voice.takes("Neutral").allSatisfy { $0.score != nil } && voice.takes("Happy").allSatisfy { $0.score == nil } && voice.mains.isEmpty)
     let neutral = voice.takes("Neutral")
     let best = try #require(neutral.max { $0.score! < $1.score! })
     let bestNumber = try #require(voice.takes.firstIndex(of: best)) + 1
     let json = try #require(try JSONSerialization.jsonObject(with: Data(result.text.utf8)) as? [String: Any])
     let rows = try #require(json["best"] as? [[String: Any]])
-    #expect(rows.map { $0["tone"] as? String } == ["Neutral", "Happy"] && rows[0]["take"] as? Int == bestNumber)
-    // The first take is already Neutral's main, and the only Happy take is Happy's.
+    #expect(rows.map { $0["tone"] as? String } == ["Neutral"] && rows[0]["take"] as? Int == bestNumber)
+    // The first take is already Neutral's main.
     #expect(json["proposed"] as? [Int] == (bestNumber == 1 ? [] : [bestNumber]))
     #expect(best.proposal == (bestNumber == 1 ? nil : TakeProposal(main: true)) && voice.takes[2].proposal == nil)
 
@@ -564,7 +564,7 @@ private func object(_ text: String) throws -> [String: Any] {
 @MainActor @Test func acceptingAppliesTheChangeAndRejectingDropsIt() async throws {
     let (projects, voices, id) = try scriptFixture()
     let lines = try #require(projects.project(id)).lines
-    projects.renderNeeded(id, voices: voices)
+    projects.renderScript(id, voices: voices)
     while projects.progress != nil { try await Task.sleep(for: .milliseconds(20)) }
 
     // A proposal equal to the line is no proposal.
