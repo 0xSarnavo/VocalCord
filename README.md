@@ -34,7 +34,7 @@ VocalCord clones your voice and turns scripts into voiceovers, rendering everyth
 
 ## Install
 
-1. Download `VocalCord-1.4.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
+1. Download `VocalCord-1.5.0.dmg` from [Releases](../../releases) and drag VocalCord to Applications.
 2. VocalCord is not signed by Apple, so macOS blocks the first launch. Right-click VocalCord in Applications and choose **Open**. Or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 3. On first launch, VocalCord installs its voice engine and downloads the models, about 4.6 GB. This happens once.
 
@@ -53,7 +53,7 @@ Needs Xcode 26. In a clone of this repo:
 
 ```sh
 ./build.sh                # VocalCord.app, in this folder
-scripts/make-dmg.sh       # dist/VocalCord-1.4.0.dmg
+scripts/make-dmg.sh       # dist/VocalCord-1.5.0.dmg
 swift test
 ```
 
