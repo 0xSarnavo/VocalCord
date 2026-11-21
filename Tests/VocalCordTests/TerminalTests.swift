@@ -212,7 +212,7 @@ private func object(_ text: String) throws -> [String: Any] {
     try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any], "\(text)")
 }
 
-@MainActor @Test func getTimelineReadsTheTrackFilledFromTheScript() async throws {
+@MainActor @Test func getTimelineReadsTheTrackTheUserFilled() async throws {
     let (projects, voices, id) = try await timelineFixture()
     let empty = projects.create(name: "Empty")
     var open: String? = empty
@@ -226,10 +226,13 @@ private func object(_ text: String) throws -> [String: Any] {
 
     open = id
     #expect(projects.project(id)?.edit == nil)
+    // The first read opens it empty, every rendered line waiting to be added; then the user drags the takes in.
     var timeline = try object(try await callTool(bridge, "get_timeline").text)
-    // Filled from the script on the first read; the next read finds the same clips.
+    #expect(projects.project(id)?.edit == Edit() && (timeline["clips"] as? [Any])?.isEmpty == true)
+    #expect(timeline["lines_not_on_timeline"] as? [Int] == [1, 2, 3])
+    fillTimeline(projects, id)
     let edit = try #require(projects.project(id)?.edit)
-    _ = try await callTool(bridge, "get_timeline")
+    timeline = try object(try await callTool(bridge, "get_timeline").text)
     #expect(projects.project(id)?.edit == edit)
     #expect(timeline["project"] as? String == "Launch film" && timeline["duration"] as? Double == 7)
     var clips = try #require(timeline["clips"] as? [[String: Any]])
@@ -252,7 +255,7 @@ private func object(_ text: String) throws -> [String: Any] {
 @MainActor @Test func timelineEditsApplyInOrderToTheNumbersTheAgentRead() async throws {
     let (projects, voices, id) = try await timelineFixture()
     let bridge = ToolBridge(projects: projects, voices: voices, jev: Jev(keys: MemoryKeys(), send: FakeTypeSafe([:]).send)) { id }
-    _ = try await callTool(bridge, "get_timeline")
+    fillTimeline(projects, id)
     try await renderAfterTheTimeline(projects, voices, id)
     let before = try #require(projects.project(id)?.edit)
 
@@ -375,6 +378,7 @@ private func object(_ text: String) throws -> [String: Any] {
     let script = try #require(try object(try await callTool(bridge, "get_script").text)["lines"] as? [[String: Any]])
     #expect((script[1]["chosen_version"] as? [String: Any])?["of"] as? Int == 1)
     // The timeline shows the words spoken, without tags.
+    fillTimeline(projects, id)
     let clips = try #require(try object(try await callTool(bridge, "get_timeline").text)["clips"] as? [[String: Any]])
     #expect(clips[1]["text"] as? String == "Wait for it, right now.")
 

@@ -68,7 +68,7 @@ struct TimelineWordsSnapshots {
             "Then shape every word until it sounds just right.",
         ])
         #expect(projects.error == nil)
-        projects.startEdit(id)
+        fillTimeline(projects, id)
         let clips = try #require(projects.project(id)?.edit?.clips)
         #expect(clips.count == 3)
         // The first clip trimmed at both ends, the second sped up.

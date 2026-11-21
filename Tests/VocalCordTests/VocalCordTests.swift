@@ -4,6 +4,13 @@ import Synchronization
 import Testing
 @testable import VocalCord
 
+/// Puts each line's take in use on the timeline, whole and in script order: the timeline as it opened before it started
+/// empty. One undo step a take.
+@MainActor func fillTimeline(_ projects: ProjectStore, _ id: String) {
+    projects.startEdit(id)
+    for line in projects.project(id)?.lines ?? [] { if let chosen = line.chosen { projects.placeTake(chosen, at: .max, in: id) } }
+}
+
 func tempFolder() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(path: "VocalCordTests-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

@@ -9,10 +9,11 @@ struct GenerateView: View {
     @State private var exporting = false
     @AppStorage("terminalOpen") private var terminalOpen = false
     @AppStorage("terminalWidth") private var terminalWidth = 380.0
-    /// Preview and Outputs, in a strip under the script; folding them gives the script the room. Preview keeps its
-    /// state and playback while folded.
+    /// The Takes panel, in a strip under the script; folding it gives the script the room.
     @AppStorage("generateSideOpen") private var sideOpen = true
-    @AppStorage("generatePreviewHeight") private var previewHeight = 180.0
+    @AppStorage("generateTakesHeight") private var takesHeight = 220.0
+    /// The line whose takes the panel shows: the script row last clicked.
+    @State private var takesLine: String?
     /// Everything right of the sidebar, for the Terminal column's widest.
     @State private var width = 999.0
     /// The empty state's New project: the sidebar asks for the name, as its + does.
@@ -45,18 +46,18 @@ struct GenerateView: View {
         .sheet(isPresented: $exporting) { ExportSheet(projectID: selection) }
     }
 
-    /// Edge to edge: the script with Preview and Outputs in a strip under it, and the Terminal as a column on the right,
+    /// Edge to edge: the script with the Takes panel in a strip under it, and the Terminal as a column on the right,
     /// meeting at 1 pt dividers. The strip and the column resize from their dividers and fold away.
     private func workspace(_ project: Project) -> some View {
         let timeline = Timeline(project) { projects.audioURL($0, projectID: project.id) }
         return HStack(spacing: 0) {
             GeometryReader { proxy in
                 VStack(spacing: 0) {
-                    ScriptPane(project: project).id(project.id)
+                    ScriptPane(project: project, selectedLine: $takesLine).id(project.id)
                         .frame(maxHeight: .infinity)
                         .panel()
                     // The script keeps room for its header and a few lines.
-                    previewStrip(project, maxHeight: proxy.size.height - 250)
+                    takesStrip(project, maxHeight: proxy.size.height - 250)
                 }
             }
             if terminalOpen {
@@ -75,28 +76,21 @@ struct GenerateView: View {
         .focusedSceneValue(\.toggleSidePanel, toggleSide)
     }
 
-    @ViewBuilder private func previewStrip(_ project: Project, maxHeight: Double) -> some View {
+    @ViewBuilder private func takesStrip(_ project: Project, maxHeight: Double) -> some View {
         if sideOpen {
-            let range = Self.previewMinHeight...max(Self.previewMinHeight, maxHeight)
+            let range = Self.takesMinHeight...max(Self.takesMinHeight, maxHeight)
             VStack(spacing: 0) {
-                ResizeDivider(edge: .top, size: $previewHeight, range: range, label: "Resize preview")
-                HStack(spacing: 0) {
-                    PreviewPane(project: project) { sideOpen = false }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    PaneDivider()
-                    OutputsPane(project: project).id(project.id)
-                        .frame(width: Self.outputsWidth)
-                }
+                ResizeDivider(edge: .top, size: $takesHeight, range: range, label: "Resize takes")
+                TakesPanel(project: project, selection: $takesLine) { sideOpen = false }.id(project.id)
             }
-            .frame(height: previewHeight.clamped(range))
+            .frame(height: takesHeight.clamped(range))
         } else {
-            FoldedBottomPanel(title: "Preview") { sideOpen = true }
+            FoldedBottomPanel(title: "Takes") { sideOpen = true }
         }
     }
 
-    /// Preview's header, waveform and transport fit.
-    static let previewMinHeight = 152.0
-    static let outputsWidth = 280.0
+    /// The panel's header, the line heading, the column headings and a couple of takes.
+    static let takesMinHeight = 160.0
 
     private func toggleSide() { sideOpen.toggle() }
 
@@ -274,6 +268,8 @@ struct ScriptPane: View {
     @Environment(Preview.self) private var preview
     @Environment(Terminals.self) private var terminals
     let project: Project
+    /// The row last clicked, whose takes the Takes panel shows.
+    var selectedLine: Binding<String?> = .constant(nil)
     @AppStorage("scriptView") private var mode = ScriptViewMode.table
     @AppStorage("terminalOpen") private var terminalOpen = false
     @State private var splitText: String?
@@ -281,7 +277,6 @@ struct ScriptPane: View {
     @State private var comparing: [String]?
     @State private var customPace = false
     @State private var customValue = 150.0
-    @State private var confirmingSplit = false
     /// The table's width, to tell when it's too narrow for every column.
     @State private var tableWidth: CGFloat = 0
 
@@ -323,11 +318,6 @@ struct ScriptPane: View {
             }
             bottomBar
         }
-        .confirmationDialog("Split every line into sentences?", isPresented: $confirmingSplit, titleVisibility: .visible) {
-            Button("Split into sentences") { projects.splitAllIntoSentences(project.id) }
-        } message: {
-            Text(splitMessage)
-        }
         .sheet(isPresented: Binding(present: $splitText)) {
             SplitSheet(text: splitText ?? "") { lines in projects.addLines(lines, to: project.id, voices: voices) }
         }
@@ -348,17 +338,6 @@ struct ScriptPane: View {
     }
 
     private var renderable: [Line] { project.lines.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty } }
-
-    /// Lines of more than one sentence, which Split into sentences breaks up.
-    private var splittable: [Line] { project.lines.filter { $0.proposal == nil && Script.lines($0.text, by: .sentences).count > 1 } }
-
-    private var splitMessage: String {
-        let lines = splittable
-        let count = lines.map { Script.lines($0.text, by: .sentences).count }.reduce(0, +)
-        let onTimeline = lines.contains { line in project.edit?.clips.contains { $0.lineID == line.id } ?? false }
-        return "\(lines.count) \(lines.count == 1 ? "line becomes" : "lines become") \(count) lines, one sentence each, which need a render."
-            + (onTimeline ? " Their clips leave the timeline." : "") + " Their old renders stay on disk."
-    }
 
     private var table: some View {
         let minimum = Column.minimumWidth(jev: jev.added)
@@ -388,11 +367,11 @@ struct ScriptPane: View {
             // their separators run to both edges; the rows carry their own inset.
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
-                    let tags = project.tags
                     ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
                         LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
                                 lit: LineRow.lit(lit, in: line), paceTarget: project.paceTarget,
-                                onCompare: { comparing = [line.id] }, tags: tags)
+                                onCompare: { comparing = [line.id] }, selected: selectedLine.wrappedValue == line.id,
+                                onSelect: { selectedLine.wrappedValue = line.id })
                             .equatable()
                         Theme.rule.frame(height: 1)
                     }
@@ -544,18 +523,13 @@ struct ScriptPane: View {
         .frame(height: 28)
     }
 
-    /// One bar pinned under the script, in Table and Read alike: adding lines and splitting them into sentences on the left
-    /// (ghost buttons, their labels on the pane's 16 pt text edge), the script's length against one take and Render all
-    /// on the right.
+    /// One bar pinned under the script, in Table and Read alike: adding lines on the left (ghost buttons, their labels on
+    /// the pane's 16 pt text edge), the script's length against one take and Render all on the right.
     private var bottomBar: some View {
         HStack(spacing: 8) {
             Button { projects.addLines([""], to: project.id, voices: voices) } label: { Label("Add line", systemImage: "plus") }
             Button("Paste…") { splitText = NSPasteboard.general.string(forType: .string) ?? "" }
             Button("Import…") { importing = true }
-            if !splittable.isEmpty {
-                Button("Split into sentences…") { confirmingSplit = true }
-                    .help("Make each sentence its own line, to render, name and tag on its own")
-            }
             Spacer(minLength: 8)
             if !renderable.isEmpty { lengthMeter }
             renderButton
@@ -631,15 +605,14 @@ struct LineRow: View {
     /// The project's pace target, for the pace notes.
     let paceTarget: Double?
     let onCompare: () -> Void
-    /// The project's tags, for the Tag menu.
-    var tags: [String] = []
+    /// The row last clicked: the Takes panel shows its takes.
+    var selected = false
+    var onSelect: () -> Void = {}
     @State private var hovered = false
     @State private var versionHovered = false
     /// Applying marks takes a moment; a spinner shows only when it takes longer, so the usual case doesn't flash.
     @State private var slowApply = false
     @State private var confirmingDelete = false
-    @State private var confirmingSplit = false
-    @State private var naming: LineNaming?
 
     /// The bar beside a line's number: nothing while its render is current, grey while it has none or its text changed
     /// since, amber when the chosen version failed a check.
@@ -674,7 +647,6 @@ struct LineRow: View {
     var body: some View {
         let version = line.chosenVersion
         let scores = version?.scores
-        let sentences = Script.lines(line.text, by: .sentences).count
         let isApplying = projects.applying.contains(line.id)
         let playing = preview.currentLine == line.id
         // Top-aligned: in a tall line the number and values sit level with the text's first line, each in a band one
@@ -687,7 +659,6 @@ struct LineRow: View {
                 .frame(width: Column.number, height: VCSize.s.height, alignment: .leading)
             // The script rules the line breaks show under its text, for the pending change while there is one.
             VStack(alignment: .leading, spacing: 4) {
-                if line.name != nil || line.tag != nil { label }
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
                 } else {
@@ -742,7 +713,7 @@ struct LineRow: View {
         // Rectangular, between the full-width separators: rows are a table, not cards.
         .background(alignment: .leading) {
             ZStack(alignment: .leading) {
-                Rectangle().fill(playing ? Theme.selection : hovered ? Theme.hover : .clear)
+                Rectangle().fill(playing ? Theme.selection : selected ? Theme.fill : hovered ? Theme.hover : .clear)
                 if let color = Self.mark(line).color {
                     StatusBar(color: color).padding(.vertical, 8).padding(.leading, Column.edge)
                 }
@@ -756,34 +727,23 @@ struct LineRow: View {
             try? await Task.sleep(for: .milliseconds(400))
             if !Task.isCancelled { slowApply = true }
         }
-        .simultaneousGesture(TapGesture().onEnded { preview.seek(toLine: line.id) })
+        .simultaneousGesture(TapGesture().onEnded(onSelect))
         .contextMenu {
             if Tone.enabled {
                 Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
                 Divider()
             }
-            Button("Rename…") { naming = LineNaming(line, number: number, kind: .rename) }
-            LineTagMenu(projectID: projectID, line: line, tags: tags) { naming = LineNaming(line, number: number, kind: .tag) }
-            Button("Split into sentences…") { confirmingSplit = true }
-                .disabled(line.proposal != nil || sentences < 2)
-            Divider()
             Button("Move up") { projects.moveLine(line.id, by: -1, in: projectID) }.disabled(number == 1)
             Button("Move down") { projects.moveLine(line.id, by: 1, in: projectID) }.disabled(isLast)
             Divider()
             Button("Delete line…", role: .destructive) { confirmingDelete = true }
         }
-        .confirmationDialog("Delete \(line.title(number))?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .confirmationDialog("Delete line \(number)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete line", role: .destructive) { projects.deleteLine(line.id, in: projectID) }
         } message: {
             Text("Its clips leave the timeline. Its renders stay on disk.")
         }
-        .confirmationDialog("Split \(line.title(number)) into \(sentences) lines?",
-                            isPresented: $confirmingSplit, titleVisibility: .visible) {
-            Button("Split into sentences") { projects.splitIntoSentences(line.id, in: projectID) }
-        } message: {
-            Text("One sentence a line, each to render on its own. Its clips leave the timeline; its renders stay on disk.")
-        }
-        .lineNaming($naming, in: projectID)
+
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.accessibilityLabel(line, number: number))
     }
@@ -899,8 +859,10 @@ struct LineRow: View {
         }
     }
 
+    /// "v2 · Calm one": the take's number, then its name, tone and direction when it has them.
     private func versionTitle(_ version: Version, _ index: Int) -> String {
-        (["v\(index + 1)"] + (Tone.enabled ? [version.tone] : []) + (version.direction ? ["direction"] : [])).joined(separator: " · ")
+        (["v\(index + 1)"] + [version.name, version.tag].compactMap(\.self) + (Tone.enabled ? [version.tone] : []) + (version.direction ? ["direction"] : []))
+            .joined(separator: " · ")
     }
 
     /// What the action cell shows: a spinner while the line renders (or applies for a while), a clock while it waits for
@@ -977,18 +939,6 @@ struct LineRow: View {
         .accessibilityLabel(first ? "Render line \(number)" : "Re-render line \(number)")
     }
 
-    /// The line's name and tag, above its text.
-    private var label: some View {
-        HStack(spacing: 6) {
-            if let name = line.name {
-                Text(name).font(.vcCaptionBold).foregroundStyle(Theme.text).lineLimit(1)
-            }
-            if let tag = line.tag { TagChip(tag: tag) }
-        }
-        .onTapGesture(count: 2) { naming = LineNaming(line, number: number, kind: .rename) }
-        .help("Double-click to rename")
-    }
-
     // MARK: Editing and pace
 
     /// After an edit: applies changed pauses and speeds and plays the line. New words wait for the user to click Render.
@@ -1036,82 +986,12 @@ struct LineRow: View {
     }
 }
 
-/// A Rename or New tag alert for a line, from Generate's rows or Timeline's clips; both change the line, so its name and
-/// tag show the same in both tabs.
-struct LineNaming: Identifiable, Equatable {
-    enum Kind { case rename, tag }
-    var lineID: String
-    /// "Line 3", the placeholder and the default title.
-    var number: Int
-    var title: String
-    var name: String
-    var kind: Kind
-    var id: String { "\(lineID)-\(kind)" }
-
-    init(_ line: Line, number: Int, kind: Kind) {
-        (lineID, self.number, title, name, self.kind) = (line.id, number, line.title(number), line.name ?? "", kind)
-    }
-}
-
-private struct LineNamingAlert: ViewModifier {
-    @Environment(ProjectStore.self) private var projects
-    @Binding var request: LineNaming?
-    let projectID: String
-    @State private var text = ""
-
-    func body(content: Content) -> some View {
-        content
-            .onChange(of: request) { text = request?.kind == .rename ? request?.name ?? "" : "" }
-            .alert(request?.kind == .tag ? "New tag" : "Rename \(request?.title ?? "line")", isPresented: Binding(present: $request),
-                   presenting: request) { request in
-                TextField(request.kind == .tag ? "Intro, Hook…" : "Line \(request.number)", text: $text)
-                Button(request.kind == .tag ? "Add tag" : "Rename") {
-                    if request.kind == .tag {
-                        projects.setTag(text, line: request.lineID, in: projectID)
-                    } else {
-                        projects.renameLine(text, line: request.lineID, in: projectID)
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: { request in
-                Text(request.kind == .tag ? "A short label lines share, shown in Generate and Timeline."
-                     : "Leave it empty to show \u{201C}Line \(request.number)\u{201D}.")
-            }
-    }
-}
-
-extension View {
-    func lineNaming(_ request: Binding<LineNaming?>, in projectID: String) -> some View {
-        modifier(LineNamingAlert(request: request, projectID: projectID))
-    }
-}
-
-/// A line's Tag menu: the project's tags to pick from, a new one, or none.
-struct LineTagMenu: View {
-    @Environment(ProjectStore.self) private var projects
-    let projectID: String
-    let line: Line
-    let tags: [String]
-    let onNew: () -> Void
-
-    var body: some View {
-        Menu("Tag") {
-            ForEach(tags, id: \.self) { tag in
-                Toggle(tag, isOn: Binding(get: { line.tag == tag }, set: { projects.setTag($0 ? tag : nil, line: line.id, in: projectID) }))
-            }
-            if !tags.isEmpty { Divider() }
-            Button("New tag…", action: onNew)
-            if line.tag != nil { Button("Remove tag") { projects.setTag(nil, line: line.id, in: projectID) } }
-        }
-    }
-}
-
 extension LineRow: Equatable {
     /// The row's values without `onCompare`, which only captures the pane's state. The read-along clock rebuilds every
     /// row on each tick; with this only the playing one, whose `lit` changed, is redrawn.
     nonisolated static func == (a: LineRow, b: LineRow) -> Bool {
         a.projectID == b.projectID && a.line == b.line && a.number == b.number && a.isLast == b.isLast && a.lit == b.lit
-            && a.paceTarget == b.paceTarget && a.tags == b.tags
+            && a.paceTarget == b.paceTarget && a.selected == b.selected
     }
 }
 
@@ -1285,7 +1165,7 @@ private struct ProposalText: View {
 
 /// A score as a number, right-aligned so values line up row to row; a low one gets the amber triangle, a semibold
 /// value and its reason on hover. A dim one is shown but not judged. No score leaves the cell empty.
-private struct ScoreCell: View {
+struct ScoreCell: View {
     let value: String?
     let flag: String?
     var dim = false

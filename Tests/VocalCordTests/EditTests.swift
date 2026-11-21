@@ -12,24 +12,25 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
 
 // MARK: Edit
 
-@Test func editFillsFromTheScript() {
-    var project = Project(name: "P")
-    project.lines = [
-        Line(id: "a", text: "One.", voiceID: "me", pauseAfter: 0.5, versions: [version("a1", 1), version("a2", 1.5)], chosen: "a2"),
-        Line(id: "b", text: "Not rendered.", voiceID: "me"),
-        Line(id: "c", text: "Three.", voiceID: "me", pauseAfter: 12, versions: [version("c1", 2)], chosen: "c1"),
-        Line(id: "d", text: "Four.", voiceID: "me", pauseAfter: 0, versions: [version("d1", 0.75)], chosen: "d1"),
-    ]
-    let edit = Edit(project: project)
+@Test func takesPlacedOnTheTimelineKeepTheirOrderAndGaps() throws {
+    var edit = Edit()
+    // Dropped in any order: before a clip, or past the end; a gap over 10 s is clamped.
+    try edit.place(line: "c", version: "c1", duration: 2, gapAfter: 12, at: 0)
+    try edit.place(line: "a", version: "a2", duration: 1.5, gapAfter: 0.5, at: 0)
+    try edit.place(line: "d", version: "d1", duration: 0.75, gapAfter: 0, at: 99)
     #expect(edit.clips.map(\.lineID) == ["a", "c", "d"] && edit.clips.map(\.versionID) == ["a2", "c1", "d1"])
     #expect(edit.clips.map(\.end) == [1.5, 2, 0.75] && edit.clips.map(\.gapAfter) == [0.5, 10, 0])
-    #expect(edit.clips.allSatisfy { $0.isPlain(renderDuration: project.version($0.versionID)?.duration ?? 0) } && edit.kept.isEmpty)
+    #expect(zip(edit.clips, [1.5, 2, 0.75]).allSatisfy { $0.isPlain(renderDuration: $1) } && edit.kept.isEmpty)
     // The last gap is left off, and a time in a gap belongs to the clip before it.
     #expect(edit.starts == [0, 2, 14] && edit.duration == 14.75)
     #expect(edit.clip(at: 1.9)?.lineID == "a" && edit.clip(at: 2)?.lineID == "c" && edit.clip(at: 13)?.lineID == "c")
     #expect(edit.clip(at: 20)?.lineID == "d" && edit.clip(at: -1) == nil)
     #expect(edit.start(of: edit.clips[2].id) == 14 && edit.start(of: "gone") == nil)
-    #expect(Edit(project: Project(name: "Empty")).duration == 0)
+    #expect(Edit().duration == 0)
+    // The same take can go on twice; one too short to hear can't.
+    try edit.place(line: "a", version: "a2", duration: 1.5, gapAfter: 0.5, at: 3)
+    #expect(edit.clips.map(\.versionID) == ["a2", "c1", "d1", "a2"])
+    #expect(throws: AppError.self) { try edit.place(line: "x", version: "x1", duration: 0.01, gapAfter: 0, at: 0) }
 }
 
 @Test func splitAccountsForTempoAndSharesTheSettings() throws {
@@ -188,11 +189,14 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
 @MainActor @Test func timelineEditsSaveAndUndo() async throws {
     let (projects, _, id) = try await editFixture()
     #expect(projects.project(id)?.edit == nil && projects.linesNotOnTimeline(id).isEmpty && projects.newRenders(id).isEmpty)
+    // The timeline opens empty, and opening it isn't a step; each take dragged on is.
     projects.startEdit(id)
+    #expect(projects.project(id)?.edit == Edit() && !projects.canUndoEdit(id) && projects.linesNotOnTimeline(id).count == 3)
+    let lines = try #require(projects.project(id)?.lines)
+    for line in lines { #expect(projects.placeTake(try #require(line.chosen), at: .max, in: id)) }
+    #expect(!projects.placeTake("gone", at: 0, in: id) && projects.error == "This take no longer exists.")
     let filled = try #require(projects.project(id)?.edit)
-    #expect(filled.clips.map(\.versionID) == Edit(project: try #require(projects.project(id))).clips.map(\.versionID))
-    #expect(filled.duration == 7)
-    #expect(!projects.canUndoEdit(id))   // opening the timeline isn't a step
+    #expect(filled.clips.map(\.versionID) == lines.map(\.chosen) && filled.duration == 7)
 
     let ids = filled.clips.map(\.id)
     #expect(projects.splitClip(ids[0], at: 0.5, in: id))
@@ -221,19 +225,14 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
         projects.undoEdit(id)
         undos += 1
     }
-    #expect(undos == 8 && projects.project(id)?.edit == filled && projects.canRedoEdit(id))
+    #expect(undos == 11 && projects.project(id)?.edit == Edit() && projects.canRedoEdit(id))
+    for _ in 0..<3 { projects.redoEdit(id) }
+    #expect(projects.project(id)?.edit == filled)
     projects.redoEdit(id)
     #expect(projects.project(id)?.edit?.clips.count == 4 && projects.canRedoEdit(id))
     // A new edit after an undo drops the steps that were undone.
     #expect(projects.setClipGap(2, clip: ids[2], in: id))
     #expect(!projects.canRedoEdit(id))
-
-    // Reset fills it from the script again, and is undone like any edit.
-    let beforeReset = try #require(projects.project(id)?.edit)
-    projects.resetEdit(id)
-    #expect(projects.project(id)?.edit?.clips.map(\.versionID) == filled.clips.map(\.versionID))
-    projects.undoEdit(id)
-    #expect(projects.project(id)?.edit == beforeReset)
 
     // Only the last 100 steps are kept.
     for step in 0..<(ProjectStore.undoLimit + 5) { projects.setClipGap(Double(step % 2), clip: ids[2], in: id) }
@@ -245,93 +244,43 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     #expect(undos == ProjectStore.undoLimit)
 }
 
-@MainActor @Test func severalLinesAreAddedOrSwappedInAtOnce() async throws {
+@MainActor @Test func aNewTakeOnlyMarksTheClipUntilTheUserDragsItIn() async throws {
     let (projects, voices, id) = try await editFixture()
-    projects.startEdit(id)
-    let lines = try #require(projects.project(id)?.lines)
-    let first = try #require(projects.project(id)?.edit?.clips[0])
-    #expect(projects.splitClip(first.id, at: 1, in: id))
-    projects.rerender(lines[0].id, in: id, voices: voices)
-    try await finishRender(projects)
-    projects.rerender(lines[1].id, in: id, voices: voices)
-    try await finishRender(projects)
-    #expect(projects.newRenders(id).count == 2)
-    // Swap all in: each line's clips become its new render, in one step to undo.
-    #expect(projects.answerAllNewRenders(swapIn: true, in: id))
-    #expect(projects.newRenders(id).isEmpty && projects.project(id)?.edit?.clips.count == 3)
-    projects.undoEdit(id)
-    #expect(projects.newRenders(id).count == 2)
-    #expect(projects.answerAllNewRenders(swapIn: false, in: id) && projects.newRenders(id).isEmpty)
-
-    // Two new lines rendered after the timeline was made: Add all puts both on, in script order.
-    projects.addLines(["Four.", "Five."], to: id, voices: voices)
-    for line in try #require(projects.project(id)?.lines.suffix(2)) {
-        try await projects.rerender(line.id, in: id, voices: voices)?.value
-    }
-    #expect(projects.linesNotOnTimeline(id).count == 2)
-    #expect(projects.addAllLinesToEdit(id) && projects.linesNotOnTimeline(id).isEmpty)
-    let order = try #require(projects.project(id)?.edit?.clips.map(\.lineID))
-    #expect(Array(order.suffix(2)) == projects.project(id)?.lines.suffix(2).map(\.id))
-}
-
-@MainActor @Test func newRendersAskBeforeReplacingCuts() async throws {
-    let (projects, voices, id) = try await editFixture()
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let lines = try #require(projects.project(id)?.lines)
     let first = try #require(projects.project(id)?.edit?.clips[0])
     #expect(projects.splitClip(first.id, at: 1, in: id))
 
+    // A new take of a line on the timeline leaves its clips as they are; the agent's get_timeline still lists it.
     projects.rerender(lines[0].id, in: id, voices: voices)
     try await finishRender(projects)
-    var line = try #require(projects.project(id)?.lines[0])
-    #expect(line.versions.count == 2 && line.chosen == line.versions[1].id)
-    // The cuts stay until the user answers.
-    #expect(projects.newRenders(id) == [line.id: line.versions[1].id])
+    let line = try #require(projects.project(id)?.lines[0])
+    #expect(line.versions.count == 2 && projects.newRenders(id) == [line.id: line.versions[1].id])
     #expect(projects.project(id)?.edit?.clips.filter { $0.lineID == line.id }.map(\.versionID) == [first.versionID, first.versionID])
-    #expect(projects.keepEditedClip(line: line.id, in: id))
+    // Dragged in after the first clip: both takes of the line are on.
+    #expect(projects.placeTake(line.versions[1].id, at: 1, in: id))
+    #expect(projects.project(id)?.edit?.clips.map(\.versionID).prefix(3) == [first.versionID, line.versions[1].id, first.versionID])
     #expect(projects.newRenders(id).isEmpty)
 
-    // An even newer render asks again; swapping it in replaces both halves.
-    projects.rerender(line.id, in: id, voices: voices)
-    try await finishRender(projects)
-    line = try #require(projects.project(id)?.lines[0])
-    #expect(projects.newRenders(id) == [line.id: line.versions[2].id])
-    #expect(projects.swapInNewRender(line: line.id, in: id))
-    let swapped = try #require(projects.project(id)?.edit?.clips.filter { $0.lineID == line.id })
-    #expect(swapped.count == 1 && swapped[0].versionID == line.versions[2].id && swapped[0].end == line.versions[2].duration)
-    #expect(projects.newRenders(id).isEmpty && projects.project(id)?.edit?.kept.isEmpty == true)
-    // Choosing an older take in Generate offers it too.
-    projects.choose(line.versions[0].id, line: line.id, in: id)
-    #expect(projects.newRenders(id) == [line.id: line.versions[0].id])
-    projects.choose(line.versions[2].id, line: line.id, in: id)
-
-    // A line rendered after the timeline was made waits to be added after the nearest earlier line's clips.
+    // A line rendered after the timeline was made isn't added on its own.
     projects.addLines(["Four."], to: id, voices: voices)
     let four = try #require(projects.project(id)?.lines.last)
-    projects.moveLine(four.id, by: -1, in: id)   // the script reads 1, 2, 4, 3
-    #expect(projects.linesNotOnTimeline(id).isEmpty)   // no render yet
     try await projects.rerender(four.id, in: id, voices: voices)?.value
     try await finishRender(projects)
-    #expect(projects.linesNotOnTimeline(id) == [four.id] && projects.newRenders(id).isEmpty)
-    #expect(projects.addLineToEdit(line: four.id, in: id))
-    #expect(projects.project(id)?.edit?.clips.map(\.lineID) == [lines[0].id, lines[1].id, four.id, lines[2].id])
-    #expect(projects.linesNotOnTimeline(id).isEmpty)
-    #expect(!projects.addLineToEdit(line: four.id, in: id) && projects.error == "This line is already on the timeline.")
+    #expect(projects.linesNotOnTimeline(id) == [four.id] && projects.project(id)?.edit?.clips.count == 5)
 
-    // Deleting a line's only clip lists it again; deleting the line from the script takes its clips with it.
-    let two = try #require(projects.project(id)?.edit?.clips.first { $0.lineID == lines[1].id })
-    projects.deleteClip(two.id, in: id)
-    #expect(projects.linesNotOnTimeline(id) == [lines[1].id])
+    // Deleting the line from the script takes its clips with it; an undo step from before brings back only clips whose
+    // line is still there.
+    #expect(projects.placeTake(try #require(projects.project(id)?.lines.last?.chosen), at: 0, in: id))
     projects.deleteLine(four.id, in: id)
-    #expect(projects.project(id)?.edit?.clips.map(\.lineID) == [lines[0].id, lines[2].id])
-    // An undo step from before the line was deleted brings back only the clips whose line is still there.
+    #expect(projects.project(id)?.edit?.clips.contains { $0.lineID == four.id } == false)
     projects.undoEdit(id)
-    #expect(projects.project(id)?.edit?.clips.map(\.lineID) == [lines[0].id, lines[1].id, lines[2].id])
+    #expect(projects.project(id)?.edit?.clips.contains { $0.lineID == four.id } == false && projects.project(id)?.edit?.clips.count == 5)
 }
 
 @MainActor @Test func timelineProposalsWaitForTheUser() async throws {
     let (projects, _, id) = try await editFixture()
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let current = try #require(projects.project(id)?.edit)
     #expect(!projects.proposeEdit(EditProposal(edit: current, changes: ["Nothing."]), in: id))
     #expect(projects.project(id)?.editProposal == nil)
@@ -345,7 +294,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     #expect(projects.project(id)?.edit == current && projects.project(id)?.editProposal == proposal)
     #expect(ProjectStore(root: projects.root).project(id)?.editProposal == proposal)
     projects.rejectEditProposal(id)
-    #expect(projects.project(id)?.editProposal == nil && projects.project(id)?.edit == current && !projects.canUndoEdit(id))
+    #expect(projects.project(id)?.editProposal == nil && projects.project(id)?.edit == current)
 
     // A later proposal replaces an earlier one; accepting it is a step to undo.
     var louder = current
@@ -363,7 +312,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
 
 @MainActor @Test func clipAudioUsesTheRenderOrACachedEdit() async throws {
     let (projects, voices, id) = try await editFixture(lines: ["One."])
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let project = try #require(projects.project(id))
     let render = projects.audioURL(try #require(project.lines[0].chosenVersion), projectID: id)
     var clip = try #require(project.edit?.clips[0])
@@ -394,7 +343,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
 
 @MainActor @Test func playbackFollowsTheTimeline() async throws {
     let (projects, voices, id) = try await editFixture()
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let ids = try #require(projects.project(id)?.edit?.clips.map(\.id))
     projects.setClipEffects(VoiceEffects(tempo: 2), clip: ids[1], in: id)
     projects.moveClip(ids[2], to: 0, in: id)
@@ -413,7 +362,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     let script = try await projects.exportLines(id, voices: voices)
     #expect(script.map(\.number) == [1, 2, 3] && script.map(\.pauseAfter) == [0.5, 0.5, 0.5])
 
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let lines = try #require(projects.project(id)?.lines)
     let ids = try #require(projects.project(id)?.edit?.clips.map(\.id))
     projects.splitClip(ids[0], at: 1, in: id)
@@ -428,33 +377,37 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     #expect(result.duration == 6.5)   // the fake mix counts the last pause too
     #expect(projects.project(id)?.exports?.count == 1)
 
+    // An emptied timeline exports each line's take in use again.
     for clip in projects.project(id)?.edit?.clips ?? [] { projects.deleteClip(clip.id, in: id) }
-    await #expect(throws: AppError.self) { try await projects.export(id, options: ExportOptions(), voices: voices) }
+    #expect(try await projects.exportLines(id, voices: voices).map(\.number) == [1, 2, 3])
 }
 
-@MainActor @Test func rendersTheTimelineUsesCantBeDeleted() async throws {
+@MainActor @Test func takesTheTimelineUsesCantBeDeleted() async throws {
     let (projects, voices, id) = try await editFixture(lines: ["One."])
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let lineID = try #require(projects.project(id)?.lines[0].id)
     projects.rerender(lineID, in: id, voices: voices)
     try await finishRender(projects)
     let versions = try #require(projects.project(id)?.lines[0].versions)
-    func usedBy() -> [String: Int?] { Dictionary(uniqueKeysWithValues: projects.outputs(id).map { ($0.id, $0.usedBy) }) }
 
-    // The timeline still plays the first render, so it stays, and Outputs shows it in use.
-    #expect(usedBy() == [versions[0].id: 1, versions[1].id: 1])
-    projects.deleteOutput(versions[0].id, in: id)
-    #expect(projects.project(id)?.lines[0].versions.count == 2)
+    // The timeline still plays the first take, so it stays.
+    #expect(projects.whyKept(versions[0].id, in: id) != nil && projects.whyKept(versions[1].id, in: id) == nil)
+    projects.deleteTake(versions[0].id, in: id)
+    #expect(projects.project(id)?.lines[0].versions.count == 2 && projects.error?.contains("on the timeline") == true)
 
-    // Swapped out, but a pending proposal would bring it back: it stays until that is settled.
-    #expect(projects.swapInNewRender(line: lineID, in: id))
-    var back = try #require(projects.project(id)?.edit)
-    try back.swapIn(line: lineID, version: versions[0].id, duration: versions[0].duration)
+    // Off the timeline, but a pending proposal would bring it back: it stays until that is settled.
+    let clip = try #require(projects.project(id)?.edit?.clips[0])
+    let back = try #require(projects.project(id)?.edit)
+    #expect(projects.deleteClip(clip.id, in: id))
     #expect(projects.proposeEdit(EditProposal(edit: back, changes: ["Back to the first take."]), in: id))
-    projects.deleteOutput(versions[0].id, in: id)
-    #expect(projects.project(id)?.lines[0].versions.count == 2 && usedBy()[versions[0].id] == 1)
+    projects.deleteTake(versions[0].id, in: id)
+    #expect(projects.project(id)?.lines[0].versions.count == 2)
     projects.rejectEditProposal(id)
-    #expect(usedBy() == [versions[0].id: nil, versions[1].id: 1])
+    // Free now; deleting the take in use hands that to the newest other take.
+    projects.deleteTake(versions[1].id, in: id)
+    let line = try #require(projects.project(id)?.lines[0])
+    #expect(line.versions.map(\.id) == [versions[0].id] && line.chosen == versions[0].id)
+    #expect(!FileManager.default.fileExists(atPath: projects.audioURL(versions[1], projectID: id).path))
 }
 
 @MainActor @Test func projectsSavedBeforeTheTimelineStillOpen() throws {
@@ -471,7 +424,7 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     let project = try #require(projects.project("old"))
     #expect(projects.error == nil && project.edit == nil && project.editProposal == nil)
     projects.startEdit("old")
-    #expect(projects.project("old")?.edit?.clips.map(\.versionID) == ["v1"])
+    #expect(projects.project("old")?.edit == Edit())
     #expect(ProjectStore(root: root).project("old")?.edit == projects.project("old")?.edit)
 }
 

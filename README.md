@@ -4,17 +4,18 @@
 
 VocalCord clones your voice and turns scripts into voiceovers, rendering everything on your Mac.
 
-![The Generate tab: script tools on top, a voice and scores for each line, Render under the script, and Preview and Outputs below](docs/screenshots/generate.png)
+![The Generate tab: script tools on top, a voice and scores for each line, Render under the script, and the Takes panel below](docs/screenshots/generate.png)
 
 ## Features
 
 - **Clone a voice** two ways: read a two-minute script that VocalCord gives you, recorded on your phone or Mac and uploaded, or upload any audio or video, such as a podcast. The recording is cut into clips at its pauses, grouped by speaker, and an audition picks the clip that sounds most like you.
-- **Write a script** one sentence a line, each with its own voice and pause, and name and tag lines (Intro, Hook) to find them in Generate and Timeline. Nothing renders until you click: a line's own Render (or Re-render for another take), or Render all, which reads the whole script as one take, so every line sounds like the same recording.
+- **Write a script** one sentence a line, each with its own voice and pause. Nothing renders until you click: a line's own Render (or Re-render for another take), or Render all, which reads the whole script as one take, so every line sounds like the same recording.
+- **Keep every take:** the Takes panel under the script lists each line's takes with their scores. Play, rename, tag (Intro, Hook), delete or pick the one in use, and Compare plays a line's takes one after another.
 - **Direct each word:** select words and right-click (or type `[`) to add a pause, slow down or speed up a phrase, stress a word, or respell it for the voice. Pauses and speed apply instantly, without a new render.
 - **Read along:** the script lights up word by word as it plays, in the table, in a large Read view (click a word to play from it) and under Timeline clips. A pace check flags rushed or dragging phrases against your own take's pace, with a one-click fix.
 - **Score every line:** how much it sounds like you, how human it sounds, whether the words came out right, and whether its pitch, pace and pauses stay true to your take. A line that fails a check shows why; render it again when you choose.
 - **Voice check:** render ten test lines (ten different ones, one line ten times, or long lines) to see how a voice holds up, with the time it will take on your Mac shown first.
-- **Edit on a timeline:** split, trim, drag to reorder and space out your renders, and set each clip's volume, fades, speed, pitch, warmth and brightness, or remove noise. A line rendered again asks before replacing your cuts, and export follows the timeline.
+- **Edit on a timeline:** it starts empty; drag any take from the Takes panel onto the track, then split, trim, reorder and space out the clips, and set each one's volume, fades, speed, pitch, warmth and brightness, or remove noise. Export follows the timeline, or each line's take in use while it's empty.
 - **Preview** the voiceover, then export WAV or M4A, with captions and per-line or per-voice files.
 - **Terminal panel** (optional): Claude Code, Codex or OpenCode reads your script, word timings and pace, tells you which lines sound unlike the rest, and proposes edits that you accept or reject. Review pace asks it to direct the rhythm for you.
 - **Jev plugin** (optional): checks that each line reads as speech and fits its tone.

@@ -29,6 +29,11 @@ struct Version: Codable, Identifiable, Hashable, Sendable {
     var raw: Bool? = nil
     /// Made by `apply_marks` from this version (a raw render, or a render whose text had no marks).
     var source: String? = nil
+    /// What the user calls this take, in the Takes panel and on its clips; nil shows "Take N".
+    var name: String? = nil
+    /// A short label such as Intro or Hook that takes belonging together share; its colour (`Theme.tag`) marks them in
+    /// the Takes panel and on Timeline's clips.
+    var tag: String? = nil
 
     /// Marks can be applied to it to make a version: model output with the marks left out of its audio (raw), or
     /// whose text has none, and with words to time. Versions rendered with [pause] tags before marks existed had the
@@ -112,16 +117,13 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     var original: String?
     /// An agent added this line: it stays empty until the user accepts its proposal, and rejecting removes it.
     var added: Bool?
-    /// What the user calls the line, in Generate and on its clips in Timeline; nil shows "Line N".
-    var name: String?
-    /// A short label such as Intro or Hook that lines belonging together share; its colour (`Theme.tag`) marks them in
-    /// Generate and Timeline.
-    var tag: String?
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
 
-    /// Its name, else "Line N".
-    func title(_ number: Int) -> String { name ?? "Line \(number)" }
+    /// The take's name, else "Take N" by its place among the visible versions.
+    func title(_ version: Version) -> String {
+        version.name ?? "Take \((visibleVersions.firstIndex { $0.id == version.id } ?? 0) + 1)"
+    }
 
     /// The tone the voice reads it in: its own, or Neutral while tones are hidden, so a tone set before (or by an agent)
     /// can't pick a take the user can't see.
@@ -203,26 +205,14 @@ struct Project: Codable, Identifiable, Hashable, Sendable {
     func line(_ id: String) -> Line? { lines.first { $0.id == id } }
     func version(_ id: String) -> Version? { lines.lazy.flatMap(\.versions).first { $0.id == id } }
 
-    /// The lines' tags, each once, in script order.
+    /// The takes' tags, each once, in script order.
     var tags: [String] {
         var seen = Set<String>()
-        return lines.compactMap(\.tag).filter { seen.insert($0).inserted }
+        return lines.flatMap(\.visibleVersions).compactMap(\.tag).filter { seen.insert($0).inserted }
     }
 
     /// Renders a timeline clip uses, now or in a pending proposal; they can't be deleted.
     var editedRenders: Set<String> { Set(((edit?.clips ?? []) + (editProposal?.edit.clips ?? [])).map(\.versionID)) }
-}
-
-/// A render or export in the Outputs list.
-struct Output: Identifiable, Hashable {
-    var id: String
-    var name: String
-    var url: URL
-    var duration: Double
-    var date: Date
-    /// The number of the line whose chosen take this is, or whose render the timeline uses; such a render can't be deleted.
-    var usedBy: Int?
-    var format: String { url.pathExtension.uppercased() }
 }
 
 struct ExportOptions: Sendable {
@@ -385,47 +375,25 @@ final class ProjectStore {
         }
     }
 
-    /// An empty name goes back to "Line N".
-    func renameLine(_ name: String, line: String, in projectID: String) {
+    /// An empty name goes back to "Take N".
+    func renameTake(_ name: String, version: String, in projectID: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        updateLine(projectID, line) { $0.name = trimmed.isEmpty ? nil : trimmed }
+        updateTake(version, in: projectID) { $0.name = trimmed.isEmpty ? nil : trimmed }
     }
 
     /// Nil or an empty tag removes it.
-    func setTag(_ tag: String?, line: String, in projectID: String) {
+    func setTakeTag(_ tag: String?, version: String, in projectID: String) {
         let trimmed = tag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        updateLine(projectID, line) { $0.tag = trimmed.isEmpty ? nil : trimmed }
+        updateTake(version, in: projectID) { $0.tag = trimmed.isEmpty ? nil : trimmed }
     }
 
-    /// Puts a line of several sentences in its place as one line per sentence, in its voice, tone and tag, the first
-    /// keeping its name and the last its pause; the others get a sentence's pause. The new lines need a render. Its
-    /// clips leave the timeline, as when it's deleted; its renders stay on disk. Returns how many lines it became.
-    @discardableResult
-    func splitIntoSentences(_ lineID: String, in projectID: String) -> Int {
-        guard let line = project(projectID)?.line(lineID), line.proposal == nil else { return 1 }
-        let sentences = Script.lines(line.text, by: .sentences)
-        guard sentences.count > 1 else { return 1 }
-        let new = sentences.enumerated().map { index, text in
-            Line(text: text, voiceID: line.voiceID, tone: line.tone,
-                 pauseAfter: index == sentences.count - 1 ? line.pauseAfter : Self.sentencePause,
-                 name: index == 0 ? line.name : nil, tag: line.tag)
-        }
+    private func updateTake(_ versionID: String, in projectID: String, _ change: (inout Version) -> Void) {
         update(projectID) { project in
-            guard let index = project.lines.firstIndex(where: { $0.id == lineID }) else { return }
-            project.lines.replaceSubrange(index...index, with: new)
-            project.edit?.clips.removeAll { $0.lineID == lineID }
-            project.edit?.kept[lineID] = nil
+            for line in project.lines.indices {
+                if let index = project.lines[line].versions.firstIndex(where: { $0.id == versionID }) { change(&project.lines[line].versions[index]) }
+            }
         }
-        return new.count
     }
-
-    /// Every line of several sentences, split as `splitIntoSentences` does.
-    func splitAllIntoSentences(_ projectID: String) {
-        for line in project(projectID)?.lines ?? [] { splitIntoSentences(line.id, in: projectID) }
-    }
-
-    /// Silence after a sentence that a split line ran on into the next: about the gap a full stop gets inside one take.
-    static let sentencePause = 0.3
 
     /// The line leaves the script and its clips the timeline; its renders stay on disk.
     func deleteLine(_ lineID: String, in projectID: String) {
@@ -491,58 +459,56 @@ final class ProjectStore {
 
     // MARK: Outputs
 
-    /// Every render and export, newest first. Raw sources are left out. A render is in use while it's its line's
-    /// chosen take, the timeline uses it, or another version was made from it by applying marks.
-    func outputs(_ projectID: String) -> [Output] {
-        guard let project = project(projectID) else { return [] }
-        let used = project.editedRenders.union(project.lines.flatMap(\.versions).compactMap(\.source))
-        let renders = project.lines.enumerated().flatMap { number, line in
-            line.visibleVersions.enumerated().map { index, version in
-                Output(id: version.id, name: "\(line.title(number + 1)) · v\(index + 1)", url: audioURL(version, projectID: projectID),
-                       duration: version.duration, date: version.createdAt,
-                       usedBy: line.chosen == version.id || used.contains(version.id) ? number + 1 : nil)
-            }
+    /// Why a take can't be deleted, else nil: a timeline clip uses it, or another take was made from it.
+    func whyKept(_ versionID: String, in projectID: String) -> String? {
+        guard let project = project(projectID) else { return nil }
+        if project.editedRenders.contains(versionID) { return "It\u{2019}s on the timeline. Delete its clips there first." }
+        if project.lines.contains(where: { $0.versions.contains { $0.source == versionID } }) {
+            return "Another take was made from it, by changing its pauses or speed. Delete that one first."
         }
-        let exports = (project.exports ?? []).map { export in
-            let url = URL(filePath: export.files[0])
-            return Output(id: export.id, name: url.deletingPathExtension().lastPathComponent, url: url,
-                          duration: export.duration, date: export.createdAt)
-        }
-        return (renders + exports).sorted { $0.date > $1.date }
+        return nil
     }
 
-    /// Moves an export's files, or a render and its timing file, to the Trash. A line's chosen take stays, and so does
-    /// a render the timeline or a pending timeline proposal uses, or that another version was made from. Deleting a
-    /// version made from a raw render leaves the raw one.
-    func deleteOutput(_ id: String, in projectID: String) {
-        guard let project = project(projectID) else { return }
-        let urls: [URL]
-        if let export = project.exports?.first(where: { $0.id == id }) {
-            urls = export.files.map { URL(filePath: $0) }
-        } else if let line = project.lines.first(where: { line in line.versions.contains { $0.id == id } }), line.chosen != id,
-                  !project.editedRenders.contains(id), !project.lines.contains(where: { $0.versions.contains { $0.source == id } }),
-                  let version = line.versions.first(where: { $0.id == id }) {
-            let audio = audioURL(version, projectID: projectID)
-            urls = [audio, audio.deletingPathExtension().appendingPathExtension("json")]
-        } else { return }
-        do {
-            for url in urls where files.fileExists(atPath: url.path) { try files.trashItem(at: url, resultingItemURL: nil) }
-        } catch {
-            self.error = "Couldn't move this to the Trash. \(error.localizedDescription)"
+    /// Moves a take's audio and timing file to the Trash. One in use gives way to the line's newest other take. A take
+    /// made from a raw render leaves the raw one. Refused, with the reason in `error`, while `whyKept` has one.
+    func deleteTake(_ versionID: String, in projectID: String) {
+        guard let version = project(projectID)?.version(versionID) else { return }
+        if let reason = whyKept(versionID, in: projectID) {
+            error = "Can\u{2019}t delete this take. " + reason
             return
         }
+        let audio = audioURL(version, projectID: projectID)
+        guard trash([audio, audio.deletingPathExtension().appendingPathExtension("json")]) else { return }
         update(projectID) { project in
-            project.exports?.removeAll { $0.id == id }
-            for index in project.lines.indices { project.lines[index].versions.removeAll { $0.id == id } }
+            for index in project.lines.indices where project.lines[index].versions.contains(where: { $0.id == versionID }) {
+                project.lines[index].versions.removeAll { $0.id == versionID }
+                if project.lines[index].chosen == versionID { project.lines[index].chosen = project.lines[index].visibleVersions.last?.id }
+            }
         }
     }
 
-    /// Mixes the timeline, or each line's chosen take if the project has none, into `exportsRoot/<project name>/` and
-    /// lists the export in Outputs. Returns the files, the mix first.
+    /// Moves an export's files to the Trash.
+    func deleteExport(_ id: String, in projectID: String) {
+        guard let export = project(projectID)?.exports?.first(where: { $0.id == id }), trash(export.files.map { URL(filePath: $0) }) else { return }
+        update(projectID) { $0.exports?.removeAll { $0.id == id } }
+    }
+
+    private func trash(_ urls: [URL]) -> Bool {
+        do {
+            for url in urls where files.fileExists(atPath: url.path) { try files.trashItem(at: url, resultingItemURL: nil) }
+            return true
+        } catch {
+            self.error = "Couldn\u{2019}t move this to the Trash. \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Mixes the timeline, or each line's take in use while the timeline is empty, into `exportsRoot/<project name>/`
+    /// and lists the export in the Takes panel. Returns the files, the mix first.
     func export(_ projectID: String, options: ExportOptions, voices: VoiceStore) async throws -> MixResult {
         guard let project = project(projectID) else { throw AppError("This project no longer exists.") }
         let lines = try await exportLines(projectID, voices: voices)
-        guard !lines.isEmpty else { throw AppError(project.edit == nil ? "Render a line first." : "The timeline is empty.") }
+        guard !lines.isEmpty else { throw AppError("Render a line first.") }
         let name = project.name.replacing(/[\/:]/, with: "-")
         let folder = exportsRoot.appending(path: name, directoryHint: .isDirectory)
         let result = try await voices.engine.mix(MixRequest(lines: lines, folder: folder, name: name, options: options))
@@ -551,10 +517,11 @@ final class ProjectStore {
     }
 
     /// What `export` mixes. From the timeline: one entry per clip, numbered by its line's place in the script, so the
-    /// engine joins a split line's clips into one caption. Without one: each line's chosen take, lines without one left out.
+    /// engine joins a split line's clips into one caption. While it's empty: each line's take in use, lines without one
+    /// left out.
     func exportLines(_ projectID: String, voices: VoiceStore) async throws -> [MixLine] {
         guard let project = project(projectID) else { throw AppError("This project no longer exists.") }
-        guard let edit = project.edit else {
+        guard let edit = project.edit, !edit.clips.isEmpty else {
             return project.lines.enumerated().compactMap { number, line in
                 line.chosenVersion.map { version in
                     MixLine(audio: audioURL(version, projectID: projectID), text: Marks.plain(version.text),
@@ -573,16 +540,21 @@ final class ProjectStore {
 
     // MARK: Timeline
 
-    /// Opens the project's timeline, filled from the script the first time.
+    /// Opens the project's timeline, empty: takes go on it only when the user drags them there.
     func startEdit(_ projectID: String) {
-        guard let project = project(projectID), project.edit == nil else { return }
-        update(projectID) { $0.edit = Edit(project: project) }
+        guard project(projectID)?.edit == nil else { return }
+        update(projectID) { $0.edit = Edit() }
     }
 
-    /// Fills the timeline from the script again, dropping every cut; undo brings them back.
-    func resetEdit(_ projectID: String) {
-        guard let project = project(projectID) else { return }
-        commit(Edit(project: project), in: projectID)
+    /// Puts a take on the timeline whole, before the clip at `index` (the end past the last), with its line's pause
+    /// after it. A line's takes can go on more than once.
+    @discardableResult
+    func placeTake(_ versionID: String, at index: Int, in projectID: String) -> Bool {
+        editTimeline(projectID) { edit, project in
+            guard let line = project.lines.first(where: { $0.versions.contains { $0.id == versionID } }),
+                  let version = line.versions.first(where: { $0.id == versionID }) else { throw AppError("This take no longer exists.") }
+            try edit.place(line: line.id, version: versionID, duration: version.duration, gapAfter: line.pauseAfter, at: index)
+        }
     }
 
     // Each returns false, with the reason in `error`, when the edit can't be made. A slider should call these once
@@ -633,59 +605,6 @@ final class ProjectStore {
         editTimeline(projectID) { edit, _ in try edit.setEffects(clip: clipID, to: effects) }
     }
 
-    /// Replaces the line's clips with its chosen render, the answer to "new render, swap it in?".
-    @discardableResult
-    func swapInNewRender(line lineID: String, in projectID: String) -> Bool {
-        editTimeline(projectID) { edit, project in
-            guard let version = project.line(lineID)?.chosenVersion else { throw AppError("This line has no render to swap in.") }
-            try edit.swapIn(line: lineID, version: version.id, duration: version.duration)
-        }
-    }
-
-    /// Keeps the line's clips as they are and stops asking until a newer render.
-    @discardableResult
-    func keepEditedClip(line lineID: String, in projectID: String) -> Bool {
-        editTimeline(projectID) { edit, project in
-            guard let chosen = project.line(lineID)?.chosen else { throw AppError("This line has no render.") }
-            try edit.keep(line: lineID, version: chosen)
-        }
-    }
-
-    /// Puts a line's chosen render on the timeline after the clips of the nearest earlier line.
-    @discardableResult
-    func addLineToEdit(line lineID: String, in projectID: String) -> Bool {
-        editTimeline(projectID) { edit, project in
-            guard let line = project.line(lineID), let version = line.chosenVersion else { throw AppError("Render this line first.") }
-            try edit.insert(line: lineID, version: version.id, duration: version.duration, gapAfter: line.pauseAfter,
-                            script: project.lines.map(\.id))
-        }
-    }
-
-    /// Every line left off the timeline goes on it, in one step to undo.
-    @discardableResult
-    func addAllLinesToEdit(_ projectID: String) -> Bool {
-        let missing = linesNotOnTimeline(projectID)
-        return editTimeline(projectID) { edit, project in
-            for line in project.lines where missing.contains(line.id) {
-                guard let version = line.chosenVersion else { continue }
-                try edit.insert(line: line.id, version: version.id, duration: version.duration, gapAfter: line.pauseAfter,
-                                script: project.lines.map(\.id))
-            }
-        }
-    }
-
-    /// Every line's new render is swapped in, or every line keeps its clips, in one step to undo.
-    @discardableResult
-    func answerAllNewRenders(swapIn: Bool, in projectID: String) -> Bool {
-        let renders = newRenders(projectID)
-        return editTimeline(projectID) { edit, project in
-            for line in project.lines {
-                guard let chosen = renders[line.id], let version = project.version(chosen) else { continue }
-                if swapIn { try edit.swapIn(line: line.id, version: chosen, duration: version.duration) } else { try edit.keep(line: line.id, version: chosen) }
-            }
-        }
-    }
-
     /// Lines re-rendered since their clips went on the timeline: line ID → the chosen version, unless the user kept their
     /// clips over that version.
     func newRenders(_ projectID: String) -> [String: String] {
@@ -710,13 +629,13 @@ final class ProjectStore {
 
     func undoEdit(_ projectID: String) {
         guard let project = project(projectID), let previous = undoSteps[projectID]?.popLast() else { return }
-        redoSteps[projectID, default: []].append(project.edit ?? Edit(project: project))
+        redoSteps[projectID, default: []].append(project.edit ?? Edit())
         update(projectID) { $0.edit = pruned(previous, in: $0) }
     }
 
     func redoEdit(_ projectID: String) {
         guard let project = project(projectID), let next = redoSteps[projectID]?.popLast() else { return }
-        undoSteps[projectID, default: []].append(project.edit ?? Edit(project: project))
+        undoSteps[projectID, default: []].append(project.edit ?? Edit())
         update(projectID) { $0.edit = pruned(next, in: $0) }
     }
 
@@ -753,10 +672,10 @@ final class ProjectStore {
         return url
     }
 
-    /// The timeline (the script's, if the project has none yet) as the preview plays it.
+    /// The timeline (empty, if the project has none yet) as the preview plays it.
     func playbackTimeline(_ projectID: String, engine: any Engine) async throws -> Timeline {
         guard let project = project(projectID) else { throw AppError("This project no longer exists.") }
-        let edit = project.edit ?? Edit(project: project)
+        let edit = project.edit ?? Edit()
         var timeline = Timeline()
         timeline.projectID = projectID
         for (clip, start) in zip(edit.clips, edit.starts) {

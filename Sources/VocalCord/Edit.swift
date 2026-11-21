@@ -84,16 +84,6 @@ extension Edit {
     static let longest = 10.0, shortest = 0.05
     static let gains = -24.0...12.0
 
-    /// Filled from the script: each line's chosen render whole, in script order, with the line's pause after it.
-    /// Lines without a render are left out.
-    init(project: Project) {
-        clips = project.lines.compactMap { line in
-            line.chosenVersion.map {
-                EditClip(lineID: line.id, versionID: $0.id, start: 0, end: $0.duration, gapAfter: line.pauseAfter.clamped(0...Self.longest))
-            }
-        }
-    }
-
     func index(of clipID: String) throws -> Int {
         guard let index = clips.firstIndex(where: { $0.id == clipID }) else { throw AppError("That clip is no longer on the timeline.") }
         return index
@@ -199,6 +189,13 @@ extension Edit {
         let after = script[..<position].reversed().compactMap { id in clips.lastIndex { $0.lineID == id } }.first
         clips.insert(EditClip(lineID: lineID, versionID: versionID, start: 0, end: duration, gapAfter: gap), at: after.map { $0 + 1 } ?? 0)
         kept[lineID] = nil
+    }
+
+    /// A take dragged onto the track: its render whole, before the clip at `index` (clamped, so past the end appends).
+    mutating func place(line lineID: String, version versionID: String, duration: Double, gapAfter: Double, at index: Int) throws {
+        guard duration.isFinite, duration >= Self.shortest else { throw AppError("This take is too short to use.") }
+        let gap = try number(gapAfter, "The gap").clamped(0...Self.longest)
+        clips.insert(EditClip(lineID: lineID, versionID: versionID, start: 0, end: duration, gapAfter: gap), at: min(max(index, 0), clips.count))
     }
 
     private func number(_ value: Double, _ name: String) throws -> Double {

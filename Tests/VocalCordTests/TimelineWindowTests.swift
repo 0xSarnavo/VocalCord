@@ -14,7 +14,7 @@ private let folder = URL(filePath: ProcessInfo.processInfo.environment["WINDOW_S
 @MainActor private func timelineWindow(_ view: EditView, projects: ProjectStore, voices: VoiceStore, preview: VocalCord.Preview,
                                        store: UserDefaults, size: NSSize, name: String, waitForAudio: Bool = true) async throws {
     _ = NSApplication.shared
-    let controller = NSHostingController(rootView: view.environment(projects).environment(voices).environment(preview)
+    let controller = NSHostingController(rootView: view.environment(projects).environment(voices).environment(preview).environment(Player())
         .defaultAppStorage(store).preferredColorScheme(.dark))
     controller.sceneBridgingOptions = [.toolbars, .title]
     let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
@@ -79,7 +79,7 @@ struct TimelineWindowSnapshots {
             "Make every moment count.",
         ])
         #expect(projects.error == nil)
-        projects.startEdit(id)
+        fillTimeline(projects, id)
         let clips = try #require(projects.project(id)?.edit?.clips)
         #expect(clips.count == 4)
         // The first clip faded in and out, the second chosen, the third re-rendered since it went on the timeline.
@@ -102,10 +102,10 @@ struct TimelineWindowSnapshots {
 
     @Test func emptyTimelineAndNothingRendered() async throws {
         let (projects, voices, preview, _, id) = try await readFixture(["Meet the next chapter of your voice.", "Make every moment count."])
-        projects.startEdit(id)
+        fillTimeline(projects, id)
         for clip in try #require(projects.project(id)?.edit?.clips) { #expect(projects.deleteClip(clip.id, in: id)) }
         #expect(projects.project(id)?.edit?.clips.isEmpty == true)
-        // Deleting every clip leaves each line off the timeline, so each has its card above the empty state.
+        // Deleting every clip leaves the track empty, waiting for takes dragged from the Takes panel.
         #expect(projects.linesNotOnTimeline(id).count == 2)
 
         let (store, suite) = try settings(project: id)

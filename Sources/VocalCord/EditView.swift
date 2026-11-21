@@ -223,7 +223,12 @@ struct EditView: View {
     @AppStorage("terminalWidth") private var terminalWidth = 380.0
     /// Everything right of the sidebar, for the Terminal column's widest.
     @State private var detailWidth = 1000.0
+    @State private var workHeight = 800.0
     @AppStorage("timelineSideOpen") private var sideOpen = true
+    /// The Takes panel under the track, to drag takes from.
+    @AppStorage("timelineTakesOpen") private var takesOpen = true
+    @AppStorage("timelineTakesHeight") private var takesHeight = 220.0
+    @State private var takesLine: String?
     @State private var selected: String?
     @State private var exporting = false
 
@@ -255,7 +260,7 @@ struct EditView: View {
                                         VStack(spacing: 0) {
                                             PanelHeader("Timeline") {}
                                             EmptyState(title: "Nothing to edit yet",
-                                                       message: "Render lines in Generate, then cut and polish them here.") {
+                                                       message: "Render lines in Generate, then drag their takes here to arrange them.") {
                                                 Button("Open Generate") { mode = .generate }
                                                     .buttonStyle(.vc(.secondary, .m))
                                                     .help("Open Generate (⌘2)")
@@ -267,7 +272,12 @@ struct EditView: View {
                                 }
                                 .frame(maxHeight: .infinity)
                                 .panel()
+                                if let edit = project.edit {
+                                    StatusFooter(text: "\(counted(edit.clips.count, "clip")) \u{00B7} \(formatTime(edit.duration))").panel()
+                                    takesStrip(project)
+                                }
                             }
+                            .onGeometryChange(for: Double.self) { $0.size.height } action: { workHeight = $0 }
                         if project.edit != nil {
                             PaneDivider()
                             if sideOpen {
@@ -310,9 +320,24 @@ struct EditView: View {
         .onChange(of: selection) { selected = nil }
     }
 
+    /// The track keeps its header, transport and a short lane above the footer.
+    @ViewBuilder private func takesStrip(_ project: Project) -> some View {
+        if takesOpen {
+            let range = 160.0...max(160, workHeight - EditorPane.minimumHeight - 44)
+            VStack(spacing: 0) {
+                ResizeDivider(edge: .top, size: $takesHeight, range: range, label: "Resize takes")
+                TakesPanel(project: project, selection: $takesLine, draggable: true) { takesOpen = false }.id(project.id)
+            }
+            .frame(height: takesHeight.clamped(range))
+        } else {
+            FoldedBottomPanel(title: "Takes") { takesOpen = true }
+        }
+    }
+
+    /// The timeline while it has clips, else each line's take in use.
     private var canExport: Bool {
         guard let project = projects.project(selection) else { return false }
-        return project.edit.map { !$0.clips.isEmpty } ?? project.lines.contains { $0.chosenVersion != nil }
+        return project.edit?.clips.isEmpty == false || project.lines.contains { $0.chosenVersion != nil }
     }
 }
 
@@ -329,7 +354,6 @@ struct EditorPane: View {
     @State private var peaks = RenderPeaks()
     @State private var building = false
     @State private var buildError: String?
-    @State private var resetting = false
     @State private var scroll = ScrollPosition(edge: .leading)
     /// The track's visible stretch, in points from its left end.
     @State private var visible = 0.0...0.0
@@ -351,20 +375,13 @@ struct EditorPane: View {
             banners
             transport
             Theme.line.frame(height: 1)
-            if edit.clips.isEmpty {
-                EmptyState(title: "The timeline is empty", message: "Put each line\u{2019}s chosen render back with Reset from script.") {
-                    Button("Reset from script\u{2026}") { resetting = true }
-                        .buttonStyle(.vc(.secondary, .m))
-                        .help("Put each line's chosen render back whole, in script order")
-                }
-            } else {
-                // The clips grow with the pane between the lane limits, from the top like any timeline; below them is
-                // the canvas. The track reserves its own room for the scroll bar, so nothing is drawn under it.
-                GeometryReader { proxy in
-                    let lane = TrackLayout.lane(available: proxy.size.height)
-                    Track(project: project, edit: edit, scale: scale, lane: lane, peaks: peaks, selected: $selected, scroll: $scroll,
-                          visible: $visible) { focused = true }
-                }
+            // The clips grow with the pane between the lane limits, from the top like any timeline; below them is the
+            // canvas. The track reserves its own room for the scroll bar, so nothing is drawn under it. Empty, it still
+            // takes the takes dragged onto it.
+            GeometryReader { proxy in
+                let lane = TrackLayout.lane(available: proxy.size.height)
+                Track(project: project, edit: edit, scale: scale, lane: lane, peaks: peaks, selected: $selected, scroll: $scroll,
+                      visible: $visible) { focused = true }
             }
         }
         .onGeometryChange(for: Double.self) { $0.size.height } action: { height = $0 }
@@ -380,14 +397,6 @@ struct EditorPane: View {
             projects.timeWordsIfNeeded(project.id, voices: voices)
         }
         .task(id: project.edit) { await build() }
-        .confirmationDialog("Reset the timeline from the script?", isPresented: $resetting, titleVisibility: .visible) {
-            Button("Reset timeline", role: .destructive) {
-                projects.resetEdit(project.id)
-                selected = nil
-            }
-        } message: {
-            Text("Each line's chosen render goes back on whole, with its pause, replacing your cuts and settings. You can undo this.")
-        }
     }
 
     /// Makes the audio of edited clips (the engine keeps each one) and hands the timeline to the preview. The progress
@@ -406,7 +415,7 @@ struct EditorPane: View {
             building = false
         } catch is CancellationError {
         } catch {
-            buildError = "Couldn\u{2019}t prepare the audio. \(error.localizedDescription) Try Reset from script\u{2026}, or render the line again."
+            buildError = "Couldn\u{2019}t prepare the audio. \(error.localizedDescription) Render the line again, or drag in another take."
             building = false
         }
     }
@@ -483,71 +492,19 @@ struct EditorPane: View {
         }
     }
 
-    /// One card per question: a new render to swap in, a line left off, and an agent's proposed changes.
+    /// An agent's proposed timeline changes, as a card over the track.
     @ViewBuilder private var banners: some View {
-        let renders = projects.newRenders(project.id), missing = Set(projects.linesNotOnTimeline(project.id))
-        let numbered = Array(project.lines.enumerated())
-        let rerendered = numbered.filter { renders[$0.element.id] != nil }, left = numbered.filter { missing.contains($0.element.id) }
-        if project.editProposal != nil || !rerendered.isEmpty || !left.isEmpty {
-            let rows = VStack(spacing: 8) {
-                if let proposal = project.editProposal { proposalBanner(proposal) }
-                // One card per line, or one for them all once there are several (a script of sentences re-rendered).
-                if rerendered.count > 1 {
-                    banner("\(rerendered.count) lines have new renders: \(Self.titles(rerendered)).", icon: "arrow.triangle.2.circlepath",
-                           tint: Theme.amber) {
-                        Button("Keep my edits") { projects.answerAllNewRenders(swapIn: false, in: project.id) }
-                        Button("Swap all in") { projects.answerAllNewRenders(swapIn: true, in: project.id) }
-                    }
-                } else if let (index, line) = rerendered.first {
-                    banner("\(line.title(index + 1)) has a new render.", icon: "arrow.triangle.2.circlepath", tint: Theme.amber) {
-                        Button("Keep my edit") { projects.keepEditedClip(line: line.id, in: project.id) }
-                        Button("Swap in") { projects.swapInNewRender(line: line.id, in: project.id) }
-                    }
-                }
-                if left.count > 1 {
-                    banner("\(left.count) lines aren\u{2019}t on the timeline: \(Self.titles(left)).", icon: "plus.circle", tint: Theme.secondary) {
-                        Button("Add all") { projects.addAllLinesToEdit(project.id) }
-                    }
-                } else if let (index, line) = left.first {
-                    banner("\(line.title(index + 1)) isn\u{2019}t on the timeline.", icon: "plus.circle", tint: Theme.secondary) {
-                        Button("Add") { projects.addLineToEdit(line: line.id, in: project.id) }
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            // As tall as the cards, scrolling only once they'd squeeze the clips under about 120 points.
+        if let proposal = project.editProposal {
+            // As tall as the card, scrolling only once it'd squeeze the clips under about 120 points.
             ScrollView {
-                rows.onGeometryChange(for: Double.self) { $0.size.height } action: { bannersHeight = $0 }
+                proposalBanner(proposal)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .onGeometryChange(for: Double.self) { $0.size.height } action: { bannersHeight = $0 }
             }
             .scrollBounceBehavior(.basedOnSize)
             .frame(height: min(bannersHeight, max(120, height - 300)))
         }
-    }
-
-    /// "Intro, line 4 and line 7": the lines' titles, the banner's one line truncating a long list.
-    static func titles(_ lines: [(offset: Int, element: Line)]) -> String {
-        let names = lines.enumerated().map { position, item in
-            let title = item.element.title(item.offset + 1)
-            return position == 0 || item.element.name != nil ? title : title.lowercased()
-        }
-        return names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
-    }
-
-    private func banner(_ text: String, icon: String, tint: Color, @ViewBuilder actions: () -> some View) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon).font(.vcBody).foregroundStyle(tint).accessibilityHidden(true)
-            Text(text).foregroundStyle(Theme.text).lineLimit(1)
-            Spacer(minLength: 8)
-            actions().buttonStyle(.vc(.secondary, .s))
-        }
-        .font(.vcBody)
-        .padding(.leading, 12)
-        .padding(.trailing, 6)
-        .frame(height: 36)
-        .background(Theme.fill, in: .rect(cornerRadius: Radius.card))
-        .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(Theme.line))
-        .accessibilityElement(children: .contain)
     }
 
     private func proposalBanner(_ proposal: EditProposal) -> some View {
@@ -581,7 +538,7 @@ struct EditorPane: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// Play and the time on the left; Split and Delete, Undo and Redo, then Reset, in groups 12 apart on the right.
+    /// Play and the time on the left; Split and Delete, then Undo and Redo, in groups 12 apart on the right.
     private var transport: some View {
         HStack(spacing: 0) {
             PlayToggle()
@@ -619,10 +576,6 @@ struct EditorPane: View {
             }
             .buttonStyle(.icon(.s))
             .padding(.leading, 12)
-            Button("Reset from script\u{2026}") { resetting = true }
-                .buttonStyle(.vc(.ghost, .s))
-                .padding(.leading, 12)
-                .help("Put each line's chosen render back whole, in script order")
         }
         .padding(.horizontal, 16)
         .frame(height: Self.transportHeight)
@@ -689,7 +642,9 @@ private struct Track: View {
     let onFocus: () -> Void
     @State private var trim: TrimDraft?
     @State private var moving: Move?
-    @State private var naming: LineNaming?
+    @State private var naming: TakeNaming?
+    /// Where a take dragged from the Takes panel would land, in points along the track, while it's over the track.
+    @State private var dropX: Double?
 
     private struct Move: Equatable {
         var clipID: String
@@ -724,7 +679,7 @@ private struct Track: View {
         .clipped()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Timeline")
-        .lineNaming($naming, in: project.id)
+        .takeNaming($naming, in: project.id)
     }
 
     private static let space = "track"
@@ -749,6 +704,17 @@ private struct Track: View {
                 clipView(clip, index: index, frame: frames[index], height: height, number: numbers[clip.lineID],
                          newRender: renders[clip.lineID] != nil)
             }
+            if edit.clips.isEmpty {
+                Text("Drag takes here from Takes below")
+                    .font(.vcBody)
+                    .foregroundStyle(Theme.tertiary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
+            if let dropX {
+                let x = TrackLayout.placeX(TrackLayout.placeIndex(at: scale.time(at: dropX), in: edit), frames: frames, scale: scale)
+                Rectangle().fill(Theme.primary).frame(width: 2, height: height + 8).offset(x: x - 1, y: -4).allowsHitTesting(false)
+            }
             if let moving, let index = edit.clips.firstIndex(where: { $0.id == moving.clipID }) {
                 let center = edit.starts[index] + edit.clips[index].duration / 2 + moving.offset / scale.pointsPerSecond
                 let drop = TrackLayout.dropIndex(center: center, moving: index, in: edit)
@@ -757,6 +723,10 @@ private struct Track: View {
                 }
             }
         }
+        .onDrop(of: [.plainText], delegate: TakeDrop(edit: edit, scale: scale, marker: $dropX) { versionID, index in
+            onFocus()
+            projects.placeTake(versionID, at: index, in: project.id)
+        })
     }
 
     private func clipView(_ clip: EditClip, index: Int, frame: ClipFrame, height: Double, number: Int?, newRender: Bool) -> some View {
@@ -765,7 +735,8 @@ private struct Track: View {
         let render = version?.duration ?? clip.end
         let line = project.line(clip.lineID)
         let words = TrackLayout.words(version?.text ?? line?.text ?? "")
-        let name = number.flatMap { line?.title($0) } ?? "Line"
+        // "Line 2", or "Line 2 · Calm one" for a take with a name.
+        let name = ([number.map { "Line \($0)" } ?? "Line"] + [version?.name].compactMap(\.self)).joined(separator: " \u{00B7} ")
         var shown = clip
         if let trim, trim.clipID == clip.id { (shown.start, shown.end) = (trim.start, trim.end) }
         let strip = version.flatMap { version in
@@ -778,7 +749,7 @@ private struct Track: View {
         let handle = TrackLayout.trimZone(frame.width)
         // Hover is tracked over the clip and its trim zones together, so the grips stay while the pointer is on an edge.
         return Hovering { hovered in ZStack {
-            ClipBlock(clip: shown, name: name, tag: line?.tag, words: words, selected: selected == clip.id, hovered: hovered,
+            ClipBlock(clip: shown, name: name, tag: version?.tag, words: words, selected: selected == clip.id, hovered: hovered,
                       newRender: newRender, peaks: url.flatMap { peaks.peaks[$0] }, project: project, strip: strip)
                 .contentShape(.rect)
                 .onTapGesture { location in
@@ -807,12 +778,12 @@ private struct Track: View {
                 .accessibilityAction(named: "Delete") { projects.deleteClip(clip.id, in: project.id) }
                 .accessibilityAction(named: "Move earlier") { projects.moveClip(clip.id, to: index - 1, in: project.id) }
                 .accessibilityAction(named: "Move later") { projects.moveClip(clip.id, to: index + 1, in: project.id) }
-                // Rename and Tag change the line, so Generate shows them too; Delete takes only this clip off.
+                // Rename and Tag change the take, so the Takes panel shows them too; Delete takes only this clip off.
                 .contextMenu {
-                    if let line, let number {
-                        Button("Rename\u{2026}") { naming = LineNaming(line, number: number, kind: .rename) }
-                        LineTagMenu(projectID: project.id, line: line, tags: project.tags) {
-                            naming = LineNaming(line, number: number, kind: .tag)
+                    if let line, let version {
+                        Button("Rename take\u{2026}") { naming = TakeNaming(version, in: line, kind: .rename) }
+                        TakeTagMenu(projectID: project.id, version: version, tags: project.tags) {
+                            naming = TakeNaming(version, in: line, kind: .tag)
                         }
                         Divider()
                     }
@@ -859,6 +830,51 @@ private struct Track: View {
                 let (start, end) = TrackLayout.trimmed(clip, edge: edge, by: step, renderDuration: render)
                 projects.trimClip(clip.id, start: start, end: end, in: project.id)
             }
+    }
+}
+
+/// A take dragged from the Takes panel over the track: marks where it would land and puts it there on drop.
+private struct TakeDrop: DropDelegate {
+    let edit: Edit
+    let scale: TrackScale
+    @Binding var marker: Double?
+    let place: @MainActor (String, Int) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.plainText]) }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        marker = info.location.x
+        return DropProposal(operation: .copy)
+    }
+
+    func dropExited(info: DropInfo) { marker = nil }
+
+    func performDrop(info: DropInfo) -> Bool {
+        marker = nil
+        let index = TrackLayout.placeIndex(at: scale.time(at: info.location.x), in: edit)
+        guard let provider = info.itemProviders(for: [.plainText]).first else { return false }
+        let place = place
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let text = object as? NSString, let versionID = TakeDrag.versionID(text as String) else { return }
+            Task { @MainActor in place(versionID, index) }
+        }
+        return true
+    }
+}
+
+extension TrackLayout {
+    /// Where a take dropped at `time` goes: before the first clip whose middle is later.
+    static func placeIndex(at time: Double, in edit: Edit) -> Int {
+        let starts = edit.starts
+        return edit.clips.indices.first { starts[$0] + edit.clips[$0].duration / 2 > time } ?? edit.clips.count
+    }
+
+    /// The x of the line that marks `index`: halfway across the gap before that clip, or just after the last one.
+    static func placeX(_ index: Int, frames: [ClipFrame], scale: TrackScale) -> Double {
+        guard let last = frames.last else { return scale.x(0) }
+        if index >= frames.count { return last.maxX + 4 }
+        if index == 0 { return frames[0].x - 2 }
+        return (frames[index - 1].maxX + frames[index].x) / 2
     }
 }
 
@@ -1306,13 +1322,15 @@ private struct ClipSettings: View {
         let line = project.line(clip.lineID), version = project.version(clip.versionID)
         let number = project.lines.firstIndex { $0.id == clip.lineID }.map { $0 + 1 }
         let take = line.flatMap { line in
-            line.visibleVersions.firstIndex { $0.id == clip.versionID }.map { "v\($0 + 1) of \(line.visibleVersions.count)" }
+            line.visibleVersions.firstIndex { $0.id == clip.versionID }.map { index in
+                ([version?.name].compactMap(\.self) + ["v\(index + 1) of \(line.visibleVersions.count)"]).joined(separator: " \u{00B7} ")
+            }
         }
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(number.flatMap { line?.title($0) } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text).lineLimit(1)
-                    if let tag = line?.tag { TagChip(tag: tag) }
+                    Text(number.map { "Line \($0)" } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text).lineLimit(1)
+                    if let tag = version?.tag { TagChip(tag: tag) }
                     Spacer(minLength: 0)
                     Text(([take, Tone.enabled ? version?.tone : nil].compactMap(\.self)).joined(separator: " \u{00B7} "))
                         .font(.vcCaption.monospacedDigit())

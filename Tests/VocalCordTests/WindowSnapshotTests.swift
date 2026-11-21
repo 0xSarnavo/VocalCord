@@ -44,12 +44,21 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
                               duration: duration, createdAt: .now, scores: scores, words: words)
         try writeWAV(speechLike(seconds: duration, amplitude: 0.5, floor: 0.005)[...], rate: 24000,
                      to: renders.appending(path: "\(version.id).wav"))
-        // Names and tags on a few lines; the last one not rendered yet, so its row offers Render.
-        line.name = index == 0 ? "Opening" : nil
-        line.tag = [0: "Intro", 1: "Intro", 3: "Hook", 4: "Hook"][index]
+        // Names and tags on a few takes; the first line has a second take, the last isn't rendered yet, so its row
+        // offers Render.
+        var named = version
+        named.name = index == 0 ? "Opening" : nil
+        named.tag = [0: "Intro", 1: "Intro", 3: "Hook", 4: "Hook"][index]
         if index < texts.count - 1 {
-            line.versions = [version]
+            line.versions = [named]
             line.chosen = version.id
+        }
+        if index == 0 {
+            var second = version
+            second.id = UUID().uuidString
+            second.scores?.likeYou = 91
+            try FileManager.default.copyItem(at: renders.appending(path: "\(version.id).wav"), to: renders.appending(path: "\(second.id).wav"))
+            line.versions.append(second)
         }
         project.lines.append(line)
     }

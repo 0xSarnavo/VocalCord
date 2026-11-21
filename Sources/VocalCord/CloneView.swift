@@ -160,6 +160,8 @@ struct VoicePage: View {
                             auditionButton
                         }
                         TakesTable(voice: voice)
+                        let shown = Tone.shown.flatMap { voice.takes($0) }
+                        StatusFooter(text: "\(counted(shown.count, "take")) \u{00B7} \(formatTime(shown.reduce(0) { $0 + $1.duration }))")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .panel()

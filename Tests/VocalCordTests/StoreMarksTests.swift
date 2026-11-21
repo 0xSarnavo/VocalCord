@@ -55,9 +55,8 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     #expect(projects.displayTimes(final)?.count == 4)
     #expect(!line.needsRender && !line.needsVoice)
 
-    // The raw version is a hidden source: not listed, not in Outputs, never chosen.
-    #expect(line.visibleVersions == [final])
-    #expect(projects.outputs(id).map(\.id) == [final.id] && projects.outputs(id)[0].name == "Line 1 · v1")
+    // The raw version is a hidden source: not listed among the takes, never chosen.
+    #expect(line.visibleVersions == [final] && line.title(final) == "Take 1")
     projects.choose(raw.id, line: line.id, in: id)
     #expect(try lineIn(projects, id).chosen == final.id)
 
@@ -95,9 +94,9 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     #expect(engine.calls.count("render") == 1 && engine.calls.count("applyMarks") == 1)
     #expect(marked.source == plain.id && marked.text == line.text && near(marked.duration, plain.duration + 0.3))
     #expect(!line.needsRender && line.visibleVersions.count == 2)
-    // The plain render is still listed, but it's in use while a version is made from it.
-    #expect(projects.outputs(id).first { $0.id == plain.id }?.usedBy == 1)
-    projects.deleteOutput(plain.id, in: id)
+    // The plain render is still listed, but it stays while a version is made from it.
+    #expect(projects.whyKept(plain.id, in: id) != nil)
+    projects.deleteTake(plain.id, in: id)
     #expect(try lineIn(projects, id).versions.count == 2)
 
     // Taking the marks out again chooses the plain render; nothing is made.
@@ -213,7 +212,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     try await settle(projects)
     let lineID = try lineIn(projects, id).id
     let raw = try lineIn(projects, id).versions[0], first = try #require(try lineIn(projects, id).chosenVersion)
-    projects.startEdit(id)   // the timeline plays the first marked version
+    fillTimeline(projects, id)   // the timeline plays the first marked version
 
     projects.setText("One [pause 0.6] two three.", line: lineID, in: id)
     #expect(try await projects.applyMarks(line: lineID, in: id, voices: voices))
@@ -230,13 +229,13 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     #expect(engine.calls.count("render") == 1)
 
     // The raw render stays while a version is made from it; deleting a marked version leaves it.
-    projects.deleteOutput(raw.id, in: id)
+    projects.deleteTake(raw.id, in: id)
     #expect(try lineIn(projects, id).versions.contains { $0.id == raw.id })
-    #expect(projects.swapInNewRender(line: lineID, in: id))
-    projects.deleteOutput(first.id, in: id)
+    for clip in projects.project(id)?.edit?.clips ?? [] { projects.deleteClip(clip.id, in: id) }
+    projects.deleteTake(first.id, in: id)
     #expect(try lineIn(projects, id).versions.map(\.id) == [raw.id, third.id])
     #expect(FileManager.default.fileExists(atPath: projects.audioURL(raw, projectID: id).path))
-    #expect(projects.outputs(id).map(\.id) == [third.id])
+    #expect(try lineIn(projects, id).visibleVersions.map(\.id) == [third.id])
 }
 
 // MARK: Committing
@@ -342,7 +341,7 @@ private func near(_ a: Double, _ b: Double, _ within: Double = 0.01) -> Bool { a
     #expect(script.segments.map(\.versionID) == [project.lines[0].chosen, project.lines[1].chosen, nil])
     #expect(script.segments[0].renderTime(at: 1) == 1 && script.segments[2].renderTime(at: script.segments[2].start) == nil)
 
-    projects.startEdit(id)
+    fillTimeline(projects, id)
     let clips = try #require(projects.project(id)?.edit?.clips)
     #expect(projects.trimClip(clips[1].id, start: 0.5, end: 2, in: id))
     #expect(projects.setClipEffects(VoiceEffects(tempo: 2), clip: clips[1].id, in: id))

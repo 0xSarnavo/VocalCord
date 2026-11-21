@@ -23,7 +23,8 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         Script (Generate):
         - Write new lines or a whole script with add_lines, even into an empty project. Each line has text, \
         \(Tone.enabled ? "a voice, a tone" : "a voice") and a pause after it in seconds.
-        - Write one sentence per line: the user renders, names, tags and arranges each line on its own. Render all in \
+        - Write one sentence per line: the user renders each line on its own, keeps several takes of it, and drags the \
+        takes onto the Timeline, which starts empty (add_line puts a line's take in use on it). Render all in \
         Generate reads consecutive lines in one voice as one take (about 600 characters a take) and cuts it back into \
         the lines, so they share one flow; a row's own Render or Re-render reads that line alone, as its own take.
         - Write for the ear: short sentences, one idea each, under 25 words, with a very short one now and then. Put \

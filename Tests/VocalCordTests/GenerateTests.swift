@@ -261,37 +261,6 @@ final class ScoreCounter: Sendable {
     #expect(!version.likeYouJudged && version.likeYouFlag == nil && version.wordsFlag != nil)
 }
 
-/// The preview's waveform is one continuous shape: the loudest peak under each column, holes where a line has no
-/// render, and never thinner than a line.
-@Test func waveformEnvelopeIsContinuous() {
-    #expect(WaveformEnvelope.columns([0.1, 0.9, 0.2, 0.4], count: 2) == [0.9, 0.4])
-    #expect(WaveformEnvelope.columns([0.5], count: 3) == [0.5, 0.5, 0.5])
-    #expect(WaveformEnvelope.columns([], count: 3).isEmpty && WaveformEnvelope.columns([1], count: 0).isEmpty)
-    let columns: [Float] = [0, 1, 1, 0, 0, 1]
-    let whole = WaveformEnvelope.path(columns, middle: 10, half: 8)
-    #expect(whole.boundingRect == CGRect(x: 0, y: 2, width: 6, height: 16))
-    // Silence still draws a 1 pt line, not nothing.
-    let quiet = WaveformEnvelope.path([0, 0], middle: 10, half: 8).boundingRect
-    #expect(quiet.height == 1 && quiet.width == 2)
-    // A hole for columns 3 and 4: two separate shapes, nothing drawn between them.
-    let holed = WaveformEnvelope.path(columns, middle: 10, half: 8) { !(3...4).contains($0) }
-    #expect(!holed.contains(CGPoint(x: 3.5, y: 10)) && !holed.contains(CGPoint(x: 4.5, y: 10)))
-    #expect(holed.contains(CGPoint(x: 1.5, y: 10)) && holed.contains(CGPoint(x: 5.5, y: 10)))
-    // The playhead's head: flat on top, its point at the bottom.
-    let head = WaveformEnvelope.head(at: 20, width: 9, height: 8)
-    #expect(head.boundingRect == CGRect(x: 15.5, y: 0, width: 9, height: 8))
-    #expect(head.contains(CGPoint(x: 16, y: 0.5)) && head.contains(CGPoint(x: 24, y: 0.5)) && !head.contains(CGPoint(x: 16, y: 7.5)))
-}
-
-/// An output's second line: format, length and the date with its year, so no column truncates the name.
-@MainActor @Test func outputDetailsIncludeTheYear() {
-    let date = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 11, day: 18))!
-    let output = Output(id: "o", name: "Line 6 · v1", url: URL(filePath: "/tmp/o.wav"), duration: 2.4, date: date)
-    let details = OutputsPane.details(output)
-    #expect(details.hasPrefix("WAV · 0:02 · "))
-    #expect(details.contains("2026") && details.contains("18"))
-}
-
 @Test func timelineKeepsPausesAndGaps() {
     func version(_ id: String, _ duration: Double) -> Version {
         Version(id: id, text: "x", voiceID: "me", tone: "Neutral", direction: false, seed: 1, duration: duration, createdAt: .now)
@@ -330,15 +299,11 @@ final class ScoreCounter: Sendable {
     #expect(first.files.map(\.path) == [movies.appending(path: "Launch-film/Launch-film.m4a").path])
     #expect(second.files[0].lastPathComponent == "Launch-film 2.m4a")
 
-    let outputs = projects.outputs(id)
-    #expect(outputs.map(\.name) == ["Launch-film 2", "Launch-film", "Line 2 · v1", "Line 1 · v1"])
-    #expect(outputs.map(\.format) == ["M4A", "M4A", "WAV", "WAV"])
-    #expect(outputs.map(\.usedBy) == [nil, nil, 2, 1])
-
-    // A line's chosen take can't be deleted.
-    projects.deleteOutput(outputs[3].id, in: id)
-    #expect(projects.project(id)?.lines[0].versions.count == 1)
+    #expect(projects.project(id)?.exports?.map(\.files.first) == [first.files[0].path, second.files[0].path])
     #expect(ProjectStore(root: root, exportsRoot: movies).project(id)?.exports?.count == 2)
+    // An export goes to the Trash from the Takes panel's Exports.
+    projects.deleteExport(try #require(projects.project(id)?.exports?.first?.id), in: id)
+    #expect(projects.project(id)?.exports?.count == 1 && !FileManager.default.fileExists(atPath: first.files[0].path))
 }
 
 // MARK: Script import
@@ -403,7 +368,7 @@ func realExportOfScratch() async throws {
     print("EXPORT duration \(result.duration) s, measured \(result.lufs.map { String($0) } ?? "–") LUFS")
     #expect(result.files.map(\.pathExtension) == ["m4a", "srt"])
     #expect(abs((result.lufs ?? 0) + 16) <= 1)
-    #expect(projects.outputs(scratch.id).first?.url == result.files[0])
+    #expect(projects.project(scratch.id)?.exports?.last?.files.first == result.files[0].path)
 }
 
 /// Renders and scores two lines in "My voice" with the real engine. Opt in: `VOCALCORD_E2E=1 swift test --filter realEngine`.
@@ -575,39 +540,36 @@ func realEngineRendersAndScoresTwoLines() async throws {
     #expect(projects.renderRow(ids[2], in: id, voices: voices) == nil)
 }
 
-@MainActor @Test func linesGetNamesTagsAndSplitIntoSentences() async throws {
+@MainActor @Test func takesGetNamesAndTags() async throws {
     let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
     let voiceID = voices.createVoice(name: "Me")
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
     let projects = ProjectStore(root: try tempFolder())
     let id = projects.create(name: "Names")
-    projects.addLines(["Hi there. I build tools. Here's what's new.", "One more."], to: id, voices: voices)
+    projects.addLines(["One.", "Two."], to: id, voices: voices)
     var lines = try #require(projects.project(id)?.lines)
+    for line in lines { _ = try await #require(projects.renderRow(line.id, in: id, voices: voices)).value }
+    _ = try await #require(projects.renderRow(lines[0].id, in: id, voices: voices)).value
+    lines = try #require(projects.project(id)?.lines)
+    let takes = lines[0].visibleVersions
+    #expect(takes.map { lines[0].title($0) } == ["Take 1", "Take 2"])
 
     // Names and tags are trimmed; empty clears them, and the title falls back to the number.
-    projects.renameLine("  Intro ", line: lines[0].id, in: id)
-    projects.setTag(" Hook", line: lines[0].id, in: id)
-    projects.setTag("Outro", line: lines[1].id, in: id)
-    projects.setPause(1, line: lines[0].id, in: id)
+    projects.renameTake("  Calm one ", version: takes[1].id, in: id)
+    projects.setTakeTag(" Hook", version: takes[1].id, in: id)
+    projects.setTakeTag("Intro", version: lines[1].versions[0].id, in: id)
     lines = try #require(projects.project(id)?.lines)
-    #expect(lines[0].title(1) == "Intro" && lines[1].title(2) == "Line 2" && lines[0].tag == "Hook")
-    #expect(projects.project(id)?.tags == ["Hook", "Outro"])
-    projects.renameLine(" ", line: lines[1].id, in: id)
-    projects.setTag("", line: lines[1].id, in: id)
-    #expect(projects.project(id)?.lines[1].name == nil && projects.project(id)?.lines[1].tag == nil)
-
-    // A line of one sentence stays as it is.
-    #expect(projects.splitIntoSentences(lines[1].id, in: id) == 1)
-    // Three sentences become three lines in its place: its voice and tag on each, its name on the first, its pause on
-    // the last.
-    #expect(projects.splitIntoSentences(lines[0].id, in: id) == 3)
+    #expect(lines[0].title(lines[0].versions[1]) == "Calm one" && lines[0].versions[1].tag == "Hook")
+    #expect(projects.project(id)?.tags == ["Hook", "Intro"])
+    projects.renameTake(" ", version: takes[1].id, in: id)
+    projects.setTakeTag("", version: takes[1].id, in: id)
     lines = try #require(projects.project(id)?.lines)
-    #expect(lines.map(\.text) == ["Hi there.", "I build tools.", "Here's what's new.", "One more."])
-    #expect(lines.prefix(3).map(\.name) == ["Intro", nil, nil] && lines.prefix(3).allSatisfy { $0.tag == "Hook" && $0.voiceID == voiceID })
-    #expect(lines.prefix(3).map(\.pauseAfter) == [ProjectStore.sentencePause, ProjectStore.sentencePause, 1])
+    #expect(lines[0].versions[1].name == nil && lines[0].versions[1].tag == nil && lines[0].title(lines[0].versions[1]) == "Take 2")
 
     // Saved and read back.
-    let reopened = ProjectStore(root: projects.root)
-    #expect(reopened.project(id)?.lines.first?.name == "Intro" && reopened.project(id)?.lines.first?.tag == "Hook")
+    #expect(ProjectStore(root: projects.root).project(id)?.lines[1].versions[0].tag == "Intro")
 }
 
 @Test func sentencesSplitAroundTagsWithoutBreakingThem() {
