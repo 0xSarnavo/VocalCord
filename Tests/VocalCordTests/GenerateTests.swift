@@ -529,12 +529,96 @@ func realEngineRendersAndScoresTwoLines() async throws {
     #expect(FileManager.default.fileExists(atPath: projects.audioURL(first, projectID: id).path))
 }
 
-@Test func lengthIsMeasuredAgainstOneTake() {
-    func line(_ text: String) -> Line { Line(text: text, voiceID: "me") }
+@Test func lengthCountsTheTakesRenderReadsTheScriptIn() {
+    func line(_ text: String, voice: String = "me") -> Line { Line(text: text, voiceID: voice) }
     // 299 + 1 space + 300 characters of speech = exactly one take; tags and empty lines don't count.
     let full = [line(String(repeating: "a", count: 299) + " [pause 1]"), line(""), line(String(repeating: "b", count: 300))]
-    #expect(OneTake.length(full).share == 1 && OneTake.length(full).seconds == 35)
-    let over = full + [line(String(repeating: "c", count: 299))]
-    #expect(OneTake.length(over).share > 1 && OneTake.length(over).seconds == 53)
-    #expect(OneTake.length([]).seconds == 0)
+    #expect(OneTake.length(full).share == 1 && OneTake.length(full).seconds == 35 && OneTake.length(full).takes == 1)
+    // One more line starts a second take; another voice is a take of its own.
+    #expect(OneTake.length(full + [line(String(repeating: "c", count: 299))]).takes == 2)
+    #expect(OneTake.length([line("Hi."), line("There.", voice: "other"), line("Again.")]).takes == 3)
+    #expect(OneTake.length([]).seconds == 0 && OneTake.length([]).takes == 0)
+    // Runs: same key and within the limit join; a nil key never does.
+    #expect(OneTake.runs([("a", 300), ("a", 299), ("a", 1), (nil, 5), ("b", 5)]) == [[0, 1], [2], [3], [4]])
+}
+
+@MainActor @Test func aRowRendersItsLineAloneAndRerendersIt() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me")
+    let wav = try tempFolder().appending(path: "take.wav")
+    try writeWAV(speechLike(seconds: 2, amplitude: 0.3, floor: 0)[...], rate: 24000, to: wav)
+    try voices.addTake(voiceID, file: wav, tone: "Neutral", transcript: "Hello.", issues: [])
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "Rows")
+    projects.addLines(["One.", "Two.", "[pause 1]"], to: id, voices: voices)
+    let ids = try #require(projects.project(id)?.lines.map(\.id))
+    let engine = try #require(voices.engine as? FakeEngine)
+
+    // Render on row 2: only that line, which plays when it's done.
+    let url = try await #require(projects.renderRow(ids[1], in: id, voices: voices)).value
+    #expect(engine.calls.all.filter { $0.hasPrefix("render:") } == ["render: Two."])
+    var lines = try #require(projects.project(id)?.lines)
+    #expect(lines.map(\.versions.count) == [0, 1, 0] && url == projects.chosenAudio(line: ids[1], in: id))
+
+    // Re-render on a line that's up to date: another take, chosen, the first kept.
+    _ = try await #require(projects.renderRow(ids[1], in: id, voices: voices)).value
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines[1].versions.count == 2 && lines[1].chosen == lines[1].versions[1].id)
+
+    // Two rows clicked at once: the second waits its turn, then both render.
+    let first = try #require(projects.renderRow(ids[0], in: id, voices: voices))
+    let second = try #require(projects.renderRow(ids[1], in: id, voices: voices))
+    _ = try await (first.value, second.value)
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines.map(\.versions.count) == [1, 3, 0])
+    // A line with no words has nothing to render.
+    #expect(projects.renderRow(ids[2], in: id, voices: voices) == nil)
+}
+
+@MainActor @Test func linesGetNamesTagsAndSplitIntoSentences() async throws {
+    let voices = VoiceStore(root: try tempFolder(), engine: FakeEngine(delay: .zero))
+    let voiceID = voices.createVoice(name: "Me")
+    let projects = ProjectStore(root: try tempFolder())
+    let id = projects.create(name: "Names")
+    projects.addLines(["Hi there. I build tools. Here's what's new.", "One more."], to: id, voices: voices)
+    var lines = try #require(projects.project(id)?.lines)
+
+    // Names and tags are trimmed; empty clears them, and the title falls back to the number.
+    projects.renameLine("  Intro ", line: lines[0].id, in: id)
+    projects.setTag(" Hook", line: lines[0].id, in: id)
+    projects.setTag("Outro", line: lines[1].id, in: id)
+    projects.setPause(1, line: lines[0].id, in: id)
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines[0].title(1) == "Intro" && lines[1].title(2) == "Line 2" && lines[0].tag == "Hook")
+    #expect(projects.project(id)?.tags == ["Hook", "Outro"])
+    projects.renameLine(" ", line: lines[1].id, in: id)
+    projects.setTag("", line: lines[1].id, in: id)
+    #expect(projects.project(id)?.lines[1].name == nil && projects.project(id)?.lines[1].tag == nil)
+
+    // A line of one sentence stays as it is.
+    #expect(projects.splitIntoSentences(lines[1].id, in: id) == 1)
+    // Three sentences become three lines in its place: its voice and tag on each, its name on the first, its pause on
+    // the last.
+    #expect(projects.splitIntoSentences(lines[0].id, in: id) == 3)
+    lines = try #require(projects.project(id)?.lines)
+    #expect(lines.map(\.text) == ["Hi there.", "I build tools.", "Here's what's new.", "One more."])
+    #expect(lines.prefix(3).map(\.name) == ["Intro", nil, nil] && lines.prefix(3).allSatisfy { $0.tag == "Hook" && $0.voiceID == voiceID })
+    #expect(lines.prefix(3).map(\.pauseAfter) == [ProjectStore.sentencePause, ProjectStore.sentencePause, 1])
+
+    // Saved and read back.
+    let reopened = ProjectStore(root: projects.root)
+    #expect(reopened.project(id)?.lines.first?.name == "Intro" && reopened.project(id)?.lines.first?.tag == "Hook")
+}
+
+@Test func sentencesSplitAroundTagsWithoutBreakingThem() {
+    #expect(Script.sentences("Everything is ready. [pause 0.4] Just press record.") == ["Everything is ready. [pause 0.4]", "Just press record."])
+    #expect(Script.sentences("[softly] Hi there. Bye.") == ["[softly] Hi there.", "Bye."])
+    // A span across two sentences keeps them together.
+    #expect(Script.sentences("[speed 80%]Slow one. Slow two.[/speed] Fast.") == ["[speed 80%]Slow one. Slow two.[/speed]", "Fast."])
+    #expect(Script.sentences("One sentence only.") == ["One sentence only."])
+}
+
+@Test func aTagKeepsItsColourWhateverItsCase() {
+    #expect(Theme.tagIndex("Intro") == Theme.tagIndex("intro"))
+    #expect(["Intro", "Hook", "Outro", "CTA", "Body"].allSatisfy { Theme.tags.indices.contains(Theme.tagIndex($0)) })
 }

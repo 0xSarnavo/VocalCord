@@ -45,7 +45,8 @@ The in-app agent can't load this skill: its short version of these rules is `Age
 
 ## Scripts (what to write)
 
-- One paragraph per line, up to 600 characters; a new line at a change of scene or tone.
+- One sentence per line, so each can be rendered, named, tagged and moved on its own. Render all still reads
+  consecutive lines in one voice as one take (up to 600 characters), so they share one flow.
 - Short sentences, one idea each, under 25 words, with a very short one now and then ("It shouldn't.").
 - Pauses come from punctuation: comma short, full stop longer, colon sets up, ellipsis adds weight (rarely),
   question mark rises. Longer gaps go in the line's pause after. Add `[pause]` for a beat after a key idea, not as

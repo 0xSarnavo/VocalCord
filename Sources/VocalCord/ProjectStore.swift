@@ -112,8 +112,16 @@ struct Line: Codable, Identifiable, Hashable, Sendable {
     var original: String?
     /// An agent added this line: it stays empty until the user accepts its proposal, and rejecting removes it.
     var added: Bool?
+    /// What the user calls the line, in Generate and on its clips in Timeline; nil shows "Line N".
+    var name: String?
+    /// A short label such as Intro or Hook that lines belonging together share; its colour (`Theme.tag`) marks them in
+    /// Generate and Timeline.
+    var tag: String?
 
     var chosenVersion: Version? { versions.first { $0.id == chosen } }
+
+    /// Its name, else "Line N".
+    func title(_ number: Int) -> String { name ?? "Line \(number)" }
 
     /// The tone the voice reads it in: its own, or Neutral while tones are hidden, so a tone set before (or by an agent)
     /// can't pick a take the user can't see.
@@ -194,6 +202,12 @@ struct Project: Codable, Identifiable, Hashable, Sendable {
 
     func line(_ id: String) -> Line? { lines.first { $0.id == id } }
     func version(_ id: String) -> Version? { lines.lazy.flatMap(\.versions).first { $0.id == id } }
+
+    /// The lines' tags, each once, in script order.
+    var tags: [String] {
+        var seen = Set<String>()
+        return lines.compactMap(\.tag).filter { seen.insert($0).inserted }
+    }
 
     /// Renders a timeline clip uses, now or in a pending proposal; they can't be deleted.
     var editedRenders: Set<String> { Set(((edit?.clips ?? []) + (editProposal?.edit.clips ?? [])).map(\.versionID)) }
@@ -371,6 +385,48 @@ final class ProjectStore {
         }
     }
 
+    /// An empty name goes back to "Line N".
+    func renameLine(_ name: String, line: String, in projectID: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        updateLine(projectID, line) { $0.name = trimmed.isEmpty ? nil : trimmed }
+    }
+
+    /// Nil or an empty tag removes it.
+    func setTag(_ tag: String?, line: String, in projectID: String) {
+        let trimmed = tag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        updateLine(projectID, line) { $0.tag = trimmed.isEmpty ? nil : trimmed }
+    }
+
+    /// Puts a line of several sentences in its place as one line per sentence, in its voice, tone and tag, the first
+    /// keeping its name and the last its pause; the others get a sentence's pause. The new lines need a render. Its
+    /// clips leave the timeline, as when it's deleted; its renders stay on disk. Returns how many lines it became.
+    @discardableResult
+    func splitIntoSentences(_ lineID: String, in projectID: String) -> Int {
+        guard let line = project(projectID)?.line(lineID), line.proposal == nil else { return 1 }
+        let sentences = Script.lines(line.text, by: .sentences)
+        guard sentences.count > 1 else { return 1 }
+        let new = sentences.enumerated().map { index, text in
+            Line(text: text, voiceID: line.voiceID, tone: line.tone,
+                 pauseAfter: index == sentences.count - 1 ? line.pauseAfter : Self.sentencePause,
+                 name: index == 0 ? line.name : nil, tag: line.tag)
+        }
+        update(projectID) { project in
+            guard let index = project.lines.firstIndex(where: { $0.id == lineID }) else { return }
+            project.lines.replaceSubrange(index...index, with: new)
+            project.edit?.clips.removeAll { $0.lineID == lineID }
+            project.edit?.kept[lineID] = nil
+        }
+        return new.count
+    }
+
+    /// Every line of several sentences, split as `splitIntoSentences` does.
+    func splitAllIntoSentences(_ projectID: String) {
+        for line in project(projectID)?.lines ?? [] { splitIntoSentences(line.id, in: projectID) }
+    }
+
+    /// Silence after a sentence that a split line ran on into the next: about the gap a full stop gets inside one take.
+    static let sentencePause = 0.3
+
     /// The line leaves the script and its clips the timeline; its renders stay on disk.
     func deleteLine(_ lineID: String, in projectID: String) {
         update(projectID) { project in
@@ -442,7 +498,7 @@ final class ProjectStore {
         let used = project.editedRenders.union(project.lines.flatMap(\.versions).compactMap(\.source))
         let renders = project.lines.enumerated().flatMap { number, line in
             line.visibleVersions.enumerated().map { index, version in
-                Output(id: version.id, name: "Line \(number + 1) · v\(index + 1)", url: audioURL(version, projectID: projectID),
+                Output(id: version.id, name: "\(line.title(number + 1)) · v\(index + 1)", url: audioURL(version, projectID: projectID),
                        duration: version.duration, date: version.createdAt,
                        usedBy: line.chosen == version.id || used.contains(version.id) ? number + 1 : nil)
             }
@@ -605,6 +661,31 @@ final class ProjectStore {
         }
     }
 
+    /// Every line left off the timeline goes on it, in one step to undo.
+    @discardableResult
+    func addAllLinesToEdit(_ projectID: String) -> Bool {
+        let missing = linesNotOnTimeline(projectID)
+        return editTimeline(projectID) { edit, project in
+            for line in project.lines where missing.contains(line.id) {
+                guard let version = line.chosenVersion else { continue }
+                try edit.insert(line: line.id, version: version.id, duration: version.duration, gapAfter: line.pauseAfter,
+                                script: project.lines.map(\.id))
+            }
+        }
+    }
+
+    /// Every line's new render is swapped in, or every line keeps its clips, in one step to undo.
+    @discardableResult
+    func answerAllNewRenders(swapIn: Bool, in projectID: String) -> Bool {
+        let renders = newRenders(projectID)
+        return editTimeline(projectID) { edit, project in
+            for line in project.lines {
+                guard let chosen = renders[line.id], let version = project.version(chosen) else { continue }
+                if swapIn { try edit.swapIn(line: line.id, version: chosen, duration: version.duration) } else { try edit.keep(line: line.id, version: chosen) }
+            }
+        }
+    }
+
     /// Lines re-rendered since their clips went on the timeline: line ID → the chosen version, unless the user kept their
     /// clips over that version.
     func newRenders(_ projectID: String) -> [String: String] {
@@ -727,16 +808,16 @@ final class ProjectStore {
         var text: String?
     }
 
-    /// A new version of one line on its own, a fresh take that may not match the others. Tests use it; the app renders
-    /// the whole script (`renderScript`). Nil while another render runs.
+    /// A new version of one line on its own, a fresh take that may not match the others. Tests use it; the app's rows use
+    /// `renderRow`, which waits its turn. Nil while another render runs.
     @discardableResult
     func rerender(_ lineID: String, in projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
         guard let line = project(projectID)?.lines.first(where: { $0.id == lineID }) else { return nil }
         return start([Job(lineID: line.id, tone: line.renderTone, choose: true)], in: projectID, voices: voices)
     }
 
-    /// Render: every line with words, read as one take per run of lines in one voice (`round`), so they sound like one
-    /// recording. A line of tags alone, such as a pause, has nothing to read and is left out. Each line gets a new
+    /// Render all: every line with words, read as one take per run of lines in one voice (`round`), so they sound like
+    /// one recording. A line of tags alone, such as a pause, has nothing to read and is left out. Each line gets a new
     /// chosen version; its earlier ones stay in its list. Nil while a render runs.
     @discardableResult
     func renderScript(_ projectID: String, voices: VoiceStore) -> Task<Void, Error>? {
@@ -841,16 +922,11 @@ final class ProjectStore {
                                   raw: parsed.marks.isEmpty ? nil : true)
             prepared.append(Rendered(index: index, job: job, version: version, parsed: parsed, take: take, voice: voice))
         }
-        var groups: [[Rendered]] = []
-        for item in prepared {
-            if let last = groups.last?.last, last.job.choose, item.job.choose, last.job.text == nil, item.job.text == nil,
-               last.voice.id == item.voice.id, last.take.id == item.take.id, last.job.tone == item.job.tone,
-               groups[groups.count - 1].reduce(item.parsed.spokenText.count) { $0 + $1.parsed.spokenText.count + 1 } <= OneTake.characters {
-                groups[groups.count - 1].append(item)
-            } else {
-                groups.append([item])
-            }
-        }
+        // A pending change renders on its own; other lines join their neighbours in the same voice, take and tone.
+        let groups = OneTake.runs(prepared.map { item in
+            (key: item.job.choose && item.job.text == nil ? "\(item.voice.id)|\(item.take.id)|\(item.job.tone)" : nil,
+             characters: item.parsed.spokenText.count)
+        }).map { $0.map { prepared[$0] } }
 
         func request(_ text: String, _ first: Rendered, stress: [String]) -> RenderLine {
             RenderLine(text: text, tone: first.job.tone, reference: voices.audioURL(first.take, voiceID: first.voice.id),
@@ -1056,6 +1132,8 @@ final class ProjectStore {
     /// A line committed for a render, waiting its turn.
     @MainActor private final class QueuedLine {
         let lineID: String, projectID: String, voices: VoiceStore
+        /// Renders a new version even when the line needs nothing (a row's Re-render).
+        var force = false
         private var result: Result<Void, Error>?
         private var waiters: [CheckedContinuation<Void, Error>] = []
 
@@ -1116,8 +1194,23 @@ final class ProjectStore {
         }
     }
 
-    private func enqueue(_ lineID: String, in projectID: String, voices: VoiceStore) -> QueuedLine {
+    /// The row's Render and Re-render: brings the line up to date as `commitLine(render: true)` does, or, when it already
+    /// is, renders a new version all the same. Either way it waits behind the render running now and the lines clicked
+    /// before it, and gives the chosen version's audio to play. A line rendered on its own is its own take, so it can
+    /// sound a little different from its neighbours; Render all reads them together.
+    func renderRow(_ lineID: String, in projectID: String, voices: VoiceStore) -> Task<URL?, Error>? {
+        guard let line = project(projectID)?.line(lineID), !Marks.parse(line.text).spokenTokens.isEmpty else { return nil }
+        if line.needsRender { return commitLine(lineID, in: projectID, voices: voices, render: true) }
+        let entry = enqueue(lineID, in: projectID, voices: voices, force: true)
+        return Task {
+            try await entry.wait()
+            return chosenAudio(line: lineID, in: projectID)
+        }
+    }
+
+    private func enqueue(_ lineID: String, in projectID: String, voices: VoiceStore, force: Bool = false) -> QueuedLine {
         let entry = lineQueue.first { $0.lineID == lineID } ?? QueuedLine(lineID: lineID, projectID: projectID, voices: voices)
+        entry.force = entry.force || force
         if !lineQueue.contains(where: { $0 === entry }) {
             lineQueue.append(entry)
             queued = lineQueue.map(\.lineID)
@@ -1135,7 +1228,7 @@ final class ProjectStore {
                 entry.finish(.success(()))
                 continue
             }
-            switch need(line) {
+            switch entry.force ? Need.voice : need(line) {
             case .nothing:
                 entry.finish(.success(()))
             case .existing(let versionID):
@@ -1307,12 +1400,32 @@ enum Script {
             .map { $0.replacing(/\s+/, with: " ").trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         guard split == .sentences else { return paragraphs }
-        return paragraphs.flatMap { paragraph in
-            let tokenizer = NLTokenizer(unit: .sentence)
-            tokenizer.string = paragraph
-            return tokenizer.tokens(for: paragraph.startIndex..<paragraph.endIndex)
-                .map { paragraph[$0].trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
+        return paragraphs.flatMap(sentences)
+    }
+
+    /// A paragraph's sentences, tags kept. Tags such as `[pause 0.4]` hide a sentence's end from the tokenizer, so it
+    /// reads the paragraph with them blanked out and the cuts go back on the text as written: a tag between two
+    /// sentences stays with the first, and one before the first sentence with it.
+    static func sentences(_ paragraph: String) -> [String] {
+        let characters = Array(paragraph)
+        var masked = characters
+        for match in paragraph.matches(of: /\[[^\[\]]*\]/) {
+            let from = paragraph.distance(from: paragraph.startIndex, to: match.range.lowerBound)
+            let to = paragraph.distance(from: paragraph.startIndex, to: match.range.upperBound)
+            for index in from..<to { masked[index] = " " }
         }
+        let reading = String(masked)
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = reading
+        // Never inside a [speed], [stress] or [say] span, which would leave each part half a tag.
+        let cuts = [0] + tokenizer.tokens(for: reading.startIndex..<reading.endIndex).dropFirst()
+            .map { reading.distance(from: reading.startIndex, to: $0.lowerBound) }
+            .filter { cut in
+                let before = String(characters[..<cut])
+                return before.matches(of: /\[(speed|stress|say)\b/).count == before.matches(of: /\[\/(speed|stress|say)\]/).count
+            }
+        return zip(cuts, cuts.dropFirst() + [characters.count])
+            .map { String(characters[$0..<$1]).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }

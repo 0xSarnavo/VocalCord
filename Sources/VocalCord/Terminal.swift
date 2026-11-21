@@ -23,9 +23,9 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         Script (Generate):
         - Write new lines or a whole script with add_lines, even into an empty project. Each line has text, \
         \(Tone.enabled ? "a voice, a tone" : "a voice") and a pause after it in seconds.
-        - Render in Generate reads the whole script as one take (consecutive lines in one voice, about 600 characters a \
-        take) and cuts it back into the lines, so they share one flow. Make a line a paragraph of up to 600 characters \
-        (about 35 seconds), and start a new line at a change of scene.
+        - Write one sentence per line: the user renders, names, tags and arranges each line on its own. Render all in \
+        Generate reads consecutive lines in one voice as one take (about 600 characters a take) and cuts it back into \
+        the lines, so they share one flow; a row's own Render or Re-render reads that line alone, as its own take.
         - Write for the ear: short sentences, one idea each, under 25 words, with a very short one now and then. Put \
         the word to stress at the end of its sentence. Use contractions. Write numbers, symbols and abbreviations as \
         spoken words.
@@ -35,15 +35,16 @@ enum Agent: String, CaseIterable, Identifiable, Sendable {
         - \(Tone.enabled ? toneRule : neutralRule)
         - Fix every warning and error that update_script, add_lines and get_script return.
         - Render only when the user asks. render_line renders one line on its own, as a separate take that may not \
-        match the rest; prefer asking the user to click Render, which reads the whole script again as one take.
+        match the rest; to fix one line, ask the user to click Re-render on its row, and for a voice that sounds the same \
+        throughout, Render all, which reads the whole script again as one take.
         - Fix low scores: read the scores, then rewrite or respell, and have the user render again. Low \
         is Like you under 70%, Words under 90%, Human more than 0.5 below the voice's own take, or a flag for pitch, \
         pace or a gap that drifts from the take. Each render comes out a little different, so rendering again can fix \
-        a bad one. Nothing renders again on its own: Render in Generate renders each line once, when the user clicks it.
+        a bad one. Nothing renders again on its own: a line renders only when the user clicks its Render or Render all.
         - Keep one voice across the script. Each line is a fresh take, so one can come out lower, faster or less like \
         the voice than the rest. After the user renders, read get_script: different_from_other_lines says how a line's \
         render stands out from the others. Tell the user which lines and why, in plain words, and suggest clicking \
-        Render again first, as each take differs. If a line keeps standing out, look at its text: a very short line, odd \
+        Re-render on that row first, as each take differs. If a line keeps standing out, look at its text: a very short line, odd \
         punctuation or a tag can change the delivery. You can't hear the audio, so say these are measurements and ask \
         the user to listen.
 

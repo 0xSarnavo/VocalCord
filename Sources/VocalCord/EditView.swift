@@ -486,20 +486,31 @@ struct EditorPane: View {
     /// One card per question: a new render to swap in, a line left off, and an agent's proposed changes.
     @ViewBuilder private var banners: some View {
         let renders = projects.newRenders(project.id), missing = Set(projects.linesNotOnTimeline(project.id))
-        let numbered = Array(project.lines.enumerated()).filter { renders[$0.element.id] != nil || missing.contains($0.element.id) }
-        if project.editProposal != nil || !numbered.isEmpty {
+        let numbered = Array(project.lines.enumerated())
+        let rerendered = numbered.filter { renders[$0.element.id] != nil }, left = numbered.filter { missing.contains($0.element.id) }
+        if project.editProposal != nil || !rerendered.isEmpty || !left.isEmpty {
             let rows = VStack(spacing: 8) {
                 if let proposal = project.editProposal { proposalBanner(proposal) }
-                ForEach(numbered, id: \.element.id) { index, line in
-                    if renders[line.id] != nil {
-                        banner("Line \(index + 1) has a new render.", icon: "arrow.triangle.2.circlepath", tint: Theme.amber) {
-                            Button("Keep my edit") { projects.keepEditedClip(line: line.id, in: project.id) }
-                            Button("Swap in") { projects.swapInNewRender(line: line.id, in: project.id) }
-                        }
-                    } else {
-                        banner("Line \(index + 1) isn\u{2019}t on the timeline.", icon: "plus.circle", tint: Theme.secondary) {
-                            Button("Add") { projects.addLineToEdit(line: line.id, in: project.id) }
-                        }
+                // One card per line, or one for them all once there are several (a script of sentences re-rendered).
+                if rerendered.count > 1 {
+                    banner("\(rerendered.count) lines have new renders: \(Self.titles(rerendered)).", icon: "arrow.triangle.2.circlepath",
+                           tint: Theme.amber) {
+                        Button("Keep my edits") { projects.answerAllNewRenders(swapIn: false, in: project.id) }
+                        Button("Swap all in") { projects.answerAllNewRenders(swapIn: true, in: project.id) }
+                    }
+                } else if let (index, line) = rerendered.first {
+                    banner("\(line.title(index + 1)) has a new render.", icon: "arrow.triangle.2.circlepath", tint: Theme.amber) {
+                        Button("Keep my edit") { projects.keepEditedClip(line: line.id, in: project.id) }
+                        Button("Swap in") { projects.swapInNewRender(line: line.id, in: project.id) }
+                    }
+                }
+                if left.count > 1 {
+                    banner("\(left.count) lines aren\u{2019}t on the timeline: \(Self.titles(left)).", icon: "plus.circle", tint: Theme.secondary) {
+                        Button("Add all") { projects.addAllLinesToEdit(project.id) }
+                    }
+                } else if let (index, line) = left.first {
+                    banner("\(line.title(index + 1)) isn\u{2019}t on the timeline.", icon: "plus.circle", tint: Theme.secondary) {
+                        Button("Add") { projects.addLineToEdit(line: line.id, in: project.id) }
                     }
                 }
             }
@@ -512,6 +523,15 @@ struct EditorPane: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(height: min(bannersHeight, max(120, height - 300)))
         }
+    }
+
+    /// "Intro, line 4 and line 7": the lines' titles, the banner's one line truncating a long list.
+    static func titles(_ lines: [(offset: Int, element: Line)]) -> String {
+        let names = lines.enumerated().map { position, item in
+            let title = item.element.title(item.offset + 1)
+            return position == 0 || item.element.name != nil ? title : title.lowercased()
+        }
+        return names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
     }
 
     private func banner(_ text: String, icon: String, tint: Color, @ViewBuilder actions: () -> some View) -> some View {
@@ -669,6 +689,7 @@ private struct Track: View {
     let onFocus: () -> Void
     @State private var trim: TrimDraft?
     @State private var moving: Move?
+    @State private var naming: LineNaming?
 
     private struct Move: Equatable {
         var clipID: String
@@ -703,6 +724,7 @@ private struct Track: View {
         .clipped()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Timeline")
+        .lineNaming($naming, in: project.id)
     }
 
     private static let space = "track"
@@ -741,8 +763,9 @@ private struct Track: View {
         let version = project.version(clip.versionID)
         let url = version.map { projects.audioURL($0, projectID: project.id) }
         let render = version?.duration ?? clip.end
-        let words = TrackLayout.words(version?.text ?? project.line(clip.lineID)?.text ?? "")
-        let name = number.map { "Line \($0)" } ?? "Line"
+        let line = project.line(clip.lineID)
+        let words = TrackLayout.words(version?.text ?? line?.text ?? "")
+        let name = number.flatMap { line?.title($0) } ?? "Line"
         var shown = clip
         if let trim, trim.clipID == clip.id { (shown.start, shown.end) = (trim.start, trim.end) }
         let strip = version.flatMap { version in
@@ -755,8 +778,8 @@ private struct Track: View {
         let handle = TrackLayout.trimZone(frame.width)
         // Hover is tracked over the clip and its trim zones together, so the grips stay while the pointer is on an edge.
         return Hovering { hovered in ZStack {
-            ClipBlock(clip: shown, name: name, words: words, selected: selected == clip.id, hovered: hovered, newRender: newRender,
-                      peaks: url.flatMap { peaks.peaks[$0] }, project: project, strip: strip)
+            ClipBlock(clip: shown, name: name, tag: line?.tag, words: words, selected: selected == clip.id, hovered: hovered,
+                      newRender: newRender, peaks: url.flatMap { peaks.peaks[$0] }, project: project, strip: strip)
                 .contentShape(.rect)
                 .onTapGesture { location in
                     onFocus()
@@ -784,6 +807,17 @@ private struct Track: View {
                 .accessibilityAction(named: "Delete") { projects.deleteClip(clip.id, in: project.id) }
                 .accessibilityAction(named: "Move earlier") { projects.moveClip(clip.id, to: index - 1, in: project.id) }
                 .accessibilityAction(named: "Move later") { projects.moveClip(clip.id, to: index + 1, in: project.id) }
+                // Rename and Tag change the line, so Generate shows them too; Delete takes only this clip off.
+                .contextMenu {
+                    if let line, let number {
+                        Button("Rename\u{2026}") { naming = LineNaming(line, number: number, kind: .rename) }
+                        LineTagMenu(projectID: project.id, line: line, tags: project.tags) {
+                            naming = LineNaming(line, number: number, kind: .tag)
+                        }
+                        Divider()
+                    }
+                    Button("Delete clip", role: .destructive) { projects.deleteClip(clip.id, in: project.id) }
+                }
             HStack(spacing: 0) {
                 trimHandle(clip, .start, render: render, width: handle, name: name)
                 Spacer(minLength: 0)
@@ -911,6 +945,8 @@ private struct Hovering<Content: View>: View {
 private struct ClipBlock: View {
     let clip: EditClip
     let name: String
+    /// Its line's tag: a stripe in the tag's colour along the top, and the tag after the name when there's room.
+    let tag: String?
     let words: String
     let selected: Bool
     /// The pointer is over the clip or one of its trim zones.
@@ -927,6 +963,7 @@ private struct ClipBlock: View {
             ZStack(alignment: .topLeading) {
                 shape.fill(selected ? Theme.selection : hovered ? Theme.control : Theme.fill)
                 Color.black.opacity(0.2).frame(height: ClipLayout.header)
+                if let tag { Theme.tag(tag).frame(height: 2) }
                 ClipWaveform(clip: clip, peaks: peaks ?? [], color: selected ? Theme.text.opacity(0.9) : Theme.secondary.opacity(0.85))
                     .frame(height: wave.height)
                     .padding(.top, wave.y)
@@ -943,9 +980,11 @@ private struct ClipBlock: View {
                     let trailing = newRender ? ClipLayout.badgeInset + ClipLayout.badge + ClipLayout.inset : ClipLayout.inset
                     // The first words only with room for a few letters and the ellipsis, never a sliver of one glyph.
                     let room = proxy.size.width - ClipLayout.inset - trailing - Self.nameWidth(name) - 6
+                    let tagRoom = tag.map { Self.nameWidth($0) + 16 } ?? 0
                     HStack(spacing: 6) {
-                        Text(name).font(.vcCaptionBold).foregroundStyle(Theme.text).layoutPriority(1)
-                        if room >= 24 { Text(words).font(.vcCaption).foregroundStyle(Theme.secondary) }
+                        Text(name).font(.vcCaptionBold).foregroundStyle(Theme.text).layoutPriority(2)
+                        if let tag, room >= tagRoom { TagChip(tag: tag).fixedSize().layoutPriority(1) }
+                        if room - tagRoom >= 24 { Text(words).font(.vcCaption).foregroundStyle(Theme.secondary) }
                     }
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1272,7 +1311,8 @@ private struct ClipSettings: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(number.map { "Line \($0)" } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text)
+                    Text(number.flatMap { line?.title($0) } ?? "Line").font(.vcTitle).foregroundStyle(Theme.text).lineLimit(1)
+                    if let tag = line?.tag { TagChip(tag: tag) }
                     Spacer(minLength: 0)
                     Text(([take, Tone.enabled ? version?.tone : nil].compactMap(\.self)).joined(separator: " \u{00B7} "))
                         .font(.vcCaption.monospacedDigit())

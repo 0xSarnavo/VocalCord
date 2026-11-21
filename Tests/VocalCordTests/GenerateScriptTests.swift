@@ -135,7 +135,7 @@ private func tokens(_ text: String) -> [ParsedLine.Token] { Marks.parse(text).to
     #expect(script == 698)
     // The tone column's 88 pt only while tones show.
     let tone = Tone.enabled ? 0.0 : 88
-    #expect(ScriptColumn.minimumWidth(jev: false) == 692 - tone && ScriptColumn.minimumWidth(jev: true) == 724 - tone)
+    #expect(ScriptColumn.minimumWidth(jev: false) == 738 - tone && ScriptColumn.minimumWidth(jev: true) == 770 - tone)
     #expect(ScriptColumn.minimumWidth(jev: true) + 16 <= script || Tone.enabled)
 }
 

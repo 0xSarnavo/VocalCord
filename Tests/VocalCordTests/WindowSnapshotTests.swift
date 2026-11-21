@@ -44,8 +44,13 @@ private let snapshots = URL(filePath: ProcessInfo.processInfo.environment["WINDO
                               duration: duration, createdAt: .now, scores: scores, words: words)
         try writeWAV(speechLike(seconds: duration, amplitude: 0.5, floor: 0.005)[...], rate: 24000,
                      to: renders.appending(path: "\(version.id).wav"))
-        line.versions = [version]
-        line.chosen = version.id
+        // Names and tags on a few lines; the last one not rendered yet, so its row offers Render.
+        line.name = index == 0 ? "Opening" : nil
+        line.tag = [0: "Intro", 1: "Intro", 3: "Hook", 4: "Hook"][index]
+        if index < texts.count - 1 {
+            line.versions = [version]
+            line.chosen = version.id
+        }
         project.lines.append(line)
     }
     try JSONEncoder().encode(project).write(to: root.appending(path: "\(project.id)/project.json"))

@@ -245,6 +245,35 @@ private func clip(_ id: String, line: String, length: Double = 2, gap: Double = 
     #expect(undos == ProjectStore.undoLimit)
 }
 
+@MainActor @Test func severalLinesAreAddedOrSwappedInAtOnce() async throws {
+    let (projects, voices, id) = try await editFixture()
+    projects.startEdit(id)
+    let lines = try #require(projects.project(id)?.lines)
+    let first = try #require(projects.project(id)?.edit?.clips[0])
+    #expect(projects.splitClip(first.id, at: 1, in: id))
+    projects.rerender(lines[0].id, in: id, voices: voices)
+    try await finishRender(projects)
+    projects.rerender(lines[1].id, in: id, voices: voices)
+    try await finishRender(projects)
+    #expect(projects.newRenders(id).count == 2)
+    // Swap all in: each line's clips become its new render, in one step to undo.
+    #expect(projects.answerAllNewRenders(swapIn: true, in: id))
+    #expect(projects.newRenders(id).isEmpty && projects.project(id)?.edit?.clips.count == 3)
+    projects.undoEdit(id)
+    #expect(projects.newRenders(id).count == 2)
+    #expect(projects.answerAllNewRenders(swapIn: false, in: id) && projects.newRenders(id).isEmpty)
+
+    // Two new lines rendered after the timeline was made: Add all puts both on, in script order.
+    projects.addLines(["Four.", "Five."], to: id, voices: voices)
+    for line in try #require(projects.project(id)?.lines.suffix(2)) {
+        try await projects.rerender(line.id, in: id, voices: voices)?.value
+    }
+    #expect(projects.linesNotOnTimeline(id).count == 2)
+    #expect(projects.addAllLinesToEdit(id) && projects.linesNotOnTimeline(id).isEmpty)
+    let order = try #require(projects.project(id)?.edit?.clips.map(\.lineID))
+    #expect(Array(order.suffix(2)) == projects.project(id)?.lines.suffix(2).map(\.id))
+}
+
 @MainActor @Test func newRendersAskBeforeReplacingCuts() async throws {
     let (projects, voices, id) = try await editFixture()
     projects.startEdit(id)

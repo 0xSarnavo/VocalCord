@@ -36,6 +36,32 @@ enum Theme {
     /// The keyboard focus ring.
     static let focus = Color.white.opacity(0.7)
     static let amber = Color(hex: 0xF2B544)
+
+    /// Line tags: muted hues, none amber (warnings) or red (Record).
+    static let tags = ([0x7FA7E8, 0x7CC9A0, 0xB79BE6, 0xE597B8, 0x6CC4CC, 0xD9A37A] as [UInt32]).map(Color.init(hex:))
+
+    /// A tag's colour, picked from its text, so it's the same in every tab and every launch.
+    static func tag(_ name: String) -> Color { tags[tagIndex(name)] }
+
+    static func tagIndex(_ name: String) -> Int {
+        name.lowercased().unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7FFF_FFFF } % tags.count
+    }
+}
+
+/// A line's tag as a small tinted label, in Generate's rows and on Timeline's clips.
+struct TagChip: View {
+    let tag: String
+
+    var body: some View {
+        Text(tag)
+            .font(.vcCaption)
+            .foregroundStyle(Theme.tag(tag))
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Theme.tag(tag).opacity(0.16), in: .rect(cornerRadius: Radius.chip))
+            .accessibilityLabel("Tag \(tag)")
+    }
 }
 
 /// Corner radii. Panes have none: they run edge to edge and the window clips them. Radius follows height

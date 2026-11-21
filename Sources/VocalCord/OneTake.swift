@@ -8,13 +8,32 @@ enum OneTake {
     /// About how long `characters` of speech last.
     static let seconds = 35.0
 
-    /// The script's length against one take, from its spoken characters (what the take limit counts): about how many
-    /// seconds, and the share of one take (over 1 needs more than one take). shortcut: counts every line as one voice;
-    /// lines in different voices are separate takes anyway.
-    static func length(_ lines: [Line]) -> (seconds: Int, share: Double) {
-        let spoken = lines.map { Marks.parse($0.text).spokenText.count }.filter { $0 > 0 }
-        let share = Double(spoken.reduce(max(0, spoken.count - 1), +)) / Double(characters)
-        return (Int((share * seconds).rounded()), share)
+    /// Which consecutive items are read as one take: the same key (voice, take and tone), joined with a space and still
+    /// within `characters`. A nil key never joins. Index runs, in order. Render (`ProjectStore.round`) and the length
+    /// meter both group this way.
+    static func runs(_ items: [(key: String?, characters: Int)]) -> [[Int]] {
+        var runs: [[Int]] = [], used = 0
+        for (index, item) in items.enumerated() {
+            if let key = item.key, let last = runs.last?.last, items[last].key == key, used + 1 + item.characters <= characters {
+                runs[runs.count - 1].append(index)
+                used += 1 + item.characters
+            } else {
+                runs.append([index])
+                used = item.characters
+            }
+        }
+        return runs
+    }
+
+    /// The lines with words: about how long they last (from their spoken characters, what the take limit counts), how
+    /// many takes Render reads them in, and the share of one take they fill (meaningful while that's one).
+    static func length(_ lines: [Line]) -> (seconds: Int, takes: Int, share: Double) {
+        let spoken = lines.compactMap { line -> (key: String?, characters: Int)? in
+            let count = Marks.parse(line.text).spokenText.count
+            return count > 0 ? ("\(line.voiceID)|\(line.renderTone)", count) : nil
+        }
+        let share = Double(spoken.reduce(max(0, spoken.count - 1)) { $0 + $1.characters }) / Double(characters)
+        return (Int((share * seconds).rounded()), runs(spoken).count, share)
     }
 
     static let rate = 24000.0

@@ -212,7 +212,7 @@ struct ProjectsSidebar: View {
 enum ScriptColumn {
     /// The status bar and the line number.
     static let number: CGFloat = 24
-    static let text: CGFloat = 136
+    static let text: CGFloat = 116
     static let voice: CGFloat = 100
     /// None while tones are hidden (`Tone.enabled`).
     static var tone: CGFloat { Tone.enabled ? 88 : 0 }
@@ -221,8 +221,10 @@ enum ScriptColumn {
     static let human: CGFloat = 48
     static let words: CGFloat = 56
     static let jev: CGFloat = 32
-    static let version: CGFloat = 76
-    static let gutter: CGFloat = 28
+    static let version: CGFloat = 86
+    /// The row's Render or Re-render (Apply when only marks changed), its spinner, or Accept and Reject for a pending
+    /// change.
+    static let action: CGFloat = 84
     /// From the pane's edges to the first and last columns.
     static let edge: CGFloat = 16
     /// A number's distance from its column's right edge.
@@ -232,10 +234,10 @@ enum ScriptColumn {
     /// Between the end of the text and the Voice column.
     static let textGap: CGFloat = 8
 
-    /// The narrowest pane that shows every column: 692 pt, or 724 with Jev's, inside the 742 a 1200 pt window leaves;
-    /// 88 less while tones are hidden.
+    /// The narrowest pane that shows every column: 738 pt, or 770 with Jev's; 88 less while tones are hidden, so with
+    /// them hidden every column fits beside the Terminal at its narrowest in a 1200 pt window.
     static func minimumWidth(jev: Bool) -> CGFloat {
-        let fixed = number + voice + tone + pause + like + human + words + (jev ? self.jev : 0) + version + gutter
+        let fixed = number + voice + tone + pause + like + human + words + (jev ? self.jev : 0) + version + action
         return edge * 2 + fixed + text
     }
 }
@@ -279,6 +281,7 @@ struct ScriptPane: View {
     @State private var comparing: [String]?
     @State private var customPace = false
     @State private var customValue = 150.0
+    @State private var confirmingSplit = false
     /// The table's width, to tell when it's too narrow for every column.
     @State private var tableWidth: CGFloat = 0
 
@@ -320,6 +323,11 @@ struct ScriptPane: View {
             }
             bottomBar
         }
+        .confirmationDialog("Split every line into sentences?", isPresented: $confirmingSplit, titleVisibility: .visible) {
+            Button("Split into sentences") { projects.splitAllIntoSentences(project.id) }
+        } message: {
+            Text(splitMessage)
+        }
         .sheet(isPresented: Binding(present: $splitText)) {
             SplitSheet(text: splitText ?? "") { lines in projects.addLines(lines, to: project.id, voices: voices) }
         }
@@ -340,6 +348,17 @@ struct ScriptPane: View {
     }
 
     private var renderable: [Line] { project.lines.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty } }
+
+    /// Lines of more than one sentence, which Split into sentences breaks up.
+    private var splittable: [Line] { project.lines.filter { $0.proposal == nil && Script.lines($0.text, by: .sentences).count > 1 } }
+
+    private var splitMessage: String {
+        let lines = splittable
+        let count = lines.map { Script.lines($0.text, by: .sentences).count }.reduce(0, +)
+        let onTimeline = lines.contains { line in project.edit?.clips.contains { $0.lineID == line.id } ?? false }
+        return "\(lines.count) \(lines.count == 1 ? "line becomes" : "lines become") \(count) lines, one sentence each, which need a render."
+            + (onTimeline ? " Their clips leave the timeline." : "") + " Their old renders stay on disk."
+    }
 
     private var table: some View {
         let minimum = Column.minimumWidth(jev: jev.added)
@@ -369,10 +388,11 @@ struct ScriptPane: View {
             // their separators run to both edges; the rows carry their own inset.
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
+                    let tags = project.tags
                     ForEach(Array(project.lines.enumerated()), id: \.element.id) { index, line in
                         LineRow(projectID: project.id, line: line, number: index + 1, isLast: index == project.lines.count - 1,
                                 lit: LineRow.lit(lit, in: line), paceTarget: project.paceTarget,
-                                onCompare: { comparing = [line.id] })
+                                onCompare: { comparing = [line.id] }, tags: tags)
                             .equatable()
                         Theme.rule.frame(height: 1)
                     }
@@ -514,7 +534,8 @@ struct ScriptPane: View {
                 .help("How many of the words were heard as written")
             if jev.added { Text("Jev").frame(width: Column.jev).help("Jev's checks of the line") }
             Text("Version").padding(.leading, Column.leading).frame(width: Column.version, alignment: .leading)
-            Color.clear.frame(width: Column.gutter)
+                .help("Click a version to preview it; the arrows pick another")
+            Color.clear.frame(width: Column.action)
         }
         .font(.vcCaptionBold)
         .foregroundStyle(Theme.secondary)
@@ -523,13 +544,18 @@ struct ScriptPane: View {
         .frame(height: 28)
     }
 
-    /// One bar pinned under the script, in Table and Read alike: adding lines on the left (ghost buttons, their labels on
-    /// the pane's 16 pt text edge), the script's length against one take and Render on the right.
+    /// One bar pinned under the script, in Table and Read alike: adding lines and splitting them into sentences on the left
+    /// (ghost buttons, their labels on the pane's 16 pt text edge), the script's length against one take and Render all
+    /// on the right.
     private var bottomBar: some View {
         HStack(spacing: 8) {
             Button { projects.addLines([""], to: project.id, voices: voices) } label: { Label("Add line", systemImage: "plus") }
             Button("Paste…") { splitText = NSPasteboard.general.string(forType: .string) ?? "" }
             Button("Import…") { importing = true }
+            if !splittable.isEmpty {
+                Button("Split into sentences…") { confirmingSplit = true }
+                    .help("Make each sentence its own line, to render, name and tag on its own")
+            }
             Spacer(minLength: 8)
             if !renderable.isEmpty { lengthMeter }
             renderButton
@@ -541,8 +567,8 @@ struct ScriptPane: View {
         .overlay(alignment: .top) { Theme.line.frame(height: 1) }
     }
 
-    /// Render (⌘R also works from the menu bar), or its progress and Cancel while it runs. The count says how many lines
-    /// changed since their render; Render reads the whole script as one take either way.
+    /// Render all (⌘R also works from the menu bar), or its progress and Cancel while it runs. Each row has its own
+    /// Render too; this one reads the whole script as one take, so every line sounds like one recording.
     @ViewBuilder private var renderButton: some View {
         if let progress = projects.progress {
             HStack(spacing: 8) {
@@ -554,39 +580,34 @@ struct ScriptPane: View {
             }
             .frame(height: VCSize.s.height)
         } else {
-            let changed = project.lines.count(where: \.needsRender)
-            Button {
-                projects.renderScript(project.id, voices: voices)
-            } label: {
-                HStack(spacing: 6) {
-                    Text(changed == 0 && !renderable.isEmpty ? "Render again" : "Render")
-                    if changed > 0 { Text("\(changed)").opacity(0.6).monospacedDigit() }
-                }
-            }
-            .buttonStyle(.vc(.primary, .s))
-            .disabled(renderable.isEmpty || voices.busy != nil)
-            .help(voices.busy != nil ? "A voice check or audition is running"
-                  : "Render the whole script as one take, so every line sounds like one recording (⌘R)")
-            .accessibilityLabel(changed == 0 ? "Render the script again" : "Render the script, \(changed) \(changed == 1 ? "line" : "lines") changed")
+            Button("Render all") { projects.renderScript(project.id, voices: voices) }
+                .buttonStyle(.vc(.primary, .s))
+                .disabled(renderable.isEmpty || voices.busy != nil)
+                .help(voices.busy != nil ? "A voice check or audition is running"
+                      : "Render the whole script as one take, so every line sounds like one recording (⌘R)")
         }
     }
 
-    /// Past one take the voice reads the script in parts, which can sound less alike: the bar turns amber and says how
-    /// much to cut.
+    /// The script's length and how many takes Render reads it in. One take shows how full it is; past it, lines next to
+    /// each other are still read together up to about 35 s a take, and a line never splits unless it alone runs over
+    /// (its own warning says so). Only a one-piece voiceover needs to stay in one take to sound fully alike.
     private var lengthMeter: some View {
-        let length = OneTake.length(project.lines), over = length.share > 1
-        let limit = Int(OneTake.seconds)
-        let explanation = over ? "About \(length.seconds) seconds: more than one take. Cut about \(length.seconds - limit) seconds to keep one consistent voice."
-            : "About \(length.seconds) of \(limit) seconds: the script is read as one take."
+        let length = OneTake.length(project.lines), limit = Int(OneTake.seconds)
+        let explanation = length.takes == 1
+            ? "About \(length.seconds) of \(limit) seconds: the script is read as one take."
+            : "About \(length.seconds) seconds, read in \(length.takes) takes of up to \(limit) seconds each. Every line is read whole; "
+                + "lines in different takes can sound slightly different, which matters only for one continuous voiceover."
         return HStack(spacing: 8) {
-            ZStack(alignment: .leading) {
-                Rectangle().fill(Theme.fill)
-                Rectangle().fill(over ? Theme.amber : Theme.secondary).frame(width: 64 * min(1, length.share))
+            if length.takes == 1 {
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(Theme.fill)
+                    Rectangle().fill(Theme.secondary).frame(width: 64 * min(1, length.share))
+                }
+                .frame(width: 64, height: 4)
             }
-            .frame(width: 64, height: 4)
-            Text(over ? "\(length.seconds) of \(limit) s \u{00B7} cut \(length.seconds - limit) s" : "\(length.seconds) of \(limit) s")
+            Text(length.takes == 1 ? "\(length.seconds) of \(limit) s" : "\(length.seconds) s \u{00B7} \(length.takes) takes")
                 .font(.vcCaption.monospacedDigit())
-                .foregroundStyle(over ? Theme.amber : Theme.secondary)
+                .foregroundStyle(Theme.secondary)
         }
         .padding(.trailing, 4)
         .help(explanation)
@@ -610,11 +631,15 @@ struct LineRow: View {
     /// The project's pace target, for the pace notes.
     let paceTarget: Double?
     let onCompare: () -> Void
+    /// The project's tags, for the Tag menu.
+    var tags: [String] = []
     @State private var hovered = false
     @State private var versionHovered = false
     /// Applying marks takes a moment; a spinner shows only when it takes longer, so the usual case doesn't flash.
     @State private var slowApply = false
     @State private var confirmingDelete = false
+    @State private var confirmingSplit = false
+    @State private var naming: LineNaming?
 
     /// The bar beside a line's number: nothing while its render is current, grey while it has none or its text changed
     /// since, amber when the chosen version failed a check.
@@ -649,8 +674,7 @@ struct LineRow: View {
     var body: some View {
         let version = line.chosenVersion
         let scores = version?.scores
-        // A pending change takes room from the version cell for its Accept and Reject buttons.
-        let decision: CGFloat = line.proposal == nil ? 0 : 22
+        let sentences = Script.lines(line.text, by: .sentences).count
         let isApplying = projects.applying.contains(line.id)
         let playing = preview.currentLine == line.id
         // Top-aligned: in a tall line the number and values sit level with the text's first line, each in a band one
@@ -663,6 +687,7 @@ struct LineRow: View {
                 .frame(width: Column.number, height: VCSize.s.height, alignment: .leading)
             // The script rules the line breaks show under its text, for the pending change while there is one.
             VStack(alignment: .leading, spacing: 4) {
+                if line.name != nil || line.tag != nil { label }
                 if let proposal = line.proposal {
                     ProposalText(line: line, proposal: proposal)
                 } else {
@@ -696,7 +721,7 @@ struct LineRow: View {
             ScoreCell(value: scores.map { "\($0.words)%" }, flag: version?.wordsFlag,
                       help: scores.map { "Heard: \u{201C}\($0.heard)\u{201D}" }).frame(width: Column.words)
             if jev.added { JevCell(subject: JevSubject(line)).frame(width: Column.jev) }
-            versionControl(playingRow: playing).frame(width: Column.version - decision)
+            versionControl(playingRow: playing).frame(width: Column.version)
             Group {
                 if line.proposal != nil {
                     DecisionButtons(label: line.added == true ? "new line \(number)" : "change to line \(number)",
@@ -706,7 +731,7 @@ struct LineRow: View {
                     statusCell
                 }
             }
-            .frame(width: Column.gutter + decision, alignment: .trailing)
+            .frame(width: Column.action, alignment: .trailing)
             }
             .frame(height: VCSize.s.height)
         }
@@ -737,16 +762,28 @@ struct LineRow: View {
                 Button("Compare styles…", action: onCompare).disabled(line.text.isEmpty || projects.progress != nil)
                 Divider()
             }
+            Button("Rename…") { naming = LineNaming(line, number: number, kind: .rename) }
+            LineTagMenu(projectID: projectID, line: line, tags: tags) { naming = LineNaming(line, number: number, kind: .tag) }
+            Button("Split into sentences…") { confirmingSplit = true }
+                .disabled(line.proposal != nil || sentences < 2)
+            Divider()
             Button("Move up") { projects.moveLine(line.id, by: -1, in: projectID) }.disabled(number == 1)
             Button("Move down") { projects.moveLine(line.id, by: 1, in: projectID) }.disabled(isLast)
             Divider()
             Button("Delete line…", role: .destructive) { confirmingDelete = true }
         }
-        .confirmationDialog("Delete line \(number)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .confirmationDialog("Delete \(line.title(number))?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete line", role: .destructive) { projects.deleteLine(line.id, in: projectID) }
         } message: {
             Text("Its clips leave the timeline. Its renders stay on disk.")
         }
+        .confirmationDialog("Split \(line.title(number)) into \(sentences) lines?",
+                            isPresented: $confirmingSplit, titleVisibility: .visible) {
+            Button("Split into sentences") { projects.splitIntoSentences(line.id, in: projectID) }
+        } message: {
+            Text("One sentence a line, each to render on its own. Its clips leave the timeline; its renders stay on disk.")
+        }
+        .lineNaming($naming, in: projectID)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.accessibilityLabel(line, number: number))
     }
@@ -814,6 +851,10 @@ struct LineRow: View {
             HStack(spacing: 0) {
                 Button { player.toggle(url) } label: {
                     HStack(spacing: 4) {
+                        Image(systemName: playing ? "stop.fill" : "play.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(playing || versionHovered ? Theme.text : Theme.secondary)
+                            .frame(width: 8)
                         Text("v\(index + 1) of \(visible.count)").lineLimit(1).minimumScaleFactor(0.8)
                         if version.direction {
                             Image(systemName: "text.bubble").font(.system(size: 10)).foregroundStyle(Theme.secondary)
@@ -862,9 +903,8 @@ struct LineRow: View {
         (["v\(index + 1)"] + (Tone.enabled ? [version.tone] : []) + (version.direction ? ["direction"] : [])).joined(separator: " · ")
     }
 
-    /// What the gutter shows: a spinner while the line renders (or applies for a while), a clock while it waits for
-    /// the render ahead of it, the Apply button when only its marks changed, else nothing: voices render from the
-    /// toolbar's Render, the whole script at once.
+    /// What the action cell shows: a spinner while the line renders (or applies for a while), a clock while it waits for
+    /// the render ahead of it, Apply when only its marks changed, else Render (no render reads its text) or Re-render.
     enum Status: Equatable {
         case rendering, waiting, applying
         /// Only marks changed: applying them needs no render.
@@ -898,22 +938,55 @@ struct LineRow: View {
             // Kept as is while marks apply, so the usual quick apply doesn't flash a new state.
             applyButton
         case .render:
-            Color.clear.frame(width: VCSize.s.height, height: VCSize.s.height)
+            renderButton
         }
     }
 
     /// Applies changed pauses and speeds without the voice; edits usually do this on Return already.
     private var applyButton: some View {
-        Button {
+        Button("Apply") {
             guard !projects.applying.contains(line.id) else { return }
             applyEdit()
-        } label: {
-            Image(systemName: "arrow.clockwise").foregroundStyle(Theme.text)
         }
-        .buttonStyle(.icon(.s))
+        .buttonStyle(.vc(.ghost, .s))
         .disabled(line.text.trimmingCharacters(in: .whitespaces).isEmpty)
         .help("Apply the changed pauses and speeds, without a new render")
         .accessibilityLabel("Apply changes to line \(number)")
+    }
+
+    /// Renders this line alone, then plays it: Render while no render reads its text, Re-render for another take of it.
+    /// It waits its turn behind a render that's running.
+    private var renderButton: some View {
+        let first = line.needsRender
+        let spoken = !Marks.parse(line.text).spokenTokens.isEmpty
+        return Button(first ? "Render" : "Re-render") {
+            guard let task = projects.renderRow(line.id, in: projectID, voices: voices) else { return }
+            Task {
+                do {
+                    if let url = try await task.value { player.play(url, from: 0) }
+                } catch is CancellationError {
+                } catch {
+                    if projects.error == nil { projects.error = "Render failed. \(error.localizedDescription)" }
+                }
+            }
+        }
+        .buttonStyle(.vc(first ? .secondary : .ghost, .s))
+        .disabled(!spoken || voices.busy != nil)
+        .help(!spoken ? "Write the line first" : voices.busy != nil ? "A voice check or audition is running"
+              : first ? "Render this line on its own, then play it" : "Render another take of this line, then play it. The earlier one stays under Version.")
+        .accessibilityLabel(first ? "Render line \(number)" : "Re-render line \(number)")
+    }
+
+    /// The line's name and tag, above its text.
+    private var label: some View {
+        HStack(spacing: 6) {
+            if let name = line.name {
+                Text(name).font(.vcCaptionBold).foregroundStyle(Theme.text).lineLimit(1)
+            }
+            if let tag = line.tag { TagChip(tag: tag) }
+        }
+        .onTapGesture(count: 2) { naming = LineNaming(line, number: number, kind: .rename) }
+        .help("Double-click to rename")
     }
 
     // MARK: Editing and pace
@@ -963,12 +1036,82 @@ struct LineRow: View {
     }
 }
 
+/// A Rename or New tag alert for a line, from Generate's rows or Timeline's clips; both change the line, so its name and
+/// tag show the same in both tabs.
+struct LineNaming: Identifiable, Equatable {
+    enum Kind { case rename, tag }
+    var lineID: String
+    /// "Line 3", the placeholder and the default title.
+    var number: Int
+    var title: String
+    var name: String
+    var kind: Kind
+    var id: String { "\(lineID)-\(kind)" }
+
+    init(_ line: Line, number: Int, kind: Kind) {
+        (lineID, self.number, title, name, self.kind) = (line.id, number, line.title(number), line.name ?? "", kind)
+    }
+}
+
+private struct LineNamingAlert: ViewModifier {
+    @Environment(ProjectStore.self) private var projects
+    @Binding var request: LineNaming?
+    let projectID: String
+    @State private var text = ""
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: request) { text = request?.kind == .rename ? request?.name ?? "" : "" }
+            .alert(request?.kind == .tag ? "New tag" : "Rename \(request?.title ?? "line")", isPresented: Binding(present: $request),
+                   presenting: request) { request in
+                TextField(request.kind == .tag ? "Intro, Hook…" : "Line \(request.number)", text: $text)
+                Button(request.kind == .tag ? "Add tag" : "Rename") {
+                    if request.kind == .tag {
+                        projects.setTag(text, line: request.lineID, in: projectID)
+                    } else {
+                        projects.renameLine(text, line: request.lineID, in: projectID)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { request in
+                Text(request.kind == .tag ? "A short label lines share, shown in Generate and Timeline."
+                     : "Leave it empty to show \u{201C}Line \(request.number)\u{201D}.")
+            }
+    }
+}
+
+extension View {
+    func lineNaming(_ request: Binding<LineNaming?>, in projectID: String) -> some View {
+        modifier(LineNamingAlert(request: request, projectID: projectID))
+    }
+}
+
+/// A line's Tag menu: the project's tags to pick from, a new one, or none.
+struct LineTagMenu: View {
+    @Environment(ProjectStore.self) private var projects
+    let projectID: String
+    let line: Line
+    let tags: [String]
+    let onNew: () -> Void
+
+    var body: some View {
+        Menu("Tag") {
+            ForEach(tags, id: \.self) { tag in
+                Toggle(tag, isOn: Binding(get: { line.tag == tag }, set: { projects.setTag($0 ? tag : nil, line: line.id, in: projectID) }))
+            }
+            if !tags.isEmpty { Divider() }
+            Button("New tag…", action: onNew)
+            if line.tag != nil { Button("Remove tag") { projects.setTag(nil, line: line.id, in: projectID) } }
+        }
+    }
+}
+
 extension LineRow: Equatable {
     /// The row's values without `onCompare`, which only captures the pane's state. The read-along clock rebuilds every
     /// row on each tick; with this only the playing one, whose `lit` changed, is redrawn.
     nonisolated static func == (a: LineRow, b: LineRow) -> Bool {
         a.projectID == b.projectID && a.line == b.line && a.number == b.number && a.isLast == b.isLast && a.lit == b.lit
-            && a.paceTarget == b.paceTarget
+            && a.paceTarget == b.paceTarget && a.tags == b.tags
     }
 }
 
